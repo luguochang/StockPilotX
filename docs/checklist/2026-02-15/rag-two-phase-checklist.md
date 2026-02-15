@@ -69,3 +69,10 @@
   - [x] Add upload asset persistence and dedupe by file hash.
   - [x] Add docs-center attachment upload entry and align with RAG workflow.
   - [x] Run backend + frontend self-test and update docs.
+
+- [x] Batch-10: Upload-immediate activation (no review approval required)
+  - [x] Remove `needs_review` gate in `docs_upload` and `docs_index` persistence.
+  - [x] Force persisted RAG chunk `effective_status="active"` for uploaded/indexed docs.
+  - [x] Add regression assertions for "upload and index becomes active immediately".
+  - [x] Run backend tests and frontend build self-test.
+  - [x] Update checklist/log/report and commit batch change.

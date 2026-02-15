@@ -1834,7 +1834,9 @@ class AShareAgentService:
             doc_id=doc_id,
             filename=filename,
             parse_confidence=float(doc.get("parse_confidence", 0.0)),
-            needs_review=bool(doc.get("parse_confidence", 0.0) < 0.7),
+            # Product requirement: upload should be effective immediately.
+            # Keep parse_confidence for observability, but do not block by review gate.
+            needs_review=False,
         )
         return result
 
@@ -1847,7 +1849,8 @@ class AShareAgentService:
                 doc_id=doc_id,
                 filename=doc.get("filename", ""),
                 parse_confidence=float(doc.get("parse_confidence", 0.0)),
-                needs_review=bool(float(doc.get("parse_confidence", 0.0)) < 0.7),
+                # Product requirement: index completion should not create review gate.
+                needs_review=False,
             )
             # 文档索引完成后，把 chunk 持久化到 RAG 资产库，供后续检索与治理复用。
             self._persist_doc_chunks_to_rag(doc_id, doc)
@@ -2068,10 +2071,9 @@ class AShareAgentService:
             return
         source = str(doc.get("source", "user_upload")).strip().lower() or "user_upload"
         source_url = f"local://docs/{doc_id}"
-        policy = self.web.rag_source_policy_get(source)
-        auto_approve = bool(policy.get("auto_approve", False))
-        enabled = bool(policy.get("enabled", True))
-        effective_status = "active" if (auto_approve and enabled) else "review"
+        # Product requirement: all uploaded/indexed docs become searchable immediately.
+        # Source policy is kept for governance metadata, but not used as an activation gate.
+        effective_status = "active"
         quality_score = float(doc.get("parse_confidence", 0.0))
         stock_codes = self._extract_stock_codes_from_text(
             f"{doc.get('filename', '')}\n{doc.get('cleaned_text', '')}\n{doc.get('content', '')}"

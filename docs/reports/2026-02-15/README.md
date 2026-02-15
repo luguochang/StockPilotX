@@ -13,6 +13,7 @@
 - `docs/reports/2026-02-15/rag-two-phase-architecture-business-plan-2026-02-15.md`
 - `docs/reports/2026-02-15/rag-two-phase-frontend-deepthink-delivery-2026-02-15.md`
 - `docs/reports/2026-02-15/rag-dual-mode-upload-workflow-delivery-2026-02-15.md`
+- `docs/reports/2026-02-15/rag-upload-immediate-activation-2026-02-15.md`
 
 ## Notes
 - Keep all reports for this date in this folder.

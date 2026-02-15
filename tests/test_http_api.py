@@ -243,12 +243,14 @@ class HttpApiTestCase(unittest.TestCase):
                 "content_base64": encoded,
                 "source": "user_upload",
                 "stock_codes": ["SH600000"],
+                "force_reupload": True,
                 "tags": ["api"],
             },
         )
         self.assertEqual(c8, 200)
         self.assertEqual(str(uploaded.get("status", "")), "ok")
         self.assertIn("timeline", uploaded)
+        self.assertEqual(str(((uploaded.get("result") or {}).get("asset") or {}).get("status", "")), "active")
 
         c9, dashboard = self._get("/v1/rag/dashboard")
         self.assertEqual(c9, 200)

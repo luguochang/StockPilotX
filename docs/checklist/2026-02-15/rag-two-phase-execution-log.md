@@ -138,3 +138,28 @@
 - Frontend build:
   - `cd frontend && npm run -s build`
   - Result: `Compiled successfully`, route `/rag-center` and `/docs-center` generated.
+
+---
+
+## Batch-10 (Completed)
+
+### Scope
+- Remove review approval gate for uploaded docs so users can retrieve immediately after upload.
+- Ensure doc metadata and RAG chunk persistence are aligned to immediate activation semantics.
+- Add regression checks to prevent future rollback to pseudo-review gating behavior.
+
+### Key Files
+- `backend/app/service.py`
+- `tests/test_service.py`
+- `tests/test_http_api.py`
+
+### Self-test Evidence
+- Backend tests:
+  - `.\\.venv\\Scripts\\python.exe -m pytest tests/test_service.py tests/test_http_api.py -q`
+  - Result: `43 passed in 53.06s`
+- Frontend build:
+  - `cd frontend && npm run -s build`
+  - Result: `Compiled successfully`, route `/rag-center` and `/docs-center` generated.
+
+### Commit
+- `TBD` - `feat(rag): make uploads active immediately without review approval`

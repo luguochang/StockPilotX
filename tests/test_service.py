@@ -76,6 +76,16 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(up["status"], "uploaded")
         self.assertEqual(idx["status"], "indexed")
         self.assertGreater(idx["chunk_count"], 1)
+        # Regression guard: upload/index should not enter review queue anymore.
+        docs = self.svc.docs_list("")
+        row = next((x for x in docs if str(x.get("doc_id", "")) == "d1"), None)
+        self.assertIsNotNone(row)
+        self.assertFalse(bool((row or {}).get("needs_review")))
+        queue = self.svc.docs_review_queue("")
+        self.assertFalse(any(str(x.get("doc_id", "")) == "d1" for x in queue))
+        chunks = self.svc.rag_doc_chunks_list("", doc_id="d1", limit=5)
+        self.assertTrue(chunks)
+        self.assertEqual(str(chunks[0].get("effective_status", "")), "active")
 
     def test_rag_doc_policy_and_chunk_management(self) -> None:
         policies = self.svc.rag_source_policy_list("")
@@ -119,6 +129,7 @@ class ServiceTestCase(unittest.TestCase):
                 "content_base64": encoded,
                 "source": "user_upload",
                 "stock_codes": ["SH600000"],
+                "force_reupload": True,
                 "tags": ["测试"],
             },
         )
@@ -126,6 +137,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("timeline", workflow)
         result = workflow.get("result", {})
         self.assertTrue(str(result.get("doc_id", "")).startswith("ragdoc-"))
+        self.assertEqual(str((result.get("asset") or {}).get("status", "")), "active")
 
         uploads = self.svc.rag_uploads_list("", limit=20)
         self.assertGreater(len(uploads), 0)
