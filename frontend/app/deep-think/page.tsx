@@ -462,7 +462,8 @@ export default function DeepThinkPage() {
         data: (row.data ?? {}) as Record<string, any>,
         emitted_at: String(row.created_at ?? "")
       }));
-      setDeepArchiveCount(Number(payload.count ?? rows.length));
+      const payloadCount = Number(payload.count ?? rows.length);
+      setDeepArchiveCount((prev) => (append ? prev + payloadCount : payloadCount));
       setDeepArchiveRoundId(roundId);
       setDeepArchiveEventName(eventName);
       setDeepArchiveLimit(limit);
