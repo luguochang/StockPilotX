@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import ReactECharts from "echarts-for-react";
-import { Alert, Button, Card, Col, Input, InputNumber, List, Progress, Row, Select, Space, Statistic, Table, Tag, Timeline, Typography } from "antd";
+import { Alert, Button, Card, Col, Input, InputNumber, List, Progress, Row, Segmented, Select, Space, Statistic, Table, Tag, Timeline, Typography } from "antd";
 import MediaCarousel from "../components/MediaCarousel";
 import StockSelectorModal from "../components/StockSelectorModal";
 
@@ -151,6 +151,21 @@ type DeepThinkExportTaskSnapshot = {
   download_ready: boolean;
 };
 
+type DeepConsoleMode = "analysis" | "engineering";
+type DeepRoundStageKey = "idle" | "planning" | "data_refresh" | "intel_search" | "debate" | "arbitration" | "persist" | "done";
+
+const DEEP_ROUND_STAGE_ORDER: DeepRoundStageKey[] = ["idle", "planning", "data_refresh", "intel_search", "debate", "arbitration", "persist", "done"];
+const DEEP_ROUND_STAGE_LABEL: Record<DeepRoundStageKey, string> = {
+  idle: "待执行",
+  planning: "任务规划",
+  data_refresh: "数据刷新",
+  intel_search: "实时情报检索",
+  debate: "多Agent协商",
+  arbitration: "仲裁收敛",
+  persist: "结果落库",
+  done: "执行完成",
+};
+
 function normalizeArchiveTimestamp(raw: string): string {
   const value = String(raw ?? "").trim();
   if (!value) return "";
@@ -226,10 +241,14 @@ export default function DeepThinkPage() {
   const [queryProgressText, setQueryProgressText] = useState("");
   const [analysisBrief, setAnalysisBrief] = useState<AnalysisBrief | null>(null);
   const [deepSession, setDeepSession] = useState<DeepThinkSession | null>(null);
+  // 默认给业务用户分析视角；工程筛选项收纳到 engineering 模式减少认知负担。
+  const [deepConsoleMode, setDeepConsoleMode] = useState<DeepConsoleMode>("analysis");
   const [deepLoading, setDeepLoading] = useState(false);
   const [deepStreaming, setDeepStreaming] = useState(false);
   const [deepError, setDeepError] = useState("");
   const [deepStreamEvents, setDeepStreamEvents] = useState<DeepThinkStreamEvent[]>([]);
+  // 三层反馈中的“阶段反馈”文本，会在流事件消费时持续更新。
+  const [deepProgressText, setDeepProgressText] = useState("");
   const [deepLastA2ATask, setDeepLastA2ATask] = useState<{ task_id: string; status: string; agent_id: string } | null>(null);
   const [deepArchiveLoading, setDeepArchiveLoading] = useState(false);
   const [deepArchiveCount, setDeepArchiveCount] = useState(0);
@@ -251,11 +270,37 @@ export default function DeepThinkPage() {
     return Math.max(0, Math.min(100, Number(value.toFixed(1))));
   }
 
+  function resolveDeepStageFromEvent(event: string, data: Record<string, any>): DeepRoundStageKey {
+    const normalized = String(event ?? "").trim();
+    const stage = String(data?.stage ?? data?.phase ?? "").trim();
+    if (normalized === "round_started") return "planning";
+    if (stage === "planning") return "planning";
+    if (stage === "data_refresh") return "data_refresh";
+    if (stage === "intel_search") return "intel_search";
+    if (stage === "debate") return "debate";
+    if (normalized === "arbitration_final") return "arbitration";
+    if (normalized === "round_persisted") return "persist";
+    if (normalized === "done") return "done";
+    return "idle";
+  }
+
   function appendDeepEvent(event: string, data: Record<string, any>) {
     setDeepStreamEvents((prev) => {
       const next = [...prev, { event, data, emitted_at: new Date().toISOString() }];
       return next.slice(-80);
     });
+    // 将底层流事件翻译成用户可感知的阶段反馈，避免“在跑但无反馈”的体验。
+    const stage = resolveDeepStageFromEvent(event, data);
+    if (stage !== "idle") {
+      const message = String(data?.message ?? data?.reason ?? "").trim();
+      setDeepProgressText(message || DEEP_ROUND_STAGE_LABEL[stage]);
+    }
+    if (String(event) === "done") {
+      setDeepProgressText("轮次执行完成，结果已同步。");
+    }
+    if (String(event) === "error") {
+      setDeepProgressText("轮次执行失败，请查看错误信息。");
+    }
   }
 
   function setDeepArchiveQuickWindow(hours: number) {
@@ -637,6 +682,38 @@ export default function DeepThinkPage() {
     URL.revokeObjectURL(url);
   }
 
+  async function exportDeepThinkBusiness(format: "csv" | "json") {
+    if (!deepSession?.session_id) return;
+    setDeepArchiveExporting(true);
+    try {
+      const params = new URLSearchParams();
+      params.set("format", format);
+      if (deepArchiveRoundId) params.set("round_id", deepArchiveRoundId);
+      params.set("limit", String(Math.max(20, Math.min(2000, Math.floor(deepArchiveLimit)))));
+      const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${deepSession.session_id}/business-export?${params.toString()}`);
+      if (!resp.ok) {
+        const detail = await resp.text();
+        throw new Error(detail || `HTTP ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      const disposition = resp.headers.get("Content-Disposition") ?? "";
+      const match = disposition.match(/filename=\"?([^\";]+)\"?/i);
+      const filename = (match?.[1] || `deepthink-business-${deepSession.session_id}.${format}`).trim();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setDeepError(e instanceof Error ? e.message : "导出 DeepThink 业务摘要失败");
+    } finally {
+      setDeepArchiveExporting(false);
+    }
+  }
+
   async function exportDeepThinkEventArchive(format: "jsonl" | "csv") {
     if (!deepSession?.session_id) return;
     setDeepArchiveExporting(true);
@@ -674,6 +751,7 @@ export default function DeepThinkPage() {
   async function startDeepThinkSession() {
     setDeepLoading(true);
     setDeepError("");
+    setDeepProgressText("正在创建会话...");
     try {
       await ensureStockInUniverse([stockCode]);
       const created = await createDeepThinkSessionRequest();
@@ -689,6 +767,7 @@ export default function DeepThinkPage() {
       await loadDeepThinkEventArchive(created.session_id, { cursor: 0, historyMode: "reset" });
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "创建 DeepThink 会话失败");
+      setDeepProgressText("会话创建失败。");
     } finally {
       setDeepLoading(false);
     }
@@ -698,6 +777,7 @@ export default function DeepThinkPage() {
     if (!deepSession?.session_id) return;
     setDeepLoading(true);
     setDeepError("");
+    setDeepProgressText("正在刷新会话快照...");
     try {
       const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${deepSession.session_id}`);
       const body = await resp.json();
@@ -709,6 +789,7 @@ export default function DeepThinkPage() {
       await loadDeepThinkEventArchive(loaded.session_id, { roundId: String(latest?.round_id ?? ""), cursor: 0, historyMode: "reset" });
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "刷新 DeepThink 会话失败");
+      setDeepProgressText("刷新失败。");
     } finally {
       setDeepLoading(false);
     }
@@ -717,6 +798,7 @@ export default function DeepThinkPage() {
   async function replayDeepThinkStream(sessionId: string) {
     setDeepStreaming(true);
     setDeepError("");
+    setDeepProgressText("正在回放最新轮次事件...");
     try {
       const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${sessionId}/stream`);
       if (!resp.ok) {
@@ -727,6 +809,7 @@ export default function DeepThinkPage() {
       await loadDeepThinkEventArchive(sessionId, { cursor: 0, historyMode: "reset" });
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "回放 DeepThink 事件流失败");
+      setDeepProgressText("回放失败，请检查会话与网络状态。");
     } finally {
       setDeepStreaming(false);
     }
@@ -736,6 +819,7 @@ export default function DeepThinkPage() {
     // V2 路径：单个请求内完成“执行 + 流式推送”，不再先等 round 完成再回放。
     setDeepStreaming(true);
     setDeepError("");
+    setDeepProgressText("已连接流式执行通道，等待首个事件...");
     let streamFailure = "";
     let gotEvent = false;
     try {
@@ -783,6 +867,7 @@ export default function DeepThinkPage() {
   async function runDeepThinkRound() {
     setDeepLoading(true);
     setDeepError("");
+    setDeepProgressText("准备执行下一轮 DeepThink...");
     try {
       await ensureStockInUniverse([stockCode]);
       const session = deepSession ?? (await createDeepThinkSessionRequest());
@@ -820,6 +905,7 @@ export default function DeepThinkPage() {
       await loadDeepThinkEventArchive(loaded.session_id, { roundId: String(latest?.round_id ?? ""), cursor: 0, historyMode: "reset" });
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "执行 DeepThink 下一轮失败");
+      setDeepProgressText("执行失败，请调整问题或稍后重试。");
     } finally {
       setDeepLoading(false);
     }
@@ -828,6 +914,7 @@ export default function DeepThinkPage() {
   async function runDeepThinkRoundViaA2A() {
     setDeepLoading(true);
     setDeepError("");
+    setDeepProgressText("正在通过 A2A 派发执行任务...");
     try {
       await ensureStockInUniverse([stockCode]);
       const session = deepSession ?? (await createDeepThinkSessionRequest());
@@ -853,6 +940,7 @@ export default function DeepThinkPage() {
       await replayDeepThinkStream(session.session_id);
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "通过 A2A 执行 DeepThink 轮次失败");
+      setDeepProgressText("A2A 任务执行失败。");
     } finally {
       setDeepLoading(false);
     }
@@ -866,6 +954,7 @@ export default function DeepThinkPage() {
       setDeepArchiveNextCursor(null);
       setDeepArchiveCursorHistory([]);
       setDeepArchiveExportTask(null);
+      setDeepProgressText("");
       return;
     }
     const roundIds = new Set((deepSession.rounds ?? []).map((x) => String(x.round_id)));
@@ -970,6 +1059,9 @@ export default function DeepThinkPage() {
       "critic_feedback",
       "arbitration_final",
       "replan_triggered",
+      "intel_snapshot",
+      "calendar_watchlist",
+      "business_summary",
       "done",
     ];
     const dynamic = deepStreamEvents
@@ -984,6 +1076,67 @@ export default function DeepThinkPage() {
       : deepStreamEvents;
     return [...filtered].reverse().slice(0, 16);
   }, [deepArchiveEventName, deepStreamEvents]);
+  const deepCurrentStage = useMemo<DeepRoundStageKey>(() => {
+    // 基于流事件推断当前阶段，供分析模式展示可视进度。
+    let current: DeepRoundStageKey = "idle";
+    for (const item of deepStreamEvents) {
+      const candidate = resolveDeepStageFromEvent(item.event, item.data);
+      if (DEEP_ROUND_STAGE_ORDER.indexOf(candidate) > DEEP_ROUND_STAGE_ORDER.indexOf(current)) current = candidate;
+    }
+    if (deepLoading || deepStreaming) {
+      if (current === "idle") return "planning";
+      if (current === "done") return "persist";
+    }
+    return current;
+  }, [deepLoading, deepStreaming, deepStreamEvents]);
+  const deepStagePercent = useMemo(() => {
+    const idx = DEEP_ROUND_STAGE_ORDER.indexOf(deepCurrentStage);
+    if (idx <= 0) return 0;
+    return Number(((idx / (DEEP_ROUND_STAGE_ORDER.length - 1)) * 100).toFixed(1));
+  }, [deepCurrentStage]);
+  const deepActionStatusText = useMemo(() => {
+    if (deepError) return "执行失败";
+    if (deepLoading || deepStreaming) return "执行中";
+    if (deepCurrentStage === "done") return "已完成";
+    return "待执行";
+  }, [deepCurrentStage, deepError, deepLoading, deepStreaming]);
+  const deepDecisionSummary = useMemo(() => {
+    if (!latestDeepRound) return null;
+    const signal = String(latestDeepRound.consensus_signal ?? "hold");
+    const disagreement = Number(latestDeepRound.disagreement_score ?? 0);
+    const confidence = Number((1 - disagreement).toFixed(3));
+    const riskSources = (latestDeepRound.conflict_sources ?? []).slice(0, 4);
+    return {
+      signal,
+      confidence,
+      disagreement,
+      riskSources,
+      replan: Boolean(latestDeepRound.replan_triggered),
+      stopReason: String(latestDeepRound.stop_reason ?? ""),
+      nextAction:
+        latestDeepRound.stop_reason
+          ? "建议先处理风险后再发起下一轮。"
+          : latestDeepRound.replan_triggered
+            ? "建议继续执行下一轮，重点补齐冲突证据。"
+            : "建议结合实时情报与仓位约束执行跟踪。"
+    };
+  }, [latestDeepRound]);
+  const deepLatestBusinessSummary = useMemo(() => {
+    const reversed = [...deepStreamEvents].reverse();
+    const hit = reversed.find((item) => String(item.event) === "business_summary");
+    return (hit?.data ?? null) as Record<string, any> | null;
+  }, [deepStreamEvents]);
+  const deepLatestIntelSnapshot = useMemo(() => {
+    const reversed = [...deepStreamEvents].reverse();
+    const hit = reversed.find((item) => String(item.event) === "intel_snapshot");
+    return (hit?.data ?? null) as Record<string, any> | null;
+  }, [deepStreamEvents]);
+  const deepCalendarWatch = useMemo(() => {
+    const reversed = [...deepStreamEvents].reverse();
+    const hit = reversed.find((item) => String(item.event) === "calendar_watchlist");
+    const rows = hit?.data?.items;
+    return Array.isArray(rows) ? rows.slice(0, 6) : [];
+  }, [deepStreamEvents]);
   const latestBudget = latestDeepRound?.budget_usage;
   const deepTimelineItems = deepRounds.map((round) => ({
     color: round.replan_triggered ? "orange" : round.stop_reason ? "red" : "blue",
@@ -1366,116 +1519,234 @@ export default function DeepThinkPage() {
             <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>DeepThink 轮次控制台</span>}>
               <Space direction="vertical" style={{ width: "100%" }}>
                 <Text style={{ color: "#475569" }}>
-                  基于后端 `/v1/deep-think/*` 接口按轮执行，展示 task graph、冲突源、预算消耗和重规划信号。
+                  基于后端 `/v1/deep-think/*` 接口按轮执行，分析模式关注结论交付，工程模式保留完整治理与排障能力。
                 </Text>
-                <Space wrap>
-                  <Select
-                    style={{ minWidth: 140 }}
-                    value={deepArchiveRoundId}
-                    onChange={(v) => setDeepArchiveRoundId(String(v ?? ""))}
-                    options={deepArchiveRoundOptions}
-                  />
-                  <Select
-                    style={{ minWidth: 190 }}
-                    value={deepArchiveEventName}
-                    onChange={(v) => setDeepArchiveEventName(String(v ?? ""))}
-                    options={[{ label: "全部事件", value: "" }, ...deepArchiveEventOptions]}
-                  />
-                  <InputNumber
-                    min={20}
-                    max={2000}
-                    step={20}
-                    value={deepArchiveLimit}
-                    onChange={(v) => setDeepArchiveLimit(Number(v ?? 220))}
-                  />
-                  <Input
-                    style={{ minWidth: 200 }}
-                    type="datetime-local"
-                    step={1}
-                    value={toDatetimeLocalValue(deepArchiveCreatedFrom)}
-                    onChange={(e) => setDeepArchiveCreatedFrom(normalizeArchiveTimestamp(e.target.value))}
-                    placeholder="created_from"
-                  />
-                  <Input
-                    style={{ minWidth: 200 }}
-                    type="datetime-local"
-                    step={1}
-                    value={toDatetimeLocalValue(deepArchiveCreatedTo)}
-                    onChange={(e) => setDeepArchiveCreatedTo(normalizeArchiveTimestamp(e.target.value))}
-                    placeholder="created_to"
-                  />
-                  <Button onClick={() => setDeepArchiveQuickWindow(24)}>最近24小时</Button>
-                  <Button onClick={() => { setDeepArchiveCreatedFrom(""); setDeepArchiveCreatedTo(""); }}>清空时间过滤</Button>
-                </Space>
-                <Space wrap>
-                  <Button onClick={startDeepThinkSession} loading={deepLoading}>
-                    新建会话
-                  </Button>
-                  <Button type="primary" onClick={runDeepThinkRound} loading={deepLoading}>
-                    执行下一轮
-                  </Button>
-                  <Button onClick={runDeepThinkRoundViaA2A} loading={deepLoading}>
-                    A2A派发下一轮
-                  </Button>
-                  <Button onClick={refreshDeepThinkSession} disabled={!deepSession?.session_id || deepLoading}>
-                    刷新会话
-                  </Button>
-                  <Button
-                    onClick={() =>
-                      loadDeepThinkEventArchive(deepSession?.session_id ?? "", {
-                        roundId: deepArchiveRoundId,
-                        eventName: deepArchiveEventName,
-                        limit: deepArchiveLimit,
-                        cursor: 0,
-                        createdFrom: deepArchiveCreatedFrom,
-                        createdTo: deepArchiveCreatedTo,
-                        historyMode: "reset"
-                      })
-                    }
-                    disabled={!deepSession?.session_id}
-                    loading={deepArchiveLoading}
-                  >
-                    加载会话存档
-                  </Button>
-                  <Button
-                    onClick={loadFirstDeepThinkArchivePage}
-                    disabled={!deepSession?.session_id || (deepArchiveCursor === 0 && !deepArchiveCursorHistory.length)}
-                    loading={deepArchiveLoading}
-                  >
-                    回到第一页
-                  </Button>
-                  <Button
-                    onClick={loadPrevDeepThinkArchivePage}
-                    disabled={!deepSession?.session_id || !deepArchiveCursorHistory.length || deepArchiveLoading}
-                    loading={deepArchiveLoading}
-                  >
-                    上一页存档
-                  </Button>
-                  <Button
-                    onClick={loadNextDeepThinkArchivePage}
-                    disabled={!deepSession?.session_id || !deepArchiveHasMore || deepArchiveLoading}
-                    loading={deepArchiveLoading}
-                  >
-                    下一页存档
-                  </Button>
-                  <Button
-                    onClick={() => exportDeepThinkEventArchive("jsonl")}
-                    disabled={!deepSession?.session_id}
-                    loading={deepArchiveExporting}
-                  >
-                    导出JSONL
-                  </Button>
-                  <Button
-                    onClick={() => exportDeepThinkEventArchive("csv")}
-                    disabled={!deepSession?.session_id}
-                    loading={deepArchiveExporting}
-                  >
-                    导出CSV
-                  </Button>
-                  <Button onClick={() => replayDeepThinkStream(deepSession?.session_id ?? "")} disabled={!deepSession?.session_id} loading={deepStreaming}>
-                    回放最新轮次流
-                  </Button>
-                </Space>
+                <Segmented
+                  value={deepConsoleMode}
+                  onChange={(value) => setDeepConsoleMode(value as DeepConsoleMode)}
+                  options={[
+                    { label: "分析模式", value: "analysis" },
+                    { label: "工程模式", value: "engineering" }
+                  ]}
+                />
+                {deepConsoleMode === "analysis" ? (
+                  <>
+                    <Space wrap>
+                      <Button onClick={startDeepThinkSession} loading={deepLoading}>
+                        新建会话
+                      </Button>
+                      <Button type="primary" onClick={runDeepThinkRound} loading={deepLoading}>
+                        执行下一轮
+                      </Button>
+                      <Button onClick={runDeepThinkRoundViaA2A} loading={deepLoading}>
+                        A2A派发下一轮
+                      </Button>
+                      <Button onClick={refreshDeepThinkSession} disabled={!deepSession?.session_id || deepLoading}>
+                        刷新会话
+                      </Button>
+                      <Button onClick={() => exportDeepThinkBusiness("csv")} disabled={!deepSession?.session_id} loading={deepArchiveExporting}>
+                        导出业务结论CSV
+                      </Button>
+                    </Space>
+                    <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                      <Text style={{ color: "#334155" }}>
+                        执行状态：{deepActionStatusText} | 当前阶段：{DEEP_ROUND_STAGE_LABEL[deepCurrentStage]}
+                      </Text>
+                      <Progress percent={deepStagePercent} status={deepError ? "exception" : (deepLoading || deepStreaming) ? "active" : "normal"} />
+                      <Text style={{ color: "#64748b" }}>{deepProgressText || "点击“执行下一轮”开始分析。"}</Text>
+                    </Space>
+                    {deepDecisionSummary ? (
+                      <Card size="small" title={<span style={{ color: "#0f172a" }}>本轮结论摘要</span>}>
+                        <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                          <Space wrap>
+                            <Tag color={deepDecisionSummary.signal === "buy" ? "green" : deepDecisionSummary.signal === "reduce" ? "red" : "blue"}>
+                              signal: {deepDecisionSummary.signal}
+                            </Tag>
+                            <Tag color={deepDecisionSummary.confidence >= 0.7 ? "green" : deepDecisionSummary.confidence >= 0.5 ? "gold" : "red"}>
+                              confidence: {deepDecisionSummary.confidence.toFixed(3)}
+                            </Tag>
+                            <Tag>disagreement: {deepDecisionSummary.disagreement.toFixed(3)}</Tag>
+                            {deepDecisionSummary.replan ? <Tag color="orange">replan_triggered</Tag> : null}
+                            {deepDecisionSummary.stopReason ? <Tag color="red">{deepDecisionSummary.stopReason}</Tag> : null}
+                          </Space>
+                          <Text style={{ color: "#334155" }}>{deepDecisionSummary.nextAction}</Text>
+                          <Space wrap>
+                            {(deepDecisionSummary.riskSources ?? []).map((src) => (
+                              <Tag key={`summary-${src}`} color="orange">{src}</Tag>
+                            ))}
+                            {!deepDecisionSummary.riskSources.length ? <Tag color="green">当前无显著冲突源</Tag> : null}
+                          </Space>
+                        </Space>
+                      </Card>
+                    ) : (
+                      <Text style={{ color: "#64748b" }}>暂无轮次结果，请先执行一轮。</Text>
+                    )}
+                    {deepLatestBusinessSummary ? (
+                      <Card size="small" title={<span style={{ color: "#0f172a" }}>业务融合结论</span>}>
+                        <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                          <Space wrap>
+                            <Tag color={String(deepLatestBusinessSummary.signal) === "buy" ? "green" : String(deepLatestBusinessSummary.signal) === "reduce" ? "red" : "blue"}>
+                              signal: {String(deepLatestBusinessSummary.signal ?? "hold")}
+                            </Tag>
+                            <Tag>confidence: {Number(deepLatestBusinessSummary.confidence ?? 0).toFixed(3)}</Tag>
+                            <Tag>review: {String(deepLatestBusinessSummary.review_time_hint ?? "-")}</Tag>
+                          </Space>
+                          <Text style={{ color: "#334155" }}>
+                            触发条件：{String(deepLatestBusinessSummary.trigger_condition ?? "-")}
+                          </Text>
+                          <Text style={{ color: "#334155" }}>
+                            失效条件：{String(deepLatestBusinessSummary.invalidation_condition ?? "-")}
+                          </Text>
+                        </Space>
+                      </Card>
+                    ) : null}
+                    {deepLatestIntelSnapshot ? (
+                      <Card size="small" title={<span style={{ color: "#0f172a" }}>实时情报摘要</span>}>
+                        <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                          <Text style={{ color: "#64748b" }}>as_of: {String(deepLatestIntelSnapshot.as_of ?? "-")}</Text>
+                          {(Array.isArray(deepLatestIntelSnapshot.macro_signals) ? deepLatestIntelSnapshot.macro_signals.slice(0, 3) : []).map((item: any, idx: number) => (
+                            <Space key={`intel-macro-${idx}`} direction="vertical" size={1} style={{ width: "100%" }}>
+                              <Text style={{ color: "#0f172a" }}>{String(item?.title ?? "")}</Text>
+                              <Text style={{ color: "#475569" }}>{String(item?.summary ?? "")}</Text>
+                            </Space>
+                          ))}
+                          {!Array.isArray(deepLatestIntelSnapshot.macro_signals) || deepLatestIntelSnapshot.macro_signals.length === 0 ? (
+                            <Text style={{ color: "#64748b" }}>暂无可用宏观情报。</Text>
+                          ) : null}
+                        </Space>
+                      </Card>
+                    ) : null}
+                    {deepCalendarWatch.length ? (
+                      <Card size="small" title={<span style={{ color: "#0f172a" }}>未来事件关注清单</span>}>
+                        <List
+                          size="small"
+                          dataSource={deepCalendarWatch}
+                          renderItem={(item: any) => (
+                            <List.Item>
+                              <Space direction="vertical" size={1}>
+                                <Text style={{ color: "#0f172a" }}>{String(item?.title ?? "-")}</Text>
+                                <Text style={{ color: "#64748b" }}>
+                                  {String(item?.published_at ?? "-")} | {String(item?.impact_direction ?? "uncertain")} | {String(item?.impact_horizon ?? "1w")}
+                                </Text>
+                              </Space>
+                            </List.Item>
+                          )}
+                        />
+                      </Card>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <Space wrap>
+                      <Select
+                        style={{ minWidth: 140 }}
+                        value={deepArchiveRoundId}
+                        onChange={(v) => setDeepArchiveRoundId(String(v ?? ""))}
+                        options={deepArchiveRoundOptions}
+                      />
+                      <Select
+                        style={{ minWidth: 190 }}
+                        value={deepArchiveEventName}
+                        onChange={(v) => setDeepArchiveEventName(String(v ?? ""))}
+                        options={[{ label: "全部事件", value: "" }, ...deepArchiveEventOptions]}
+                      />
+                      <InputNumber
+                        min={20}
+                        max={2000}
+                        step={20}
+                        value={deepArchiveLimit}
+                        onChange={(v) => setDeepArchiveLimit(Number(v ?? 220))}
+                      />
+                      <Input
+                        style={{ minWidth: 200 }}
+                        type="datetime-local"
+                        step={1}
+                        value={toDatetimeLocalValue(deepArchiveCreatedFrom)}
+                        onChange={(e) => setDeepArchiveCreatedFrom(normalizeArchiveTimestamp(e.target.value))}
+                        placeholder="created_from"
+                      />
+                      <Input
+                        style={{ minWidth: 200 }}
+                        type="datetime-local"
+                        step={1}
+                        value={toDatetimeLocalValue(deepArchiveCreatedTo)}
+                        onChange={(e) => setDeepArchiveCreatedTo(normalizeArchiveTimestamp(e.target.value))}
+                        placeholder="created_to"
+                      />
+                      <Button onClick={() => setDeepArchiveQuickWindow(24)}>最近24小时</Button>
+                      <Button onClick={() => { setDeepArchiveCreatedFrom(""); setDeepArchiveCreatedTo(""); }}>清空时间过滤</Button>
+                    </Space>
+                    <Space wrap>
+                      <Button onClick={startDeepThinkSession} loading={deepLoading}>
+                        新建会话
+                      </Button>
+                      <Button type="primary" onClick={runDeepThinkRound} loading={deepLoading}>
+                        执行下一轮
+                      </Button>
+                      <Button onClick={runDeepThinkRoundViaA2A} loading={deepLoading}>
+                        A2A派发下一轮
+                      </Button>
+                      <Button onClick={refreshDeepThinkSession} disabled={!deepSession?.session_id || deepLoading}>
+                        刷新会话
+                      </Button>
+                      <Button
+                        onClick={() =>
+                          loadDeepThinkEventArchive(deepSession?.session_id ?? "", {
+                            roundId: deepArchiveRoundId,
+                            eventName: deepArchiveEventName,
+                            limit: deepArchiveLimit,
+                            cursor: 0,
+                            createdFrom: deepArchiveCreatedFrom,
+                            createdTo: deepArchiveCreatedTo,
+                            historyMode: "reset"
+                          })
+                        }
+                        disabled={!deepSession?.session_id}
+                        loading={deepArchiveLoading}
+                      >
+                        加载会话存档
+                      </Button>
+                      <Button
+                        onClick={loadFirstDeepThinkArchivePage}
+                        disabled={!deepSession?.session_id || (deepArchiveCursor === 0 && !deepArchiveCursorHistory.length)}
+                        loading={deepArchiveLoading}
+                      >
+                        回到第一页
+                      </Button>
+                      <Button
+                        onClick={loadPrevDeepThinkArchivePage}
+                        disabled={!deepSession?.session_id || !deepArchiveCursorHistory.length || deepArchiveLoading}
+                        loading={deepArchiveLoading}
+                      >
+                        上一页存档
+                      </Button>
+                      <Button
+                        onClick={loadNextDeepThinkArchivePage}
+                        disabled={!deepSession?.session_id || !deepArchiveHasMore || deepArchiveLoading}
+                        loading={deepArchiveLoading}
+                      >
+                        下一页存档
+                      </Button>
+                      <Button
+                        onClick={() => exportDeepThinkEventArchive("jsonl")}
+                        disabled={!deepSession?.session_id}
+                        loading={deepArchiveExporting}
+                      >
+                        导出审计JSONL
+                      </Button>
+                      <Button
+                        onClick={() => exportDeepThinkEventArchive("csv")}
+                        disabled={!deepSession?.session_id}
+                        loading={deepArchiveExporting}
+                      >
+                        导出审计CSV
+                      </Button>
+                      <Button onClick={() => replayDeepThinkStream(deepSession?.session_id ?? "")} disabled={!deepSession?.session_id} loading={deepStreaming}>
+                        回放最新轮次流
+                      </Button>
+                    </Space>
+                  </>
+                )}
                 <Space wrap>
                   <Tag color={deepSession ? "blue" : "default"}>session: {deepSession?.session_id ?? "未创建"}</Tag>
                   <Tag color={deepSession?.status === "completed" ? "green" : "processing"}>status: {deepSession?.status ?? "idle"}</Tag>
@@ -1595,94 +1866,100 @@ export default function DeepThinkPage() {
               />
             </Card>
 
-            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>跨轮次观点差分</span>} style={{ marginTop: 12 }}>
-              <Table
-                size="small"
-                pagination={false}
-                locale={{ emptyText: "至少执行两轮后可查看差分" }}
-                dataSource={deepOpinionDiffRows}
-                columns={[
-                  { title: "Agent", dataIndex: "agent_id", key: "agent_id", width: 120 },
-                  {
-                    title: "Signal",
-                    key: "signal_diff",
-                    width: 160,
-                    render: (_: unknown, row: any) => (
-                      <Text style={{ color: "#334155" }}>{row.prev_signal} → {row.curr_signal}</Text>
-                    )
-                  },
-                  {
-                    title: "ΔConf",
-                    dataIndex: "delta_confidence",
-                    key: "delta_confidence",
-                    width: 92,
-                    render: (v: number) => (
-                      <Text style={{ color: v > 0 ? "#059669" : v < 0 ? "#dc2626" : "#475569" }}>{v.toFixed(4)}</Text>
-                    )
-                  },
-                  {
-                    title: "Type",
-                    dataIndex: "change_type",
-                    key: "change_type",
-                    width: 120,
-                    render: (v: string) => (
-                      <Tag color={v === "signal_changed" ? "red" : v === "confidence_shift" ? "gold" : "blue"}>{v}</Tag>
-                    )
-                  }
-                ]}
-              />
-            </Card>
+            {deepConsoleMode === "engineering" ? (
+              <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>跨轮次观点差分</span>} style={{ marginTop: 12 }}>
+                <Table
+                  size="small"
+                  pagination={false}
+                  locale={{ emptyText: "至少执行两轮后可查看差分" }}
+                  dataSource={deepOpinionDiffRows}
+                  columns={[
+                    { title: "Agent", dataIndex: "agent_id", key: "agent_id", width: 120 },
+                    {
+                      title: "Signal",
+                      key: "signal_diff",
+                      width: 160,
+                      render: (_: unknown, row: any) => (
+                        <Text style={{ color: "#334155" }}>{row.prev_signal} → {row.curr_signal}</Text>
+                      )
+                    },
+                    {
+                      title: "ΔConf",
+                      dataIndex: "delta_confidence",
+                      key: "delta_confidence",
+                      width: 92,
+                      render: (v: number) => (
+                        <Text style={{ color: v > 0 ? "#059669" : v < 0 ? "#dc2626" : "#475569" }}>{v.toFixed(4)}</Text>
+                      )
+                    },
+                    {
+                      title: "Type",
+                      dataIndex: "change_type",
+                      key: "change_type",
+                      width: 120,
+                      render: (v: string) => (
+                        <Tag color={v === "signal_changed" ? "red" : v === "confidence_shift" ? "gold" : "blue"}>{v}</Tag>
+                      )
+                    }
+                  ]}
+                />
+              </Card>
+            ) : null}
 
-            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>冲突源下钻（证据视角）</span>} style={{ marginTop: 12 }}>
-              <Table
-                size="small"
-                pagination={false}
-                locale={{ emptyText: "暂无冲突观点可下钻" }}
-                dataSource={deepConflictDrillRows}
-                columns={[
-                  { title: "Agent", dataIndex: "agent_id", key: "agent_id", width: 118 },
-                  {
-                    title: "Signal",
-                    dataIndex: "signal",
-                    key: "signal",
-                    width: 84,
-                    render: (v: string) => <Tag color={v === "buy" ? "green" : v === "reduce" ? "red" : "blue"}>{v}</Tag>
-                  },
-                  {
-                    title: "Confidence",
-                    dataIndex: "confidence",
-                    key: "confidence",
-                    width: 100,
-                    render: (v: number) => v.toFixed(3)
-                  },
-                  { title: "Evidence IDs", dataIndex: "evidence_ids", key: "evidence_ids" }
-                ]}
-              />
-            </Card>
+            {deepConsoleMode === "engineering" ? (
+              <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>冲突源下钻（证据视角）</span>} style={{ marginTop: 12 }}>
+                <Table
+                  size="small"
+                  pagination={false}
+                  locale={{ emptyText: "暂无冲突观点可下钻" }}
+                  dataSource={deepConflictDrillRows}
+                  columns={[
+                    { title: "Agent", dataIndex: "agent_id", key: "agent_id", width: 118 },
+                    {
+                      title: "Signal",
+                      dataIndex: "signal",
+                      key: "signal",
+                      width: 84,
+                      render: (v: string) => <Tag color={v === "buy" ? "green" : v === "reduce" ? "red" : "blue"}>{v}</Tag>
+                    },
+                    {
+                      title: "Confidence",
+                      dataIndex: "confidence",
+                      key: "confidence",
+                      width: 100,
+                      render: (v: number) => v.toFixed(3)
+                    },
+                    { title: "Evidence IDs", dataIndex: "evidence_ids", key: "evidence_ids" }
+                  ]}
+                />
+              </Card>
+            ) : null}
 
-            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>SSE 回放事件</span>} style={{ marginTop: 12 }}>
-              <Text style={{ color: "#64748b" }}>
-                当前筛选：round={deepArchiveRoundId ? deepArchiveRoundId : "all"} | event={deepArchiveEventName || "all"} | limit={deepArchiveLimit} | cursor={deepArchiveCursor} | from={deepArchiveCreatedFrom || "-"} | to={deepArchiveCreatedTo || "-"}
-              </Text>
-              <List
-                size="small"
-                locale={{ emptyText: "暂无流事件记录" }}
-                dataSource={deepReplayRows}
-                renderItem={(item) => (
-                  <List.Item>
-                    <Space direction="vertical" size={1}>
-                      <Space>
-                        <Tag color="processing">{item.event}</Tag>
-                        <Text style={{ color: "#64748b" }}>{item.emitted_at}</Text>
+            {deepConsoleMode === "engineering" ? (
+              <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>SSE 回放事件</span>} style={{ marginTop: 12 }}>
+                <Text style={{ color: "#64748b" }}>
+                  当前筛选：round={deepArchiveRoundId ? deepArchiveRoundId : "all"} | event={deepArchiveEventName || "all"} | limit={deepArchiveLimit} | cursor={deepArchiveCursor} | from={deepArchiveCreatedFrom || "-"} | to={deepArchiveCreatedTo || "-"}
+                </Text>
+                <List
+                  size="small"
+                  locale={{ emptyText: "暂无流事件记录" }}
+                  dataSource={deepReplayRows}
+                  renderItem={(item) => (
+                    <List.Item>
+                      <Space direction="vertical" size={1}>
+                        <Space>
+                          <Tag color="processing">{item.event}</Tag>
+                          <Text style={{ color: "#64748b" }}>{item.emitted_at}</Text>
+                        </Space>
+                        <Text style={{ color: "#475569" }}>
+                          {JSON.stringify(item.data).slice(0, 180)}
+                        </Text>
                       </Space>
-                      <Text style={{ color: "#475569" }}>
-                        {JSON.stringify(item.data).slice(0, 180)}
-                      </Text>
-                    </Space>
-                  </List.Item>
-                )}
-              />
-            </Card>
+                    </List.Item>
+                  )}
+                />
+              </Card>
+            ) : null}
           </Col>
         </Row>
       </motion.section>

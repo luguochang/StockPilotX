@@ -291,6 +291,323 @@ class AShareAgentService:
             "exceeded": exceeded,
         }
 
+    def _deep_safe_json_loads(self, text: str) -> dict[str, Any]:
+        """从模型文本中提取 JSON 对象，兼容 fenced code block 与前后杂文本。"""
+        clean = str(text or "").strip()
+        if not clean:
+            raise ValueError("empty model payload")
+        if clean.startswith("```"):
+            clean = clean.strip("`").strip()
+            if clean.lower().startswith("json"):
+                clean = clean[4:].strip()
+        try:
+            obj = json.loads(clean)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+        # 宽松兜底：截取第一个 JSON 对象片段再解析。
+        start = clean.find("{")
+        end = clean.rfind("}")
+        if start >= 0 and end > start:
+            fragment = clean[start : end + 1]
+            obj = json.loads(fragment)
+            if isinstance(obj, dict):
+                return obj
+        raise ValueError("model output is not a valid json object")
+
+    def _deep_normalize_intel_item(self, raw: Any) -> dict[str, Any] | None:
+        if not isinstance(raw, dict):
+            return None
+        title = str(raw.get("title", "")).strip()
+        summary = str(raw.get("summary", "")).strip()
+        url = str(raw.get("url", "")).strip()
+        if not title or not summary:
+            return None
+        impact_direction = str(raw.get("impact_direction", "uncertain")).strip().lower()
+        if impact_direction not in {"positive", "negative", "mixed", "uncertain"}:
+            impact_direction = "uncertain"
+        impact_horizon = str(raw.get("impact_horizon", "1w")).strip().lower()
+        if impact_horizon not in {"intraday", "1w", "1m", "quarter"}:
+            impact_horizon = "1w"
+        source_type = str(raw.get("source_type", "other")).strip().lower()
+        if source_type not in {"official", "media", "other"}:
+            source_type = "other"
+        return {
+            "title": title[:220],
+            "summary": summary[:420],
+            "impact_direction": impact_direction,
+            "impact_horizon": impact_horizon,
+            "why_relevant_to_stock": str(raw.get("why_relevant_to_stock", "")).strip()[:320],
+            "url": url[:420],
+            "published_at": str(raw.get("published_at", "")).strip()[:64],
+            "source_type": source_type,
+        }
+
+    def _deep_validate_intel_payload(self, payload: Any) -> dict[str, Any]:
+        """校验并标准化 LLM WebSearch 情报输出，防止前端消费不稳定结构。"""
+        if not isinstance(payload, dict):
+            raise ValueError("intel payload must be an object")
+        normalized: dict[str, Any] = {
+            "as_of": str(payload.get("as_of", datetime.now(timezone.utc).isoformat())),
+            "macro_signals": [],
+            "industry_forward_events": [],
+            "stock_specific_catalysts": [],
+            "calendar_watchlist": [],
+            "impact_chain": [],
+            "decision_adjustment": {},
+            "citations": [],
+            "confidence_note": str(payload.get("confidence_note", "")).strip(),
+        }
+        for key in ("macro_signals", "industry_forward_events", "stock_specific_catalysts", "calendar_watchlist"):
+            rows = payload.get(key, [])
+            if not isinstance(rows, list):
+                continue
+            for item in rows:
+                norm = self._deep_normalize_intel_item(item)
+                if norm:
+                    normalized[key].append(norm)
+        chains = payload.get("impact_chain", [])
+        if isinstance(chains, list):
+            for row in chains:
+                if not isinstance(row, dict):
+                    continue
+                normalized["impact_chain"].append(
+                    {
+                        "event": str(row.get("event", "")).strip()[:180],
+                        "transmission_path": str(row.get("transmission_path", "")).strip()[:260],
+                        "industry_impact": str(row.get("industry_impact", "")).strip()[:220],
+                        "stock_impact": str(row.get("stock_impact", "")).strip()[:220],
+                        "price_factor": str(row.get("price_factor", "")).strip()[:180],
+                    }
+                )
+        decision = payload.get("decision_adjustment", {})
+        if isinstance(decision, dict):
+            bias = str(decision.get("signal_bias", "hold")).strip().lower()
+            if bias not in {"buy", "hold", "reduce"}:
+                bias = "hold"
+            conf_adj = float(decision.get("confidence_adjustment", 0.0) or 0.0)
+            conf_adj = max(-0.5, min(0.5, conf_adj))
+            normalized["decision_adjustment"] = {
+                "signal_bias": bias,
+                "confidence_adjustment": conf_adj,
+                "rationale": str(decision.get("rationale", "")).strip()[:320],
+            }
+        citations = payload.get("citations", [])
+        if isinstance(citations, list):
+            for item in citations:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url", "")).strip()
+                if not url:
+                    continue
+                normalized["citations"].append(
+                    {
+                        "title": str(item.get("title", "")).strip()[:220],
+                        "url": url[:420],
+                        "published_at": str(item.get("published_at", "")).strip()[:64],
+                        "source_type": str(item.get("source_type", "other")).strip()[:32],
+                    }
+                )
+        return normalized
+
+    def _deep_local_intel_fallback(
+        self,
+        *,
+        stock_code: str,
+        question: str,
+        quote: dict[str, Any],
+        trend: dict[str, Any],
+    ) -> dict[str, Any]:
+        """当外部 WebSearch 不可用时，用本地信号生成可解释的降级情报。"""
+        ann = [x for x in self.ingestion_store.announcements if str(x.get("stock_code", "")).upper() == stock_code][-3:]
+        calendar_items = [
+            {
+                "title": "央行议息窗口（关注流动性预期）",
+                "summary": "建议在会议前后观察利率预期变化对估值与风险偏好的影响。",
+                "impact_direction": "uncertain",
+                "impact_horizon": "1w",
+                "why_relevant_to_stock": f"{stock_code} 对市场风险偏好与资金成本变化较敏感。",
+                "url": "",
+                "published_at": datetime.now(timezone.utc).isoformat(),
+                "source_type": "other",
+            }
+        ]
+        for item in ann:
+            calendar_items.append(
+                {
+                    "title": str(item.get("title", "公司公告")).strip()[:220],
+                    "summary": str(item.get("content", "建议核对公告正文")).strip()[:320],
+                    "impact_direction": "mixed",
+                    "impact_horizon": "1w",
+                    "why_relevant_to_stock": f"{stock_code} 直接公告事项，需核实披露细节。",
+                    "url": str(item.get("source_url", "")).strip()[:420],
+                    "published_at": str(item.get("event_time", "")).strip()[:64],
+                    "source_type": "official",
+                }
+            )
+        bias = "hold"
+        if trend.get("momentum_20", 0.0) > 0 and float(quote.get("pct_change", 0.0)) > 0:
+            bias = "buy"
+        elif trend.get("max_drawdown_60", 0.0) > 0.2:
+            bias = "reduce"
+        return {
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "macro_signals": [
+                {
+                    "title": "本地降级情报模式",
+                    "summary": "未获取外部 WebSearch 实时情报，当前结论仅基于本地行情、趋势与公告快照。",
+                    "impact_direction": "uncertain",
+                    "impact_horizon": "1w",
+                    "why_relevant_to_stock": f"问题：{question[:120]}",
+                    "url": "",
+                    "published_at": datetime.now(timezone.utc).isoformat(),
+                    "source_type": "other",
+                }
+            ],
+            "industry_forward_events": [],
+            "stock_specific_catalysts": [],
+            "calendar_watchlist": calendar_items,
+            "impact_chain": [
+                {
+                    "event": "本地降级模式",
+                    "transmission_path": "数据可得性下降 -> 结论置信度下降",
+                    "industry_impact": "行业级外部冲击信息缺失",
+                    "stock_impact": f"{stock_code} 的事件前瞻判断能力下降",
+                    "price_factor": "短期波动解释能力下降",
+                }
+            ],
+            "decision_adjustment": {
+                "signal_bias": bias,
+                "confidence_adjustment": -0.12,
+                "rationale": "外部实时情报不可用，按降级策略下调置信度。",
+            },
+            "citations": [],
+            "confidence_note": "external_websearch_unavailable",
+        }
+
+    def _deep_build_intel_prompt(
+        self,
+        *,
+        stock_code: str,
+        question: str,
+        quote: dict[str, Any],
+        trend: dict[str, Any],
+        quant_20: dict[str, Any],
+    ) -> str:
+        """构建 WebSearch 情报提示词，要求模型输出严格 JSON。"""
+        context = {
+            "stock_code": stock_code,
+            "question": question,
+            "quote": {"price": quote.get("price"), "pct_change": quote.get("pct_change")},
+            "trend": trend,
+            "quant_20": quant_20,
+            "scope": "中国为主 + 全球关键事件",
+            "lookback_hours": 72,
+            "lookahead_days": 30,
+        }
+        return (
+            "你是A股资深投研情报官。请使用模型的 web search 能力，"
+            "检索并总结会影响该股票的宏观、行业、国际与未来会议事件。\n"
+            "必须返回严格 JSON，不要返回 markdown，不要返回多余文本。\n"
+            "要求：\n"
+            "1) 每条情报要有 title/summary/impact_direction/impact_horizon/why_relevant_to_stock/url/published_at/source_type。\n"
+            "2) 覆盖字段：macro_signals, industry_forward_events, stock_specific_catalysts, calendar_watchlist。\n"
+            "3) 给出 impact_chain（事件到股价因子的传导链）。\n"
+            "4) 给出 decision_adjustment: {signal_bias, confidence_adjustment, rationale}。\n"
+            "5) 给出 citations，至少 3 条，优先官方与主流媒体。\n"
+            "JSON schema:\n"
+            "{"
+            "\"as_of\":\"...\","
+            "\"macro_signals\":[],"
+            "\"industry_forward_events\":[],"
+            "\"stock_specific_catalysts\":[],"
+            "\"calendar_watchlist\":[],"
+            "\"impact_chain\":[],"
+            "\"decision_adjustment\":{},"
+            "\"citations\":[],"
+            "\"confidence_note\":\"...\""
+            "}\n"
+            f"context={json.dumps(context, ensure_ascii=False)}"
+        )
+
+    def _deep_fetch_intel_via_llm_websearch(
+        self,
+        *,
+        stock_code: str,
+        question: str,
+        quote: dict[str, Any],
+        trend: dict[str, Any],
+        quant_20: dict[str, Any],
+    ) -> dict[str, Any]:
+        """通过 LLM WebSearch 拉取实时情报；失败时回落到本地降级情报。"""
+        if not (self.settings.llm_external_enabled and self.llm_gateway.providers):
+            return self._deep_local_intel_fallback(stock_code=stock_code, question=question, quote=quote, trend=trend)
+        prompt = self._deep_build_intel_prompt(
+            stock_code=stock_code,
+            question=question,
+            quote=quote,
+            trend=trend,
+            quant_20=quant_20,
+        )
+        state = AgentState(
+            user_id="deep-intel",
+            question=question,
+            stock_codes=[stock_code],
+            trace_id=self.traces.new_trace(),
+        )
+        try:
+            raw = self.llm_gateway.generate(state, prompt)
+            parsed = self._deep_safe_json_loads(raw)
+            normalized = self._deep_validate_intel_payload(parsed)
+            # 保障至少有一条可追溯引用，避免“无来源高确信”。
+            if len(normalized.get("citations", [])) < 1:
+                raise ValueError("intel citations is empty")
+            return normalized
+        except Exception as ex:  # noqa: BLE001
+            self.traces.emit(state.trace_id, "deep_intel_fallback", {"error": str(ex)})
+            return self._deep_local_intel_fallback(stock_code=stock_code, question=question, quote=quote, trend=trend)
+
+    def _deep_build_business_summary(
+        self,
+        *,
+        stock_code: str,
+        question: str,
+        arbitration: dict[str, Any],
+        budget_usage: dict[str, Any],
+        intel: dict[str, Any],
+        replan_triggered: bool,
+        stop_reason: str,
+    ) -> dict[str, Any]:
+        """将仲裁结果与情报层融合成业务可执行摘要。"""
+        decision = intel.get("decision_adjustment", {}) if isinstance(intel, dict) else {}
+        signal = str(arbitration.get("consensus_signal", "hold")).strip().lower()
+        bias = str(decision.get("signal_bias", signal)).strip().lower()
+        if bias in {"buy", "hold", "reduce"} and float(arbitration.get("disagreement_score", 0.0)) <= 0.55:
+            signal = bias
+        base_conf = max(0.0, min(1.0, 1.0 - float(arbitration.get("disagreement_score", 0.0))))
+        confidence = max(0.0, min(1.0, base_conf + float(decision.get("confidence_adjustment", 0.0) or 0.0)))
+        calendar = intel.get("calendar_watchlist", []) if isinstance(intel, dict) else []
+        next_event = calendar[0] if isinstance(calendar, list) and calendar else {}
+        return {
+            "stock_code": stock_code,
+            "question": question[:200],
+            "signal": signal,
+            "confidence": round(confidence, 4),
+            "disagreement_score": float(arbitration.get("disagreement_score", 0.0)),
+            "trigger_condition": str(decision.get("rationale", "关注情报催化与趋势共振。"))[:280],
+            "invalidation_condition": (
+                "若关键风险事件落地偏负面、分歧持续扩大或预算风控触发，则信号失效。"
+            ),
+            "review_time_hint": str(next_event.get("published_at", "")) or "T+1 日内复核",
+            "top_conflict_sources": list(arbitration.get("conflict_sources", []))[:4],
+            "replan_triggered": bool(replan_triggered),
+            "stop_reason": stop_reason,
+            "budget_warn": bool(budget_usage.get("warn")),
+            "budget_exceeded": bool(budget_usage.get("exceeded")),
+            "citations": list(intel.get("citations", []))[:6] if isinstance(intel, dict) else [],
+        }
+
     def query(self, payload: dict[str, Any]) -> dict[str, Any]:
         """执行问答主链路并返回标准化响应。"""
         req = QueryRequest(**payload)
@@ -1232,6 +1549,17 @@ class AShareAgentService:
 
             evidence_ids: list[str] = []
             opinions: list[dict[str, Any]] = []
+            intel_payload: dict[str, Any] = {
+                "as_of": datetime.now(timezone.utc).isoformat(),
+                "macro_signals": [],
+                "industry_forward_events": [],
+                "stock_specific_catalysts": [],
+                "calendar_watchlist": [],
+                "impact_chain": [],
+                "decision_adjustment": {"signal_bias": "hold", "confidence_adjustment": 0.0, "rationale": ""},
+                "citations": [],
+                "confidence_note": "",
+            }
             arbitration = {
                 "consensus_signal": "hold",
                 "disagreement_score": 0.0,
@@ -1286,6 +1614,26 @@ class AShareAgentService:
                 pred = self.predict_run({"stock_codes": [code], "horizons": ["20d"]})
                 horizon_map = {h["horizon"]: h for h in pred["results"][0]["horizons"]} if pred.get("results") else {}
                 quant_20 = horizon_map.get("20d", {})
+                # 引入实时情报阶段：由模型侧 websearch 能力输出结构化情报。
+                yield emit("progress", {"stage": "intel_search", "message": "正在检索宏观/行业/未来事件情报。"})
+                intel_payload = self._deep_fetch_intel_via_llm_websearch(
+                    stock_code=code,
+                    question=question,
+                    quote=quote,
+                    trend=trend,
+                    quant_20=quant_20,
+                )
+                yield emit(
+                    "intel_snapshot",
+                    {
+                        "as_of": intel_payload.get("as_of", ""),
+                        "macro_signals": list(intel_payload.get("macro_signals", []))[:3],
+                        "industry_forward_events": list(intel_payload.get("industry_forward_events", []))[:3],
+                        "stock_specific_catalysts": list(intel_payload.get("stock_specific_catalysts", []))[:3],
+                        "confidence_note": str(intel_payload.get("confidence_note", "")),
+                    },
+                )
+                yield emit("calendar_watchlist", {"items": list(intel_payload.get("calendar_watchlist", []))[:8]})
 
                 yield emit("progress", {"stage": "debate", "message": "生成多 Agent 观点。"})
                 rule_core = self._build_rule_based_debate_opinions(question, trend, quote, quant_20)
@@ -1295,7 +1643,9 @@ class AShareAgentService:
                     if llm_core:
                         core_opinions = llm_core
 
-                evidence_ids = [x for x in {str(quote.get("source_id", "")), str((bars[-1] if bars else {}).get("source_id", ""))} if x]
+                # 将实时情报引用 URL 纳入证据链，后续导出与解释可追溯。
+                intel_urls = [str(x.get("url", "")).strip() for x in list(intel_payload.get("citations", [])) if isinstance(x, dict)]
+                evidence_ids = [x for x in {str(quote.get("source_id", "")), str((bars[-1] if bars else {}).get("source_id", "")), *intel_urls} if x]
                 extra_opinions = [
                     self._normalize_deep_opinion(
                         agent="macro_agent",
@@ -1348,6 +1698,21 @@ class AShareAgentService:
                     for opinion in core_opinions
                 ]
                 opinions = normalized_core + extra_opinions
+                intel_decision = intel_payload.get("decision_adjustment", {})
+                if isinstance(intel_decision, dict):
+                    intel_signal = str(intel_decision.get("signal_bias", "hold")).strip().lower()
+                    if intel_signal in {"buy", "hold", "reduce"}:
+                        intel_conf = max(0.35, min(0.95, 0.58 + float(intel_decision.get("confidence_adjustment", 0.0) or 0.0)))
+                        opinions.append(
+                            self._normalize_deep_opinion(
+                                agent="macro_agent",
+                                signal=intel_signal,
+                                confidence=intel_conf,
+                                reason=f"实时情报融合：{str(intel_decision.get('rationale', '未提供详细解释'))}",
+                                evidence_ids=evidence_ids,
+                                risk_tags=["intel_websearch"],
+                            )
+                        )
 
                 pre_arb = self._arbitrate_opinions(opinions)
                 if float(pre_arb["disagreement_score"]) >= 0.45 and round_no < max_rounds:
@@ -1410,6 +1775,16 @@ class AShareAgentService:
                         "reason": "disagreement_above_threshold",
                     },
                 )
+            business_summary = self._deep_build_business_summary(
+                stock_code=code,
+                question=question,
+                arbitration=arbitration,
+                budget_usage=budget_usage,
+                intel=intel_payload,
+                replan_triggered=replan_triggered,
+                stop_reason=stop_reason,
+            )
+            yield emit("business_summary", dict(business_summary))
 
             session_status = "completed" if round_no >= max_rounds or stop_reason else "in_progress"
             snapshot = self.web.deep_think_append_round(
@@ -1428,6 +1803,8 @@ class AShareAgentService:
                 opinions=opinions,
                 session_status=session_status,
             )
+            # 业务摘要通过会话快照透传给同步接口调用方，便于前端直接展示。
+            snapshot["business_summary"] = business_summary
 
             avg_confidence = sum(float(x.get("confidence", 0.0)) for x in opinions) / max(1, len(opinions))
             quality_score = self._quality_score_for_group_card(
@@ -1806,7 +2183,8 @@ class AShareAgentService:
                     "data_json": json.dumps(item.get("data", {}), ensure_ascii=False),
                 }
             )
-        csv_content = output.getvalue()
+        # 为 Windows Excel 兼容写入 UTF-8 BOM，避免中文列值乱码。
+        csv_content = "\ufeff" + output.getvalue()
         if emit_audit:
             self._emit_deep_archive_audit(
                 session_id=session_id,
@@ -1823,6 +2201,125 @@ class AShareAgentService:
             "filename": f"deepthink-events-{session_id}-{round_value}.csv",
             "content": csv_content,
             "count": len(events),
+        }
+
+    def deep_think_export_business(
+        self,
+        session_id: str,
+        *,
+        round_id: str | None = None,
+        format: str = "csv",
+        limit: int = 400,
+    ) -> dict[str, Any]:
+        """导出业务可读摘要（面向投研/交易），与审计事件导出分离。"""
+        export_format = str(format or "csv").strip().lower() or "csv"
+        if export_format not in {"csv", "json"}:
+            raise ValueError("format must be one of: csv, json")
+        session = self.web.deep_think_get_session(session_id)
+        if not session:
+            return {"error": "not_found", "session_id": session_id}
+        safe_limit = max(20, min(2000, int(limit)))
+        round_id_clean = str(round_id or "").strip()
+        rows: list[dict[str, Any]] = []
+        # 优先使用业务摘要事件，确保导出的是对用户有意义的决策结果。
+        summary_snapshot = self.deep_think_list_events(
+            session_id,
+            round_id=round_id_clean or None,
+            limit=safe_limit,
+            event_name="business_summary",
+        )
+        events = summary_snapshot.get("events", []) if isinstance(summary_snapshot, dict) else []
+        if isinstance(events, list):
+            for item in events:
+                data = item.get("data", {}) if isinstance(item, dict) else {}
+                if not isinstance(data, dict):
+                    continue
+                citations = data.get("citations", [])
+                top_source = ""
+                if isinstance(citations, list) and citations:
+                    top = citations[0] if isinstance(citations[0], dict) else {}
+                    top_source = str(top.get("url", "")).strip()
+                rows.append(
+                    {
+                        "session_id": session_id,
+                        "round_id": str(item.get("round_id", "")),
+                        "round_no": int(item.get("round_no", 0) or 0),
+                        "stock_code": str(data.get("stock_code", "")),
+                        "signal": str(data.get("signal", "hold")),
+                        "confidence": float(data.get("confidence", 0.0) or 0.0),
+                        "trigger_condition": str(data.get("trigger_condition", "")),
+                        "invalidation_condition": str(data.get("invalidation_condition", "")),
+                        "review_time_hint": str(data.get("review_time_hint", "")),
+                        "top_conflict_sources": ",".join(str(x) for x in list(data.get("top_conflict_sources", []))[:4]),
+                        "replan_triggered": bool(data.get("replan_triggered", False)),
+                        "stop_reason": str(data.get("stop_reason", "")),
+                        "top_source_url": top_source,
+                        "created_at": str(item.get("created_at", "")),
+                    }
+                )
+        # 若历史轮次无 business_summary 事件，兜底使用会话 round 快照生成可读摘要。
+        if not rows:
+            rounds = list(session.get("rounds", []))
+            if round_id_clean:
+                rounds = [r for r in rounds if str(r.get("round_id", "")) == round_id_clean]
+            for round_item in rounds[-safe_limit:]:
+                opinions = list(round_item.get("opinions", []))
+                top_opinion = opinions[0] if opinions else {}
+                rows.append(
+                    {
+                        "session_id": session_id,
+                        "round_id": str(round_item.get("round_id", "")),
+                        "round_no": int(round_item.get("round_no", 0) or 0),
+                        "stock_code": ",".join(str(x) for x in session.get("stock_codes", [])),
+                        "signal": str(round_item.get("consensus_signal", "hold")),
+                        "confidence": round(1.0 - float(round_item.get("disagreement_score", 0.0) or 0.0), 4),
+                        "trigger_condition": str(top_opinion.get("reason", "建议结合更多实时情报复核。")),
+                        "invalidation_condition": "若风险因子放大或关键信号反转，则本结论失效。",
+                        "review_time_hint": "T+1 日内复核",
+                        "top_conflict_sources": ",".join(str(x) for x in list(round_item.get("conflict_sources", []))[:4]),
+                        "replan_triggered": bool(round_item.get("replan_triggered", False)),
+                        "stop_reason": str(round_item.get("stop_reason", "")),
+                        "top_source_url": "",
+                        "created_at": str(round_item.get("created_at", "")),
+                    }
+                )
+        round_value = round_id_clean or "all"
+        if export_format == "json":
+            return {
+                "format": "json",
+                "media_type": "application/json; charset=utf-8",
+                "filename": f"deepthink-business-{session_id}-{round_value}.json",
+                "content": json.dumps(rows, ensure_ascii=False, indent=2),
+                "count": len(rows),
+            }
+        output = io.StringIO()
+        fieldnames = [
+            "session_id",
+            "round_id",
+            "round_no",
+            "stock_code",
+            "signal",
+            "confidence",
+            "trigger_condition",
+            "invalidation_condition",
+            "review_time_hint",
+            "top_conflict_sources",
+            "replan_triggered",
+            "stop_reason",
+            "top_source_url",
+            "created_at",
+        ]
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+        return {
+            "format": "csv",
+            "media_type": "text/csv; charset=utf-8",
+            "filename": f"deepthink-business-{session_id}-{round_value}.csv",
+            # 同样加 BOM，确保业务用户在 Excel 中直接可读。
+            "content": "\ufeff" + output.getvalue(),
+            "count": len(rows),
         }
 
     def deep_think_create_export_task(

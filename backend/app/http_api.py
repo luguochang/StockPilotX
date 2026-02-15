@@ -204,6 +204,33 @@ def create_app() -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    @app.get("/v1/deep-think/sessions/{session_id}/business-export")
+    def deep_think_business_export(
+        session_id: str,
+        format: str = "csv",
+        round_id: str = "",
+        limit: int = 400,
+    ):
+        try:
+            result = svc.deep_think_export_business(
+                session_id,
+                round_id=round_id.strip() or None,
+                format=format,
+                limit=limit,
+            )
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+        if _error_code(result):
+            raise HTTPException(status_code=404, detail=result)
+        filename = str(result.get("filename", "deepthink-business.txt"))
+        media_type = str(result.get("media_type", "text/plain; charset=utf-8"))
+        content = str(result.get("content", ""))
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     @app.post("/v1/deep-think/sessions/{session_id}/events/export-tasks")
     def deep_think_events_export_task_create(session_id: str, payload: dict):
         try:

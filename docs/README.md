@@ -12,6 +12,7 @@ This directory keeps project documentation organized by **artifact type** and **
 - Put **date-based reports** under `docs/reports/YYYY-MM-DD/`.
 - Put **optimization iteration notes** under `docs/optimization/YYYY-MM-DD/`.
 - Put **round execution records** under `docs/rounds/YYYY-MM-DD/`.
+- Put **execution checklists** under `docs/checklist/YYYY-MM-DD/`.
 - Put **topic summaries** under `docs/summaries/<topic>/YYYY-MM-DD/`.
 - Put reusable references under `docs/references/`.
 
@@ -43,6 +44,9 @@ This directory keeps project documentation organized by **artifact type** and **
 - Round records:
   - `docs/rounds/README.md`
   - `docs/rounds/2026-02-15/`
+- Checklist:
+  - `docs/checklist/README.md`
+  - `docs/checklist/2026-02-15/`
 - Summaries:
   - `docs/summaries/README.md`
   - `docs/summaries/deepagent/README.md`

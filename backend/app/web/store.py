@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
 
 class WebStore:
     def __init__(self, db_path: str) -> None:
+        # 单连接跨线程访问时需串行化，避免 sqlite API misuse。
+        self._lock = threading.RLock()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._init_schema()
 
     def _init_schema(self) -> None:
-        self.conn.executescript(
-            """
+        with self._lock:
+            self.conn.executescript(
+                """
             CREATE TABLE IF NOT EXISTS user (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT UNIQUE NOT NULL,
@@ -285,17 +289,17 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_deep_think_archive_audit_session ON deep_think_archive_audit(session_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_a2a_task_agent_status ON a2a_task(agent_id, status);
             CREATE INDEX IF NOT EXISTS idx_group_knowledge_topic ON group_knowledge_card(topic, quality_score);
-            """
-        )
-        # 兼容历史库：补齐新增列
-        self._ensure_column("stock_universe", "market_tier", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column("deep_think_round", "task_graph", "TEXT NOT NULL DEFAULT '[]'")
-        self._ensure_column("deep_think_round", "replan_triggered", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column("deep_think_round", "stop_reason", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column("deep_think_round", "budget_usage", "TEXT NOT NULL DEFAULT '{}'")
-        self._ensure_column("deep_think_export_task", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column("deep_think_export_task", "max_attempts", "INTEGER NOT NULL DEFAULT 2")
-        self.conn.commit()
+                """
+            )
+            # 兼容历史库：补齐新增列
+            self._ensure_column("stock_universe", "market_tier", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("deep_think_round", "task_graph", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column("deep_think_round", "replan_triggered", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column("deep_think_round", "stop_reason", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("deep_think_round", "budget_usage", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column("deep_think_export_task", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column("deep_think_export_task", "max_attempts", "INTEGER NOT NULL DEFAULT 2")
+            self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, sql_type: str) -> None:
         cols = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -304,17 +308,21 @@ class WebStore:
         self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> sqlite3.Cursor:
-        cur = self.conn.execute(sql, params)
-        self.conn.commit()
-        return cur
+        with self._lock:
+            cur = self.conn.execute(sql, params)
+            self.conn.commit()
+            return cur
 
     def query_all(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-        rows = self.conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+            return [dict(r) for r in rows]
 
     def query_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
-        row = self.conn.execute(sql, params).fetchone()
-        return dict(row) if row else None
+        with self._lock:
+            row = self.conn.execute(sql, params).fetchone()
+            return dict(row) if row else None
 
     def close(self) -> None:
-        self.conn.close()
+        with self._lock:
+            self.conn.close()

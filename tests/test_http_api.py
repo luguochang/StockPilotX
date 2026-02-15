@@ -357,7 +357,16 @@ class HttpApiTestCase(unittest.TestCase):
             self.assertIn("text/csv", resp.headers.get("Content-Type", ""))
             self.assertIn(".csv", resp.headers.get("Content-Disposition", ""))
             exported_csv = resp.read().decode("utf-8")
-        self.assertIn("event_id,session_id,round_id,round_no,event_seq,event,created_at,data_json", exported_csv.splitlines()[0])
+        self.assertIn("event_id,session_id,round_id,round_no,event_seq,event,created_at,data_json", exported_csv.splitlines()[0].lstrip("\ufeff"))
+        with urllib.request.urlopen(
+            self.base_url + f"/v1/deep-think/sessions/{session_id}/business-export?format=csv&limit=120",
+            timeout=8,
+        ) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIn("text/csv", resp.headers.get("Content-Type", ""))
+            self.assertIn("deepthink-business", resp.headers.get("Content-Disposition", ""))
+            business_csv = resp.read().decode("utf-8")
+        self.assertIn("session_id,round_id,round_no,stock_code,signal,confidence", business_csv.splitlines()[0].lstrip("\ufeff"))
         with self.assertRaises(urllib.error.HTTPError) as bad_time:
             urllib.request.urlopen(  # noqa: S310 - local endpoint
                 self.base_url + f"/v1/deep-think/sessions/{session_id}/events?created_from=2026-02-15T00:00:00",
@@ -454,6 +463,7 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("event: round_started", stream_text)
         self.assertIn("event: agent_opinion_final", stream_text)
         self.assertIn("event: arbitration_final", stream_text)
+        self.assertIn("event: business_summary", stream_text)
         self.assertIn("event: round_persisted", stream_text)
         self.assertIn("event: done", stream_text)
         self.assertIn('"ok": true', stream_text)
