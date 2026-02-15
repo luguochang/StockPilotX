@@ -100,3 +100,14 @@
 ## 2026-02-15T12:20:00Z - Batch G Test Evidence
 - `.\.venv\Scripts\python.exe -m pytest tests/test_service.py tests/test_http_api.py -q`
   - Result: `37 passed`
+
+## 2026-02-15T12:40:00Z - Batch H (Frontend Fixed 3M Summary Card)
+- Added fixed card in advanced analysis UI:
+  - "最近三个月连续样本"
+  - shows sample coverage, interval dates, close range, and interval return.
+- Card is computed from `overview.history` and remains visible independent of LLM answer text.
+- Added no-data fallback guidance message.
+
+## 2026-02-15T12:45:00Z - Batch H Test Evidence
+- `npm --prefix frontend run -s build`
+  - Result: passed

@@ -57,3 +57,9 @@
 - [x] Inject 3-month continuous history context into query/query_stream model input
 - [x] Enforce history min-sample refresh and add 3m window evidence item
 - [x] Re-verify with interface self-test and automated tests
+
+## Batch H - Fixed 3M Summary Card (Frontend)
+- [x] Add fixed 3-month continuous-sample summary card to advanced analysis UI
+- [x] Show sample coverage, interval dates, close price range, and interval pct change
+- [x] Add no-data fallback message for insufficient history
+- [x] Verify with frontend production build

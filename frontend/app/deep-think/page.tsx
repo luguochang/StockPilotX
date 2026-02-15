@@ -1033,6 +1033,26 @@ export default function DeepThinkPage() {
   const pct = Number(overview?.realtime?.pct_change ?? 0);
   const barsCount = Number(overview?.history?.length ?? 0);
   const eventCount = Number(overview?.events?.length ?? 0);
+  // 固定展示最近三个月连续样本摘要，避免用户只能从长文本里找样本覆盖信息。
+  const history3mSummary = useMemo(() => {
+    const bars = [...(overview?.history ?? [])].sort((a, b) => String(a.trade_date).localeCompare(String(b.trade_date)));
+    const window = bars.slice(-90);
+    if (window.length < 2) return null;
+    const start = window[0];
+    const end = window[window.length - 1];
+    const startClose = Number(start.close ?? 0);
+    const endClose = Number(end.close ?? 0);
+    const pctChange = startClose > 0 ? ((endClose / startClose) - 1) * 100 : 0;
+    return {
+      sampleCount: window.length,
+      totalCount: bars.length,
+      startDate: String(start.trade_date ?? ""),
+      endDate: String(end.trade_date ?? ""),
+      startClose,
+      endClose,
+      pctChange,
+    };
+  }, [overview]);
   const bannerItems = [
     "实时行情聚合",
     "历史K线趋势",
@@ -1476,6 +1496,30 @@ export default function DeepThinkPage() {
                 <Tag color="gold">动量 {(overview?.trend?.momentum_20 ?? 0).toFixed(4)}</Tag>
                 <Tag color="volcano">回撤 {(overview?.trend?.max_drawdown_60 ?? 0).toFixed(4)}</Tag>
               </Space>
+            </Card>
+
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>最近三个月连续样本</span>} style={{ marginTop: 12 }}>
+              {history3mSummary ? (
+                <Space direction="vertical" style={{ width: "100%" }} size={6}>
+                  <Space wrap>
+                    <Tag color="blue">样本: {history3mSummary.sampleCount} / 总样本: {history3mSummary.totalCount}</Tag>
+                    <Tag color={history3mSummary.pctChange >= 0 ? "green" : "red"}>
+                      区间涨跌: {history3mSummary.pctChange.toFixed(2)}%
+                    </Tag>
+                  </Space>
+                  <Text style={{ color: "#334155" }}>
+                    区间：{history3mSummary.startDate} {"->"} {history3mSummary.endDate}
+                  </Text>
+                  <Text style={{ color: "#334155" }}>
+                    收盘：{history3mSummary.startClose.toFixed(3)} {"->"} {history3mSummary.endClose.toFixed(3)}
+                  </Text>
+                  <Text style={{ color: "#64748b" }}>
+                    该卡片固定基于连续日线窗口计算，优先用于判断样本覆盖是否足够。
+                  </Text>
+                </Space>
+              ) : (
+                <Text style={{ color: "#64748b" }}>连续样本不足，建议先执行一次高级分析以刷新历史数据。</Text>
+              )}
             </Card>
 
             <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>事件时间线</span>} style={{ marginTop: 12 }}>
