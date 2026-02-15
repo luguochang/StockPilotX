@@ -358,7 +358,25 @@ class AShareAgentService:
             "decision_adjustment": {},
             "citations": [],
             "confidence_note": str(payload.get("confidence_note", "")).strip(),
+            # 诊断字段：统一返回，便于前端明确“是否命中外部实时情报”与失败原因。
+            "intel_status": str(payload.get("intel_status", "external_ok")).strip() or "external_ok",
+            "fallback_reason": str(payload.get("fallback_reason", "")).strip()[:120],
+            "fallback_error": str(payload.get("fallback_error", "")).strip()[:320],
+            "trace_id": str(payload.get("trace_id", "")).strip()[:80],
+            "external_enabled": bool(payload.get("external_enabled", True)),
+            # provider_count 为诊断字段，解析失败时回退 0，避免影响主流程。
+            "provider_count": 0,
+            "provider_names": [],
+            "websearch_tool_requested": bool(payload.get("websearch_tool_requested", False)),
+            "websearch_tool_applied": bool(payload.get("websearch_tool_applied", False)),
         }
+        try:
+            normalized["provider_count"] = max(0, int(payload.get("provider_count", 0) or 0))
+        except Exception:
+            normalized["provider_count"] = 0
+        provider_names = payload.get("provider_names", [])
+        if isinstance(provider_names, list):
+            normalized["provider_names"] = [str(x).strip()[:64] for x in provider_names if str(x).strip()][:8]
         for key in ("macro_signals", "industry_forward_events", "stock_specific_catalysts", "calendar_watchlist"):
             rows = payload.get(key, [])
             if not isinstance(rows, list):
@@ -411,6 +429,27 @@ class AShareAgentService:
                 )
         return normalized
 
+    def _deep_infer_intel_fallback_reason(self, message: str) -> str:
+        """根据异常文本映射稳定原因码，避免前端只能看到含糊报错。"""
+        msg = (message or "").strip().lower()
+        if "external llm disabled" in msg:
+            return "external_disabled"
+        if "no llm providers configured" in msg:
+            return "provider_unconfigured"
+        if "tool" in msg and any(x in msg for x in ("unsupported", "unknown", "invalid")):
+            return "websearch_tool_unsupported"
+        if "citations is empty" in msg:
+            return "no_citations"
+        if "not a valid json object" in msg:
+            return "invalid_json"
+        if "intel payload must be an object" in msg:
+            return "invalid_payload_shape"
+        return "provider_or_parse_error"
+
+    def _deep_enabled_provider_names(self) -> list[str]:
+        """返回当前已启用 provider 名单，用于诊断输出。"""
+        return [str(p.name)[:64] for p in self.llm_gateway.providers if bool(getattr(p, "enabled", True))]
+
     def _deep_local_intel_fallback(
         self,
         *,
@@ -418,8 +457,16 @@ class AShareAgentService:
         question: str,
         quote: dict[str, Any],
         trend: dict[str, Any],
+        fallback_reason: str = "external_websearch_unavailable",
+        fallback_error: str = "",
+        trace_id: str = "",
+        external_enabled: bool | None = None,
+        provider_names: list[str] | None = None,
+        websearch_tool_requested: bool = False,
+        websearch_tool_applied: bool = False,
     ) -> dict[str, Any]:
         """当外部 WebSearch 不可用时，用本地信号生成可解释的降级情报。"""
+        providers = list(provider_names or self._deep_enabled_provider_names())
         ann = [x for x in self.ingestion_store.announcements if str(x.get("stock_code", "")).upper() == stock_code][-3:]
         calendar_items = [
             {
@@ -484,6 +531,15 @@ class AShareAgentService:
             },
             "citations": [],
             "confidence_note": "external_websearch_unavailable",
+            "intel_status": "fallback",
+            "fallback_reason": str(fallback_reason or "external_websearch_unavailable")[:120],
+            "fallback_error": str(fallback_error or "")[:320],
+            "trace_id": str(trace_id or "")[:80],
+            "external_enabled": bool(self.settings.llm_external_enabled if external_enabled is None else external_enabled),
+            "provider_count": len(providers),
+            "provider_names": providers[:8],
+            "websearch_tool_requested": bool(websearch_tool_requested),
+            "websearch_tool_applied": bool(websearch_tool_applied),
         }
 
     def _deep_build_intel_prompt(
@@ -541,8 +597,36 @@ class AShareAgentService:
         quant_20: dict[str, Any],
     ) -> dict[str, Any]:
         """通过 LLM WebSearch 拉取实时情报；失败时回落到本地降级情报。"""
-        if not (self.settings.llm_external_enabled and self.llm_gateway.providers):
-            return self._deep_local_intel_fallback(stock_code=stock_code, question=question, quote=quote, trend=trend)
+        trace_id = self.traces.new_trace()
+        enabled_provider_names = self._deep_enabled_provider_names()
+        if not self.settings.llm_external_enabled:
+            self.traces.emit(
+                trace_id,
+                "deep_intel_fallback",
+                {"reason": "external_disabled", "provider_count": len(enabled_provider_names)},
+            )
+            return self._deep_local_intel_fallback(
+                stock_code=stock_code,
+                question=question,
+                quote=quote,
+                trend=trend,
+                fallback_reason="external_disabled",
+                trace_id=trace_id,
+                external_enabled=False,
+                provider_names=enabled_provider_names,
+            )
+        if not enabled_provider_names:
+            self.traces.emit(trace_id, "deep_intel_fallback", {"reason": "provider_unconfigured", "provider_count": 0})
+            return self._deep_local_intel_fallback(
+                stock_code=stock_code,
+                question=question,
+                quote=quote,
+                trend=trend,
+                fallback_reason="provider_unconfigured",
+                trace_id=trace_id,
+                external_enabled=True,
+                provider_names=enabled_provider_names,
+            )
         prompt = self._deep_build_intel_prompt(
             stock_code=stock_code,
             question=question,
@@ -554,19 +638,84 @@ class AShareAgentService:
             user_id="deep-intel",
             question=question,
             stock_codes=[stock_code],
-            trace_id=self.traces.new_trace(),
+            trace_id=trace_id,
         )
+        # 显式要求 Responses API 挂载 web-search tool，避免“仅靠提示词触发搜索”的不确定性。
+        websearch_overrides = {
+            "tools": [{"type": "web_search_preview"}],
+        }
+        raw = ""
+        tool_applied = False
         try:
-            raw = self.llm_gateway.generate(state, prompt)
+            self.traces.emit(
+                state.trace_id,
+                "deep_intel_start",
+                {
+                    "provider_count": len(enabled_provider_names),
+                    "provider_names": enabled_provider_names,
+                    "websearch_tool_requested": True,
+                },
+            )
+            try:
+                raw = self.llm_gateway.generate(state, prompt, request_overrides=websearch_overrides)
+                tool_applied = True
+            except Exception as tool_ex:  # noqa: BLE001
+                # 若 provider 不支持 tools 字段，降级为“prompt-only”尝试，避免完全不可用。
+                reason = self._deep_infer_intel_fallback_reason(str(tool_ex))
+                if reason != "websearch_tool_unsupported":
+                    raise
+                self.traces.emit(
+                    state.trace_id,
+                    "deep_intel_tool_fallback",
+                    {"reason": reason, "error": str(tool_ex)[:260]},
+                )
+                raw = self.llm_gateway.generate(state, prompt)
             parsed = self._deep_safe_json_loads(raw)
             normalized = self._deep_validate_intel_payload(parsed)
             # 保障至少有一条可追溯引用，避免“无来源高确信”。
             if len(normalized.get("citations", [])) < 1:
                 raise ValueError("intel citations is empty")
+            normalized["intel_status"] = "external_ok"
+            normalized["fallback_reason"] = ""
+            normalized["fallback_error"] = ""
+            normalized["trace_id"] = state.trace_id
+            normalized["external_enabled"] = True
+            normalized["provider_count"] = len(enabled_provider_names)
+            normalized["provider_names"] = enabled_provider_names[:8]
+            normalized["websearch_tool_requested"] = True
+            normalized["websearch_tool_applied"] = bool(tool_applied)
+            if not str(normalized.get("confidence_note", "")).strip():
+                normalized["confidence_note"] = "external_websearch_ready"
+            self.traces.emit(
+                state.trace_id,
+                "deep_intel_success",
+                {
+                    "citations_count": len(normalized.get("citations", [])),
+                    "websearch_tool_applied": bool(tool_applied),
+                    "provider_count": len(enabled_provider_names),
+                },
+            )
             return normalized
         except Exception as ex:  # noqa: BLE001
-            self.traces.emit(state.trace_id, "deep_intel_fallback", {"error": str(ex)})
-            return self._deep_local_intel_fallback(stock_code=stock_code, question=question, quote=quote, trend=trend)
+            reason = self._deep_infer_intel_fallback_reason(str(ex))
+            self.traces.emit(
+                state.trace_id,
+                "deep_intel_fallback",
+                {"reason": reason, "error": str(ex)[:280], "raw_size": len(raw)},
+            )
+            return self._deep_local_intel_fallback(
+                stock_code=stock_code,
+                question=question,
+                quote=quote,
+                trend=trend,
+                fallback_reason=reason,
+                fallback_error=str(ex),
+                trace_id=state.trace_id,
+                external_enabled=True,
+                provider_names=enabled_provider_names,
+                websearch_tool_requested=True,
+                websearch_tool_applied=bool(tool_applied),
+            )
 
     def _deep_build_business_summary(
         self,
@@ -581,6 +730,7 @@ class AShareAgentService:
     ) -> dict[str, Any]:
         """将仲裁结果与情报层融合成业务可执行摘要。"""
         decision = intel.get("decision_adjustment", {}) if isinstance(intel, dict) else {}
+        citations = list(intel.get("citations", [])) if isinstance(intel, dict) else []
         signal = str(arbitration.get("consensus_signal", "hold")).strip().lower()
         bias = str(decision.get("signal_bias", signal)).strip().lower()
         if bias in {"buy", "hold", "reduce"} and float(arbitration.get("disagreement_score", 0.0)) <= 0.55:
@@ -605,7 +755,12 @@ class AShareAgentService:
             "stop_reason": stop_reason,
             "budget_warn": bool(budget_usage.get("warn")),
             "budget_exceeded": bool(budget_usage.get("exceeded")),
-            "citations": list(intel.get("citations", []))[:6] if isinstance(intel, dict) else [],
+            "citations": citations[:6],
+            "intel_status": str(intel.get("intel_status", "")) if isinstance(intel, dict) else "",
+            "intel_fallback_reason": str(intel.get("fallback_reason", "")) if isinstance(intel, dict) else "",
+            "intel_confidence_note": str(intel.get("confidence_note", "")) if isinstance(intel, dict) else "",
+            "intel_trace_id": str(intel.get("trace_id", "")) if isinstance(intel, dict) else "",
+            "intel_citation_count": len(citations),
         }
 
     def query(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1559,6 +1714,15 @@ class AShareAgentService:
                 "decision_adjustment": {"signal_bias": "hold", "confidence_adjustment": 0.0, "rationale": ""},
                 "citations": [],
                 "confidence_note": "",
+                "intel_status": "",
+                "fallback_reason": "",
+                "fallback_error": "",
+                "trace_id": "",
+                "external_enabled": bool(self.settings.llm_external_enabled),
+                "provider_count": 0,
+                "provider_names": [],
+                "websearch_tool_requested": False,
+                "websearch_tool_applied": False,
             }
             arbitration = {
                 "consensus_signal": "hold",
@@ -1631,6 +1795,26 @@ class AShareAgentService:
                         "industry_forward_events": list(intel_payload.get("industry_forward_events", []))[:3],
                         "stock_specific_catalysts": list(intel_payload.get("stock_specific_catalysts", []))[:3],
                         "confidence_note": str(intel_payload.get("confidence_note", "")),
+                        "intel_status": str(intel_payload.get("intel_status", "")),
+                        "fallback_reason": str(intel_payload.get("fallback_reason", "")),
+                        "fallback_error": str(intel_payload.get("fallback_error", "")),
+                        "trace_id": str(intel_payload.get("trace_id", "")),
+                        "citations_count": len(list(intel_payload.get("citations", []))),
+                        "provider_count": int(intel_payload.get("provider_count", 0) or 0),
+                        "provider_names": list(intel_payload.get("provider_names", []))[:8],
+                        "websearch_tool_requested": bool(intel_payload.get("websearch_tool_requested", False)),
+                        "websearch_tool_applied": bool(intel_payload.get("websearch_tool_applied", False)),
+                    },
+                )
+                # 单独下发状态事件，便于前端或测试脚本快速判断是否命中外部实时检索。
+                yield emit(
+                    "intel_status",
+                    {
+                        "intel_status": str(intel_payload.get("intel_status", "")),
+                        "fallback_reason": str(intel_payload.get("fallback_reason", "")),
+                        "confidence_note": str(intel_payload.get("confidence_note", "")),
+                        "trace_id": str(intel_payload.get("trace_id", "")),
+                        "citations_count": len(list(intel_payload.get("citations", []))),
                     },
                 )
                 yield emit("calendar_watchlist", {"items": list(intel_payload.get("calendar_watchlist", []))[:8]})
@@ -2321,6 +2505,81 @@ class AShareAgentService:
             "content": "\ufeff" + output.getvalue(),
             "count": len(rows),
         }
+
+    def deep_think_intel_self_test(self, *, stock_code: str, question: str = "") -> dict[str, Any]:
+        """DeepThink 情报链路自检：验证外部开关/provider/websearch 与 fallback 原因。"""
+        code = (stock_code or "SH600000").upper().replace(".", "")
+        probe_question = (question or f"请做 {code} 的未来30日宏观+行业+事件情报自检").strip()
+        provider_rows = [
+            {
+                "name": str(p.name),
+                "enabled": bool(p.enabled),
+                "api_style": str(p.api_style),
+                "model": str(p.model),
+            }
+            for p in self.llm_gateway.providers
+        ]
+        # 尽量使用接近真实链路的数据快照，避免“自检通过但实战失败”的偏差。
+        if self._needs_quote_refresh(code):
+            self.ingest_market_daily([code])
+        if self._needs_history_refresh(code):
+            self.ingestion.ingest_history_daily([code], limit=260)
+        quote = self._latest_quote(code) or {}
+        bars = self._history_bars(code, limit=180)
+        trend = self._trend_metrics(bars) if len(bars) >= 30 else {}
+        pred = self.predict_run({"stock_codes": [code], "horizons": ["20d"]})
+        horizon_map = {h["horizon"]: h for h in pred["results"][0]["horizons"]} if pred.get("results") else {}
+        quant_20 = horizon_map.get("20d", {})
+
+        intel = self._deep_fetch_intel_via_llm_websearch(
+            stock_code=code,
+            question=probe_question,
+            quote=quote,
+            trend=trend,
+            quant_20=quant_20,
+        )
+        trace_id = str(intel.get("trace_id", ""))
+        trace_rows = self.deep_think_trace_events(trace_id, limit=120).get("events", []) if trace_id else []
+        citations = list(intel.get("citations", [])) if isinstance(intel, dict) else []
+        return {
+            "ok": str(intel.get("intel_status", "")) == "external_ok",
+            "stock_code": code,
+            "question": probe_question,
+            "external_enabled": bool(self.settings.llm_external_enabled),
+            "provider_count": len([x for x in provider_rows if bool(x.get("enabled"))]),
+            "providers": provider_rows,
+            "intel_status": str(intel.get("intel_status", "")),
+            "confidence_note": str(intel.get("confidence_note", "")),
+            "fallback_reason": str(intel.get("fallback_reason", "")),
+            "fallback_error": str(intel.get("fallback_error", "")),
+            "websearch_tool_requested": bool(intel.get("websearch_tool_requested", False)),
+            "websearch_tool_applied": bool(intel.get("websearch_tool_applied", False)),
+            "citation_count": len(citations),
+            "trace_id": trace_id,
+            "trace_events": trace_rows,
+            "preview": {
+                "as_of": str(intel.get("as_of", "")),
+                "macro_titles": [str(x.get("title", "")) for x in list(intel.get("macro_signals", []))[:3]],
+                "calendar_titles": [str(x.get("title", "")) for x in list(intel.get("calendar_watchlist", []))[:5]],
+            },
+        }
+
+    def deep_think_trace_events(self, trace_id: str, *, limit: int = 80) -> dict[str, Any]:
+        """输出 trace 事件明细，便于排查外部检索降级原因。"""
+        safe_trace_id = str(trace_id or "").strip()
+        if not safe_trace_id:
+            return {"trace_id": "", "count": 0, "events": []}
+        safe_limit = max(1, min(500, int(limit)))
+        events = self.traces.list_events(safe_trace_id)
+        rows = [
+            {
+                "ts_ms": int(item.ts_ms),
+                "name": str(item.name),
+                "payload": dict(item.payload),
+            }
+            for item in events[-safe_limit:]
+        ]
+        return {"trace_id": safe_trace_id, "count": len(rows), "events": rows}
 
     def deep_think_create_export_task(
         self,

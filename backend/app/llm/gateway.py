@@ -75,8 +75,17 @@ class MultiProviderLLMGateway:
         rows = self.settings.load_llm_provider_configs()
         return [ProviderConfig.from_dict(x, self.settings.llm_request_timeout_seconds) for x in rows]
 
-    def generate(self, state: AgentState, prompt: str) -> str:
-        """Call external LLM and return text; raise if all providers fail."""
+    def generate(
+        self,
+        state: AgentState,
+        prompt: str,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> str:
+        """Call external LLM and return text; raise if all providers fail.
+
+        request_overrides 用于本次请求临时注入 body 字段（例如 Responses 的 tools），
+        不会改写 provider 的持久配置。
+        """
         if not self.settings.llm_external_enabled:
             raise RuntimeError("external llm disabled")
         if not self.providers:
@@ -87,7 +96,7 @@ class MultiProviderLLMGateway:
             if not p.enabled:
                 continue
             try:
-                text = self._call_with_retry(p, prompt)
+                text = self._call_with_retry(p, prompt, request_overrides=request_overrides)
                 if text.strip():
                     # 将实际成功的模型信息回写到 state，供上层事件透传给前端展示。
                     state.analysis["llm_provider"] = p.name
@@ -102,8 +111,16 @@ class MultiProviderLLMGateway:
                 continue
         raise RuntimeError("all llm providers failed: " + "; ".join(errors))
 
-    def stream_generate(self, state: AgentState, prompt: str) -> Iterator[str]:
-        """Stream external model delta chunks."""
+    def stream_generate(
+        self,
+        state: AgentState,
+        prompt: str,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> Iterator[str]:
+        """Stream external model delta chunks.
+
+        request_overrides 的语义与 generate 保持一致。
+        """
         if not self.settings.llm_external_enabled:
             raise RuntimeError("external llm disabled")
         if not self.providers:
@@ -115,7 +132,7 @@ class MultiProviderLLMGateway:
                 continue
             try:
                 emitted = False
-                for chunk in self._stream_with_retry(p, prompt):
+                for chunk in self._stream_with_retry(p, prompt, request_overrides=request_overrides):
                     if chunk:
                         emitted = True
                         yield chunk
@@ -133,33 +150,48 @@ class MultiProviderLLMGateway:
                 continue
         raise RuntimeError("all llm providers failed: " + "; ".join(errors))
 
-    def _call_with_retry(self, provider: ProviderConfig, prompt: str) -> str:
+    def _call_with_retry(
+        self,
+        provider: ProviderConfig,
+        prompt: str,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> str:
         attempts = max(1, self.settings.llm_retry_count)
         last_err: Exception | None = None
         for _ in range(attempts):
             try:
-                return self._call_provider(provider, prompt)
+                return self._call_provider(provider, prompt, request_overrides=request_overrides)
             except Exception as ex:  # noqa: BLE001
                 last_err = ex
         if last_err:
             raise last_err
         raise RuntimeError("unknown llm call error")
 
-    def _call_provider(self, provider: ProviderConfig, prompt: str) -> str:
+    def _call_provider(
+        self,
+        provider: ProviderConfig,
+        prompt: str,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> str:
         if provider.api_style == "anthropic_messages":
-            return self._call_anthropic_messages(provider, prompt)
+            return self._call_anthropic_messages(provider, prompt, request_overrides=request_overrides)
         if provider.api_style == "openai_chat":
-            return self._call_openai_chat(provider, prompt)
+            return self._call_openai_chat(provider, prompt, request_overrides=request_overrides)
         if provider.api_style == "openai_responses":
-            return self._call_openai_responses(provider, prompt)
+            return self._call_openai_responses(provider, prompt, request_overrides=request_overrides)
         raise RuntimeError(f"unsupported api_style: {provider.api_style}")
 
-    def _stream_with_retry(self, provider: ProviderConfig, prompt: str) -> Iterator[str]:
+    def _stream_with_retry(
+        self,
+        provider: ProviderConfig,
+        prompt: str,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> Iterator[str]:
         attempts = max(1, self.settings.llm_retry_count)
         last_err: Exception | None = None
         for idx in range(attempts):
             try:
-                yield from self._stream_provider(provider, prompt)
+                yield from self._stream_provider(provider, prompt, request_overrides=request_overrides)
                 return
             except Exception as ex:  # noqa: BLE001
                 last_err = ex
@@ -171,19 +203,29 @@ class MultiProviderLLMGateway:
             raise last_err
         raise RuntimeError("unknown llm stream error")
 
-    def _stream_provider(self, provider: ProviderConfig, prompt: str) -> Iterator[str]:
+    def _stream_provider(
+        self,
+        provider: ProviderConfig,
+        prompt: str,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> Iterator[str]:
         if provider.api_style == "anthropic_messages":
-            yield from self._stream_anthropic_messages(provider, prompt)
+            yield from self._stream_anthropic_messages(provider, prompt, request_overrides=request_overrides)
             return
         if provider.api_style == "openai_chat":
-            yield from self._stream_openai_chat(provider, prompt)
+            yield from self._stream_openai_chat(provider, prompt, request_overrides=request_overrides)
             return
         if provider.api_style == "openai_responses":
-            yield from self._stream_openai_responses(provider, prompt)
+            yield from self._stream_openai_responses(provider, prompt, request_overrides=request_overrides)
             return
         raise RuntimeError(f"unsupported api_style: {provider.api_style}")
 
-    def _call_anthropic_messages(self, provider: ProviderConfig, prompt: str) -> str:
+    def _call_anthropic_messages(
+        self,
+        provider: ProviderConfig,
+        prompt: str,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> str:
         endpoint = _join_url(provider.api_base, "messages")
         body: dict[str, Any] = {
             "model": provider.model,
@@ -193,7 +235,8 @@ class MultiProviderLLMGateway:
             "messages": [{"role": "user", "content": prompt}],
             "stream": provider.stream,
         }
-        body.update(provider.extra_body)
+        self._merge_request_body(body, provider.extra_body)
+        self._merge_request_body(body, request_overrides)
         headers = self._build_headers(provider)
         headers["anthropic-version"] = provider.anthropic_version
         payload = self._post_json(endpoint, body, headers, provider.timeout_seconds, stream=provider.stream)
@@ -201,7 +244,12 @@ class MultiProviderLLMGateway:
             return self._parse_anthropic_stream(payload)
         return self._parse_anthropic_response(payload)
 
-    def _call_openai_chat(self, provider: ProviderConfig, prompt: str) -> str:
+    def _call_openai_chat(
+        self,
+        provider: ProviderConfig,
+        prompt: str,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> str:
         endpoint = _join_url(provider.api_base, "chat/completions")
         body: dict[str, Any] = {
             "model": provider.model,
@@ -211,14 +259,20 @@ class MultiProviderLLMGateway:
             "messages": [{"role": "user", "content": prompt}],
             "stream": provider.stream,
         }
-        body.update(provider.extra_body)
+        self._merge_request_body(body, provider.extra_body)
+        self._merge_request_body(body, request_overrides)
         headers = self._build_headers(provider)
         payload = self._post_json(endpoint, body, headers, provider.timeout_seconds, stream=provider.stream)
         if provider.stream:
             return self._parse_openai_stream(payload)
         return self._parse_openai_response(payload)
 
-    def _call_openai_responses(self, provider: ProviderConfig, prompt: str) -> str:
+    def _call_openai_responses(
+        self,
+        provider: ProviderConfig,
+        prompt: str,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> str:
         endpoint = _join_url(provider.api_base, "responses")
         body: dict[str, Any] = {
             "model": provider.model,
@@ -236,12 +290,18 @@ class MultiProviderLLMGateway:
             ],
             "stream": False,
         }
-        body.update(provider.extra_body)
+        self._merge_request_body(body, provider.extra_body)
+        self._merge_request_body(body, request_overrides)
         headers = self._build_headers(provider)
         payload = self._post_json(endpoint, body, headers, provider.timeout_seconds, stream=False)
         return self._parse_openai_responses_response(payload)
 
-    def _stream_anthropic_messages(self, provider: ProviderConfig, prompt: str) -> Iterator[str]:
+    def _stream_anthropic_messages(
+        self,
+        provider: ProviderConfig,
+        prompt: str,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> Iterator[str]:
         endpoint = _join_url(provider.api_base, "messages")
         body: dict[str, Any] = {
             "model": provider.model,
@@ -251,7 +311,8 @@ class MultiProviderLLMGateway:
             "messages": [{"role": "user", "content": prompt}],
             "stream": True,
         }
-        body.update(provider.extra_body)
+        self._merge_request_body(body, provider.extra_body)
+        self._merge_request_body(body, request_overrides)
         headers = self._build_headers(provider)
         headers["anthropic-version"] = provider.anthropic_version
         yielded = False
@@ -265,7 +326,12 @@ class MultiProviderLLMGateway:
         if not yielded:
             raise RuntimeError("anthropic stream missing delta text")
 
-    def _stream_openai_chat(self, provider: ProviderConfig, prompt: str) -> Iterator[str]:
+    def _stream_openai_chat(
+        self,
+        provider: ProviderConfig,
+        prompt: str,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> Iterator[str]:
         endpoint = _join_url(provider.api_base, "chat/completions")
         body: dict[str, Any] = {
             "model": provider.model,
@@ -275,7 +341,8 @@ class MultiProviderLLMGateway:
             "messages": [{"role": "user", "content": prompt}],
             "stream": True,
         }
-        body.update(provider.extra_body)
+        self._merge_request_body(body, provider.extra_body)
+        self._merge_request_body(body, request_overrides)
         headers = self._build_headers(provider)
         yielded = False
         for event in self._iter_sse_events(endpoint, body, headers, provider.timeout_seconds):
@@ -288,7 +355,12 @@ class MultiProviderLLMGateway:
         if not yielded:
             raise RuntimeError("openai stream missing delta content")
 
-    def _stream_openai_responses(self, provider: ProviderConfig, prompt: str) -> Iterator[str]:
+    def _stream_openai_responses(
+        self,
+        provider: ProviderConfig,
+        prompt: str,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> Iterator[str]:
         endpoint = _join_url(provider.api_base, "responses")
         body: dict[str, Any] = {
             "model": provider.model,
@@ -306,7 +378,8 @@ class MultiProviderLLMGateway:
             ],
             "stream": True,
         }
-        body.update(provider.extra_body)
+        self._merge_request_body(body, provider.extra_body)
+        self._merge_request_body(body, request_overrides)
         headers = self._build_headers(provider)
         yielded = False
         for event in self._iter_sse_events(endpoint, body, headers, provider.timeout_seconds):
@@ -342,6 +415,18 @@ class MultiProviderLLMGateway:
                 headers["x-api-key"] = provider.api_key
         headers.update(provider.extra_headers)
         return headers
+
+    @staticmethod
+    def _merge_request_body(base: dict[str, Any], patch: dict[str, Any] | None) -> None:
+        """递归合并请求 body，支持按请求覆盖 provider 默认参数。"""
+        if not patch:
+            return
+        for key, value in patch.items():
+            # 仅当双方都是 dict 才递归，其他类型直接覆盖，保持行为可预测。
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                MultiProviderLLMGateway._merge_request_body(base[key], value)
+            else:
+                base[key] = value
 
     @staticmethod
     def _post_json(

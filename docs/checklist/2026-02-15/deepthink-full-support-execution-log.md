@@ -51,3 +51,33 @@
 
 ## Commit Records
 - `edf7618` - `feat(deep-think): redesign console and add LLM-intel business export`
+
+## 2026-02-15T10:40:00Z - Batch F (Intel Observability + Self-Test)
+- Backend diagnostics hardening:
+  - Added stable fallback reason code mapping in DeepThink intelligence path.
+  - Added explicit responses-tool request support in LLM gateway (`request_overrides`).
+  - Added structured intel diagnostic fields:
+    - `intel_status`
+    - `fallback_reason`
+    - `fallback_error`
+    - `trace_id`
+    - `websearch_tool_requested`
+    - `websearch_tool_applied`
+  - Added stream event `intel_status`.
+- API and service:
+  - Added `GET /v1/deep-think/intel/self-test`.
+  - Added `GET /v1/deep-think/intel/traces/{trace_id}`.
+- Frontend:
+  - Added “情报链路自检” action.
+  - Added status/reason/trace visibility in analysis cards.
+
+## 2026-02-15T10:50:00Z - Batch F Test Evidence
+- `.\.venv\Scripts\python.exe -m pytest tests/test_service.py tests/test_http_api.py -q`
+  - Result: `34 passed`
+- `npm --prefix frontend run -s build`
+  - Result: passed
+- Manual self-test snapshot (`deep_think_intel_self_test`):
+  - `intel_status=fallback`
+  - `fallback_reason=external_disabled`
+  - `external_enabled=false`
+  - `trace_event=deep_intel_fallback`

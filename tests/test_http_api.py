@@ -309,6 +309,8 @@ class HttpApiTestCase(unittest.TestCase):
             self.assertEqual(resp.status, 200)
             stream_text = resp.read().decode("utf-8", errors="ignore")
         self.assertIn("event: round_started", stream_text)
+        self.assertIn("event: intel_snapshot", stream_text)
+        self.assertIn("event: intel_status", stream_text)
         self.assertIn("event: agent_opinion_final", stream_text)
         self.assertIn("event: arbitration_final", stream_text)
         latest = round_snapshot["rounds"][-1]
@@ -461,6 +463,8 @@ class HttpApiTestCase(unittest.TestCase):
             self.assertEqual(resp.status, 200)
             stream_text = resp.read().decode("utf-8", errors="ignore")
         self.assertIn("event: round_started", stream_text)
+        self.assertIn("event: intel_snapshot", stream_text)
+        self.assertIn("event: intel_status", stream_text)
         self.assertIn("event: agent_opinion_final", stream_text)
         self.assertIn("event: arbitration_final", stream_text)
         self.assertIn("event: business_summary", stream_text)
@@ -489,6 +493,19 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c2, 200)
         latest = snapshot["rounds"][-1]
         self.assertEqual(latest["stop_reason"], "DEEP_BUDGET_EXCEEDED")
+
+    def test_deep_think_intel_self_test_and_trace(self) -> None:
+        c1, probe = self._get("/v1/deep-think/intel/self-test?stock_code=SH600000&question=%E8%87%AA%E6%A3%80")
+        self.assertEqual(c1, 200)
+        self.assertIn("intel_status", probe)
+        self.assertIn("fallback_reason", probe)
+        self.assertIn("trace_id", probe)
+        self.assertIn("trace_events", probe)
+        trace_id = urllib.parse.quote(str(probe.get("trace_id", "")))
+        c2, trace_rows = self._get(f"/v1/deep-think/intel/traces/{trace_id}?limit=80")
+        self.assertEqual(c2, 200)
+        self.assertIn("events", trace_rows)
+        self.assertTrue(isinstance(trace_rows["events"], list))
 
 
 if __name__ == "__main__":

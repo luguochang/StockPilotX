@@ -231,6 +231,16 @@ def create_app() -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    @app.get("/v1/deep-think/intel/self-test")
+    def deep_think_intel_self_test(stock_code: str = "SH600000", question: str = ""):
+        """实时情报链路自检：输出开关/provider/tool/fallback 诊断信息。"""
+        return svc.deep_think_intel_self_test(stock_code=stock_code, question=question)
+
+    @app.get("/v1/deep-think/intel/traces/{trace_id}")
+    def deep_think_intel_trace_events(trace_id: str, limit: int = 120):
+        """按 trace_id 查询情报链路日志，便于前后端联调排障。"""
+        return svc.deep_think_trace_events(trace_id, limit=limit)
+
     @app.post("/v1/deep-think/sessions/{session_id}/events/export-tasks")
     def deep_think_events_export_task_create(session_id: str, payload: dict):
         try:

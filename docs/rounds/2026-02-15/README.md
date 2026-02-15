@@ -12,6 +12,7 @@
 - `docs/rounds/2026-02-15/round-M-deepthink-export-retry-metrics-ux.md`
 - `docs/rounds/2026-02-15/round-N-deepthink-v2-true-stream.md`
 - `docs/rounds/2026-02-15/round-O-deepthink-console-intel-business-export.md`
+- `docs/rounds/2026-02-15/round-P-deepthink-intel-observability-selftest.md`
 
 ## Notes
 - Round records are append-only history for implementation execution.

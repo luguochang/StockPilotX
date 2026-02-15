@@ -120,6 +120,8 @@ class ServiceTestCase(unittest.TestCase):
         stream_events = list(self.svc.deep_think_stream_events(session_id))
         names = [x["event"] for x in stream_events]
         self.assertIn("round_started", names)
+        self.assertIn("intel_snapshot", names)
+        self.assertIn("intel_status", names)
         self.assertIn("agent_opinion_final", names)
         self.assertIn("arbitration_final", names)
         self.assertIn("business_summary", names)
@@ -203,6 +205,8 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(snapshot["current_round"], 1)
         names = [str(x.get("event", "")) for x in events]
         self.assertIn("round_started", names)
+        self.assertIn("intel_snapshot", names)
+        self.assertIn("intel_status", names)
         self.assertIn("agent_opinion_final", names)
         self.assertIn("arbitration_final", names)
         self.assertIn("business_summary", names)
@@ -342,6 +346,20 @@ class ServiceTestCase(unittest.TestCase):
             self.assertGreaterEqual(int(final_task.get("max_attempts", 0)), int(final_task.get("attempt_count", 0)))
         finally:
             self.svc.deep_think_export_events = original_export  # type: ignore[assignment]
+
+    def test_deep_think_intel_self_test_and_trace(self) -> None:
+        result = self.svc.deep_think_intel_self_test(stock_code="SH600000", question="测试实时情报链路")
+        self.assertIn("external_enabled", result)
+        self.assertIn("provider_count", result)
+        self.assertIn("intel_status", result)
+        self.assertIn("fallback_reason", result)
+        self.assertIn("trace_id", result)
+        self.assertIn("trace_events", result)
+        self.assertTrue(isinstance(result["trace_events"], list))
+        self.assertIn(result["intel_status"], {"external_ok", "fallback"})
+        trace_rows = self.svc.deep_think_trace_events(str(result.get("trace_id", "")), limit=60)
+        self.assertIn("events", trace_rows)
+        self.assertTrue(isinstance(trace_rows["events"], list))
 
     def test_a2a_task_lifecycle(self) -> None:
         created = self.svc.deep_think_create_session(

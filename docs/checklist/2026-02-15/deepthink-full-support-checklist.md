@@ -12,7 +12,7 @@
 - [x] Every code change includes clear comments for readability
 - [x] Each finished implementation item is marked done in this checklist
 - [x] Run self-test for each implementation batch and record results
-- [ ] Commit after each completed batch with clear commit message
+- [x] Commit after each completed batch with clear commit message
 
 ## Batch A - Console UX Redesign
 - [x] Add `analysis` / `engineering` view mode in DeepThink page
@@ -42,3 +42,10 @@
 - [x] Update round docs and report docs with implementation notes
 - [x] Final self-test run and result capture
 - [x] Final commit(s) with referenced checklist/log
+
+## Batch F - Intel Observability and Self-Test
+- [x] Add stable fallback reason codes for intelligence downgrade path
+- [x] Add DeepThink intel self-test API for one-shot diagnostics
+- [x] Add trace event query API for intelligence chain debugging
+- [x] Expose intel status/reason/trace fields in stream events and frontend cards
+- [x] Verify with backend tests + frontend build + manual self-test output

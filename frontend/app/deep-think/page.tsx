@@ -263,6 +263,9 @@ export default function DeepThinkPage() {
   const [deepArchiveCursorHistory, setDeepArchiveCursorHistory] = useState<number[]>([]);
   const [deepArchiveExporting, setDeepArchiveExporting] = useState(false);
   const [deepArchiveExportTask, setDeepArchiveExportTask] = useState<DeepThinkExportTaskSnapshot | null>(null);
+  // 实时情报链路自检结果：用于快速确认 external/websearch/fallback 状态。
+  const [deepIntelProbe, setDeepIntelProbe] = useState<Record<string, any> | null>(null);
+  const [deepIntelProbeLoading, setDeepIntelProbeLoading] = useState(false);
 
   function formatDeepPercent(used: number, limit: number): number {
     const safeLimit = Number(limit) <= 0 ? 1 : Number(limit);
@@ -911,6 +914,27 @@ export default function DeepThinkPage() {
     }
   }
 
+  async function runDeepIntelSelfTest() {
+    setDeepIntelProbeLoading(true);
+    setDeepError("");
+    try {
+      const params = new URLSearchParams({
+        stock_code: stockCode,
+        question: question || `请自检 ${stockCode} 的实时情报链路`,
+      });
+      const resp = await fetch(`${API_BASE}/v1/deep-think/intel/self-test?${params.toString()}`);
+      const body = await resp.json();
+      if (!resp.ok) throw new Error(body?.detail ?? `HTTP ${resp.status}`);
+      setDeepIntelProbe(body as Record<string, any>);
+      appendDeepEvent("intel_self_test", body as Record<string, any>);
+      setDeepProgressText("情报链路自检已完成。");
+    } catch (e) {
+      setDeepError(e instanceof Error ? e.message : "情报链路自检失败");
+    } finally {
+      setDeepIntelProbeLoading(false);
+    }
+  }
+
   async function runDeepThinkRoundViaA2A() {
     setDeepLoading(true);
     setDeepError("");
@@ -1060,6 +1084,8 @@ export default function DeepThinkPage() {
       "arbitration_final",
       "replan_triggered",
       "intel_snapshot",
+      "intel_status",
+      "intel_self_test",
       "calendar_watchlist",
       "business_summary",
       "done",
@@ -1547,6 +1573,9 @@ export default function DeepThinkPage() {
                       <Button onClick={() => exportDeepThinkBusiness("csv")} disabled={!deepSession?.session_id} loading={deepArchiveExporting}>
                         导出业务结论CSV
                       </Button>
+                      <Button onClick={runDeepIntelSelfTest} loading={deepIntelProbeLoading}>
+                        情报链路自检
+                      </Button>
                     </Space>
                     <Space direction="vertical" size={4} style={{ width: "100%" }}>
                       <Text style={{ color: "#334155" }}>
@@ -1591,6 +1620,17 @@ export default function DeepThinkPage() {
                             <Tag>confidence: {Number(deepLatestBusinessSummary.confidence ?? 0).toFixed(3)}</Tag>
                             <Tag>review: {String(deepLatestBusinessSummary.review_time_hint ?? "-")}</Tag>
                           </Space>
+                          <Space wrap>
+                            <Tag color={String(deepLatestBusinessSummary.intel_status) === "external_ok" ? "green" : "gold"}>
+                              intel_status: {String(deepLatestBusinessSummary.intel_status ?? "-")}
+                            </Tag>
+                            {String(deepLatestBusinessSummary.intel_fallback_reason ?? "").trim() ? (
+                              <Tag color="orange">fallback_reason: {String(deepLatestBusinessSummary.intel_fallback_reason)}</Tag>
+                            ) : null}
+                            {String(deepLatestBusinessSummary.intel_trace_id ?? "").trim() ? (
+                              <Tag color="cyan">trace: {String(deepLatestBusinessSummary.intel_trace_id)}</Tag>
+                            ) : null}
+                          </Space>
                           <Text style={{ color: "#334155" }}>
                             触发条件：{String(deepLatestBusinessSummary.trigger_condition ?? "-")}
                           </Text>
@@ -1604,6 +1644,23 @@ export default function DeepThinkPage() {
                       <Card size="small" title={<span style={{ color: "#0f172a" }}>实时情报摘要</span>}>
                         <Space direction="vertical" size={6} style={{ width: "100%" }}>
                           <Text style={{ color: "#64748b" }}>as_of: {String(deepLatestIntelSnapshot.as_of ?? "-")}</Text>
+                          <Space wrap>
+                            <Tag color={String(deepLatestIntelSnapshot.intel_status) === "external_ok" ? "green" : "gold"}>
+                              intel_status: {String(deepLatestIntelSnapshot.intel_status ?? "-")}
+                            </Tag>
+                            <Tag>citations: {Number(deepLatestIntelSnapshot.citations_count ?? 0)}</Tag>
+                            <Tag color={Boolean(deepLatestIntelSnapshot.websearch_tool_applied) ? "green" : "orange"}>
+                              tool_applied: {String(Boolean(deepLatestIntelSnapshot.websearch_tool_applied))}
+                            </Tag>
+                          </Space>
+                          {String(deepLatestIntelSnapshot.fallback_reason ?? "").trim() ? (
+                            <Text style={{ color: "#b45309" }}>
+                              fallback_reason: {String(deepLatestIntelSnapshot.fallback_reason)}
+                            </Text>
+                          ) : null}
+                          {String(deepLatestIntelSnapshot.trace_id ?? "").trim() ? (
+                            <Text style={{ color: "#64748b" }}>trace_id: {String(deepLatestIntelSnapshot.trace_id)}</Text>
+                          ) : null}
                           {(Array.isArray(deepLatestIntelSnapshot.macro_signals) ? deepLatestIntelSnapshot.macro_signals.slice(0, 3) : []).map((item: any, idx: number) => (
                             <Space key={`intel-macro-${idx}`} direction="vertical" size={1} style={{ width: "100%" }}>
                               <Text style={{ color: "#0f172a" }}>{String(item?.title ?? "")}</Text>
@@ -1612,6 +1669,34 @@ export default function DeepThinkPage() {
                           ))}
                           {!Array.isArray(deepLatestIntelSnapshot.macro_signals) || deepLatestIntelSnapshot.macro_signals.length === 0 ? (
                             <Text style={{ color: "#64748b" }}>暂无可用宏观情报。</Text>
+                          ) : null}
+                        </Space>
+                      </Card>
+                    ) : null}
+                    {deepIntelProbe ? (
+                      <Card size="small" title={<span style={{ color: "#0f172a" }}>情报链路自检结果</span>}>
+                        <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                          <Space wrap>
+                            <Tag color={Boolean(deepIntelProbe.ok) ? "green" : "gold"}>ok: {String(Boolean(deepIntelProbe.ok))}</Tag>
+                            <Tag color={String(deepIntelProbe.intel_status) === "external_ok" ? "green" : "orange"}>
+                              intel_status: {String(deepIntelProbe.intel_status ?? "-")}
+                            </Tag>
+                            <Tag>citation_count: {Number(deepIntelProbe.citation_count ?? 0)}</Tag>
+                          </Space>
+                          <Space wrap>
+                            <Tag>external_enabled: {String(Boolean(deepIntelProbe.external_enabled))}</Tag>
+                            <Tag>provider_count: {Number(deepIntelProbe.provider_count ?? 0)}</Tag>
+                            <Tag color={Boolean(deepIntelProbe.websearch_tool_applied) ? "green" : "orange"}>
+                              tool_applied: {String(Boolean(deepIntelProbe.websearch_tool_applied))}
+                            </Tag>
+                          </Space>
+                          {String(deepIntelProbe.fallback_reason ?? "").trim() ? (
+                            <Text style={{ color: "#b45309" }}>
+                              fallback_reason: {String(deepIntelProbe.fallback_reason)}
+                            </Text>
+                          ) : null}
+                          {String(deepIntelProbe.trace_id ?? "").trim() ? (
+                            <Text style={{ color: "#64748b" }}>trace_id: {String(deepIntelProbe.trace_id)}</Text>
                           ) : null}
                         </Space>
                       </Card>
