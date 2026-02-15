@@ -41,4 +41,4 @@
 - [x] Extend or update API tests for new routes/events
 - [x] Update round docs and report docs with implementation notes
 - [x] Final self-test run and result capture
-- [ ] Final commit(s) with referenced checklist/log
+- [x] Final commit(s) with referenced checklist/log
