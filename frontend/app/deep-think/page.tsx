@@ -139,6 +139,8 @@ type DeepThinkExportTaskSnapshot = {
   filename: string;
   media_type: string;
   row_count: number;
+  attempt_count: number;
+  max_attempts: number;
   error?: string;
   failure_reason?: string;
   created_at: string;
@@ -146,6 +148,33 @@ type DeepThinkExportTaskSnapshot = {
   completed_at?: string;
   download_ready: boolean;
 };
+
+function normalizeArchiveTimestamp(raw: string): string {
+  const value = String(raw ?? "").trim();
+  if (!value) return "";
+  const normalized = value.replace("T", " ");
+  const match = normalized.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return normalized;
+  const sec = match[4] ?? "00";
+  return `${match[1]} ${match[2]}:${match[3]}:${sec}`;
+}
+
+function toDatetimeLocalValue(raw: string): string {
+  const normalized = normalizeArchiveTimestamp(raw);
+  const match = normalized.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+  if (!match) return "";
+  return `${match[1]}T${match[2]}:${match[3]}:${match[4]}`;
+}
+
+function formatArchiveNow(date: Date): string {
+  const y = date.getFullYear();
+  const mo = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  const h = String(date.getHours()).padStart(2, "0");
+  const mi = String(date.getMinutes()).padStart(2, "0");
+  const s = String(date.getSeconds()).padStart(2, "0");
+  return `${y}-${mo}-${d} ${h}:${mi}:${s}`;
+}
 
 function CountUp({ value, suffix = "" }: { value: number; suffix?: string }) {
   const [display, setDisplay] = useState(0);
@@ -224,6 +253,13 @@ export default function DeepThinkPage() {
       const next = [...prev, { event, data, emitted_at: new Date().toISOString() }];
       return next.slice(-80);
     });
+  }
+
+  function setDeepArchiveQuickWindow(hours: number) {
+    const now = new Date();
+    const from = new Date(now.getTime() - Math.max(1, hours) * 60 * 60 * 1000);
+    setDeepArchiveCreatedFrom(formatArchiveNow(from));
+    setDeepArchiveCreatedTo(formatArchiveNow(now));
   }
 
   async function readSSEAndConsume(resp: Response, onEvent: (event: string, payload: Record<string, any>) => void) {
@@ -1260,16 +1296,22 @@ export default function DeepThinkPage() {
                   />
                   <Input
                     style={{ minWidth: 200 }}
-                    value={deepArchiveCreatedFrom}
-                    onChange={(e) => setDeepArchiveCreatedFrom(e.target.value)}
-                    placeholder="created_from (YYYY-MM-DD HH:mm:ss)"
+                    type="datetime-local"
+                    step={1}
+                    value={toDatetimeLocalValue(deepArchiveCreatedFrom)}
+                    onChange={(e) => setDeepArchiveCreatedFrom(normalizeArchiveTimestamp(e.target.value))}
+                    placeholder="created_from"
                   />
                   <Input
                     style={{ minWidth: 200 }}
-                    value={deepArchiveCreatedTo}
-                    onChange={(e) => setDeepArchiveCreatedTo(e.target.value)}
-                    placeholder="created_to (YYYY-MM-DD HH:mm:ss)"
+                    type="datetime-local"
+                    step={1}
+                    value={toDatetimeLocalValue(deepArchiveCreatedTo)}
+                    onChange={(e) => setDeepArchiveCreatedTo(normalizeArchiveTimestamp(e.target.value))}
+                    placeholder="created_to"
                   />
+                  <Button onClick={() => setDeepArchiveQuickWindow(24)}>最近24小时</Button>
+                  <Button onClick={() => { setDeepArchiveCreatedFrom(""); setDeepArchiveCreatedTo(""); }}>清空时间过滤</Button>
                 </Space>
                 <Space wrap>
                   <Button onClick={startDeepThinkSession} loading={deepLoading}>
@@ -1352,6 +1394,7 @@ export default function DeepThinkPage() {
                     export_task: {deepArchiveExportTask?.status ?? "idle"}
                   </Tag>
                   {deepArchiveExportTask?.task_id ? <Tag>task_id: {deepArchiveExportTask.task_id}</Tag> : null}
+                  {deepArchiveExportTask?.task_id ? <Tag>attempt: {deepArchiveExportTask.attempt_count}/{deepArchiveExportTask.max_attempts}</Tag> : null}
                   {latestDeepRound?.replan_triggered ? <Tag color="orange">replan_triggered</Tag> : null}
                   {latestDeepRound?.stop_reason ? <Tag color="red">{latestDeepRound.stop_reason}</Tag> : null}
                 </Space>

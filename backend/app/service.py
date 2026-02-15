@@ -1632,19 +1632,21 @@ class AShareAgentService:
             )
             raise
         task_id = f"dtexp-{uuid.uuid4().hex[:12]}"
+        max_attempts = max(1, int(self.settings.deep_archive_export_task_max_attempts))
         self.web.deep_think_export_task_create(
             task_id=task_id,
             session_id=session_id,
             status="queued",
             format=export_format,
             filters=filters,
+            max_attempts=max_attempts,
         )
         self._emit_deep_archive_audit(
             session_id=session_id,
             action="archive_export_task_create",
             status="ok",
             started_at=started_at,
-            detail={"task_id": task_id, "format": export_format},
+            detail={"task_id": task_id, "format": export_format, "max_attempts": max_attempts},
         )
         self._deep_archive_export_executor.submit(
             self._run_deep_archive_export_task,
@@ -1662,60 +1664,89 @@ class AShareAgentService:
         export_format: str,
         filters: dict[str, Any],
     ) -> None:
-        started_at = time.perf_counter()
-        self.web.deep_think_export_task_update(task_id=task_id, status="running")
-        try:
-            exported = self.deep_think_export_events(
-                session_id,
-                round_id=filters.get("round_id"),
-                limit=int(filters.get("limit", 200)),
-                event_name=filters.get("event_name"),
-                cursor=filters.get("cursor"),
-                created_from=filters.get("created_from"),
-                created_to=filters.get("created_to"),
-                format=export_format,
-                audit_action="archive_export_task_run",
-                emit_audit=False,
-            )
-            if "error" in exported:
-                message = str(exported.get("error", "failed"))
+        base_backoff_seconds = max(0.0, float(self.settings.deep_archive_export_retry_backoff_seconds))
+        while True:
+            task_snapshot = self.web.deep_think_export_task_try_claim(task_id, session_id=session_id)
+            if not task_snapshot:
+                return
+            attempt_count = max(1, int(task_snapshot.get("attempt_count", 1) or 1))
+            max_attempts = max(1, int(task_snapshot.get("max_attempts", 1) or 1))
+            started_at = time.perf_counter()
+            try:
+                exported = self.deep_think_export_events(
+                    session_id,
+                    round_id=filters.get("round_id"),
+                    limit=int(filters.get("limit", 200)),
+                    event_name=filters.get("event_name"),
+                    cursor=filters.get("cursor"),
+                    created_from=filters.get("created_from"),
+                    created_to=filters.get("created_to"),
+                    format=export_format,
+                    audit_action="archive_export_task_run",
+                    emit_audit=False,
+                )
+                if "error" in exported:
+                    raise RuntimeError(str(exported.get("error", "failed")))
+                content = str(exported.get("content", ""))
+                self.web.deep_think_export_task_update(
+                    task_id=task_id,
+                    status="completed",
+                    filename=str(exported.get("filename", "")),
+                    media_type=str(exported.get("media_type", "text/plain; charset=utf-8")),
+                    content_text=content,
+                    row_count=int(exported.get("count", 0) or 0),
+                    error="",
+                )
+                self._emit_deep_archive_audit(
+                    session_id=session_id,
+                    action="archive_export_task_complete",
+                    status="ok",
+                    started_at=started_at,
+                    result_count=int(exported.get("count", 0) or 0),
+                    export_bytes=len(content.encode("utf-8")),
+                    detail={
+                        "task_id": task_id,
+                        "format": export_format,
+                        "attempt_count": attempt_count,
+                        "max_attempts": max_attempts,
+                    },
+                )
+                return
+            except Exception as ex:  # noqa: BLE001
+                message = str(ex)
+                if attempt_count < max_attempts:
+                    self.web.deep_think_export_task_requeue(task_id=task_id, error=message)
+                    self._emit_deep_archive_audit(
+                        session_id=session_id,
+                        action="archive_export_task_complete",
+                        status="retrying",
+                        started_at=started_at,
+                        detail={
+                            "task_id": task_id,
+                            "attempt_count": attempt_count,
+                            "max_attempts": max_attempts,
+                            "error": message,
+                        },
+                    )
+                    if base_backoff_seconds > 0:
+                        backoff = min(3.0, base_backoff_seconds * (2 ** max(0, attempt_count - 1)))
+                        if backoff > 0:
+                            time.sleep(backoff)
+                    continue
                 self.web.deep_think_export_task_update(task_id=task_id, status="failed", error=message)
                 self._emit_deep_archive_audit(
                     session_id=session_id,
                     action="archive_export_task_complete",
-                    status=message,
+                    status="error",
                     started_at=started_at,
-                    detail={"task_id": task_id},
+                    detail={
+                        "task_id": task_id,
+                        "attempt_count": attempt_count,
+                        "max_attempts": max_attempts,
+                        "error": message,
+                    },
                 )
                 return
-            content = str(exported.get("content", ""))
-            self.web.deep_think_export_task_update(
-                task_id=task_id,
-                status="completed",
-                filename=str(exported.get("filename", "")),
-                media_type=str(exported.get("media_type", "text/plain; charset=utf-8")),
-                content_text=content,
-                row_count=int(exported.get("count", 0) or 0),
-                error="",
-            )
-            self._emit_deep_archive_audit(
-                session_id=session_id,
-                action="archive_export_task_complete",
-                status="ok",
-                started_at=started_at,
-                result_count=int(exported.get("count", 0) or 0),
-                export_bytes=len(content.encode("utf-8")),
-                detail={"task_id": task_id, "format": export_format},
-            )
-        except Exception as ex:  # noqa: BLE001
-            self.web.deep_think_export_task_update(task_id=task_id, status="failed", error=str(ex))
-            self._emit_deep_archive_audit(
-                session_id=session_id,
-                action="archive_export_task_complete",
-                status="error",
-                started_at=started_at,
-                detail={"task_id": task_id, "error": str(ex)},
-            )
 
     def deep_think_get_export_task(self, session_id: str, task_id: str) -> dict[str, Any]:
         started_at = time.perf_counter()
@@ -1732,6 +1763,8 @@ class AShareAgentService:
         task_error = str(task.pop("error", "") or "").strip()
         if task_error:
             task["failure_reason"] = task_error
+        task["attempt_count"] = int(task.get("attempt_count", 0) or 0)
+        task["max_attempts"] = max(1, int(task.get("max_attempts", 1) or 1))
         task["download_ready"] = str(task.get("status", "")) == "completed"
         self._emit_deep_archive_audit(
             session_id=session_id,

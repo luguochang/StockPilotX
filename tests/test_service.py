@@ -1,8 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import time
 import unittest
+import uuid
 
 from backend.app.data.sources import NeteaseAdapter, QuoteService, SinaAdapter, TencentAdapter
 from backend.app.service import AShareAgentService
@@ -208,15 +209,61 @@ class ServiceTestCase(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertEqual(final_task["status"], "completed")
+        self.assertGreaterEqual(int(final_task.get("attempt_count", 0)), 1)
+        self.assertGreaterEqual(int(final_task.get("max_attempts", 0)), int(final_task.get("attempt_count", 0)))
         exported = self.svc.deep_think_download_export_task(session_id, task_id)
         self.assertEqual(exported["status"], "completed")
         self.assertTrue(str(exported["content"]).strip())
         self.assertEqual(exported["format"], "jsonl")
         metrics = self.svc.ops_deep_think_archive_metrics("", window_hours=24)
         self.assertGreater(metrics["total_calls"], 0)
+        self.assertIn("p95_latency_ms", metrics)
+        self.assertIn("p99_latency_ms", metrics)
+        self.assertIn("by_action_status", metrics)
+        self.assertIn("top_sessions", metrics)
         actions = {str(x.get("action", "")) for x in metrics.get("by_action", [])}
         self.assertIn("archive_query", actions)
         self.assertIn("archive_export_task_create", actions)
+
+    def test_deep_think_export_task_retry_attempts(self) -> None:
+        created = self.svc.deep_think_create_session(
+            {
+                "user_id": "deep-retry-user",
+                "question": "test deep-think archive export retry path",
+                "stock_codes": ["SH600000"],
+                "max_rounds": 2,
+            }
+        )
+        session_id = created["session_id"]
+        self.svc.deep_think_run_round(session_id, {})
+        original_export = self.svc.deep_think_export_events
+        fail_once = {"done": False}
+
+        def flaky_export(*args, **kwargs):
+            if not fail_once["done"]:
+                fail_once["done"] = True
+                raise RuntimeError("transient_export_error")
+            return original_export(*args, **kwargs)
+
+        self.svc.deep_think_export_events = flaky_export  # type: ignore[assignment]
+        try:
+            filters = self.svc._build_deep_archive_query_options(limit=80)  # type: ignore[attr-defined]
+            task_id = f"dtexp-retry-{uuid.uuid4().hex[:10]}"
+            self.svc.web.deep_think_export_task_create(
+                task_id=task_id,
+                session_id=session_id,
+                status="queued",
+                format="jsonl",
+                filters=filters,
+                max_attempts=2,
+            )
+            self.svc._run_deep_archive_export_task(task_id, session_id, "jsonl", filters)  # type: ignore[attr-defined]
+            final_task = self.svc.deep_think_get_export_task(session_id, task_id)
+            self.assertEqual(final_task["status"], "completed")
+            self.assertGreaterEqual(int(final_task.get("attempt_count", 0)), 2)
+            self.assertGreaterEqual(int(final_task.get("max_attempts", 0)), int(final_task.get("attempt_count", 0)))
+        finally:
+            self.svc.deep_think_export_events = original_export  # type: ignore[assignment]
 
     def test_a2a_task_lifecycle(self) -> None:
         created = self.svc.deep_think_create_session(
@@ -254,3 +301,4 @@ class QuoteFallbackTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

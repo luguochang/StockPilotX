@@ -54,6 +54,8 @@ class Settings:
     deep_archive_max_events_prod: int = 3600
     deep_archive_max_events_hard_cap: int = 5000
     deep_archive_tenant_policy_json: str = "{}"
+    deep_archive_export_task_max_attempts: int = 2
+    deep_archive_export_retry_backoff_seconds: float = 0.35
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -88,6 +90,12 @@ class Settings:
             deep_archive_max_events_prod=max(1, int(os.getenv("DEEP_ARCHIVE_MAX_EVENTS_PROD", "3600"))),
             deep_archive_max_events_hard_cap=max(100, int(os.getenv("DEEP_ARCHIVE_MAX_EVENTS_HARD_CAP", "5000"))),
             deep_archive_tenant_policy_json=os.getenv("DEEP_ARCHIVE_TENANT_POLICY_JSON", "{}"),
+            deep_archive_export_task_max_attempts=max(
+                1, int(os.getenv("DEEP_ARCHIVE_EXPORT_TASK_MAX_ATTEMPTS", "2"))
+            ),
+            deep_archive_export_retry_backoff_seconds=max(
+                0.0, float(os.getenv("DEEP_ARCHIVE_EXPORT_RETRY_BACKOFF_SECONDS", "0.35"))
+            ),
         )
 
     def load_llm_provider_configs(self) -> list[dict]:

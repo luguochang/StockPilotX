@@ -370,6 +370,7 @@ class HttpApiTestCase(unittest.TestCase):
             {"format": "jsonl", "limit": 120, "event_name": "done"},
         )
         self.assertEqual(c3f, 200)
+        self.assertGreaterEqual(int(export_task.get("max_attempts", 0)), 1)
         task_id = export_task["task_id"]
         task_snapshot = export_task
         for _ in range(50):
@@ -379,6 +380,7 @@ class HttpApiTestCase(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertEqual(task_snapshot["status"], "completed")
+        self.assertGreaterEqual(int(task_snapshot.get("attempt_count", 0)), 1)
         with urllib.request.urlopen(
             self.base_url + f"/v1/deep-think/sessions/{session_id}/events/export-tasks/{task_id}/download",
             timeout=8,
@@ -394,6 +396,10 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c3h, 200)
         self.assertGreaterEqual(int(archive_metrics.get("total_calls", 0)), 1)
         self.assertIn("by_action", archive_metrics)
+        self.assertIn("p95_latency_ms", archive_metrics)
+        self.assertIn("p99_latency_ms", archive_metrics)
+        self.assertIn("top_sessions", archive_metrics)
+        self.assertIn("by_action_status", archive_metrics)
 
         c4, cards = self._get("/v1/a2a/agent-cards")
         self.assertEqual(c4, 200)

@@ -217,6 +217,8 @@ class WebStore:
                 content_text TEXT NOT NULL DEFAULT '',
                 row_count INTEGER NOT NULL DEFAULT 0,
                 error TEXT NOT NULL DEFAULT '',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 2,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 completed_at DATETIME
@@ -278,6 +280,7 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_deep_think_event_session ON deep_think_event(session_id, round_no, event_seq);
             CREATE INDEX IF NOT EXISTS idx_deep_think_event_name ON deep_think_event(session_id, event_name, round_no, event_seq);
             CREATE INDEX IF NOT EXISTS idx_deep_think_export_task_session ON deep_think_export_task(session_id, status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_deep_think_export_task_queue ON deep_think_export_task(status, updated_at, created_at);
             CREATE INDEX IF NOT EXISTS idx_deep_think_archive_audit_action ON deep_think_archive_audit(action, created_at);
             CREATE INDEX IF NOT EXISTS idx_deep_think_archive_audit_session ON deep_think_archive_audit(session_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_a2a_task_agent_status ON a2a_task(agent_id, status);
@@ -290,6 +293,8 @@ class WebStore:
         self._ensure_column("deep_think_round", "replan_triggered", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("deep_think_round", "stop_reason", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("deep_think_round", "budget_usage", "TEXT NOT NULL DEFAULT '{}'")
+        self._ensure_column("deep_think_export_task", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("deep_think_export_task", "max_attempts", "INTEGER NOT NULL DEFAULT 2")
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, sql_type: str) -> None:

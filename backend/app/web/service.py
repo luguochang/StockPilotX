@@ -584,12 +584,13 @@ class WebAppService:
         status: str,
         format: str,
         filters: dict[str, Any],
+        max_attempts: int = 2,
     ) -> None:
         self.store.execute(
             """
             INSERT INTO deep_think_export_task
-            (task_id, session_id, status, format, filters_json, updated_at)
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            (task_id, session_id, status, format, filters_json, attempt_count, max_attempts, updated_at)
+            VALUES (?, ?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP)
             """,
             (
                 task_id,
@@ -597,6 +598,7 @@ class WebAppService:
                 status,
                 format,
                 json.dumps(filters, ensure_ascii=False),
+                max(1, int(max_attempts)),
             ),
         )
 
@@ -632,6 +634,39 @@ class WebAppService:
             (status, filename, media_type, content_text, row_count, error, task_id),
         )
 
+    def deep_think_export_task_try_claim(self, task_id: str, *, session_id: str | None = None) -> dict[str, Any]:
+        if session_id:
+            cur = self.store.execute(
+                """
+                UPDATE deep_think_export_task
+                SET status = 'running', attempt_count = attempt_count + 1, updated_at = CURRENT_TIMESTAMP
+                WHERE task_id = ? AND session_id = ? AND status = 'queued'
+                """,
+                (task_id, session_id),
+            )
+        else:
+            cur = self.store.execute(
+                """
+                UPDATE deep_think_export_task
+                SET status = 'running', attempt_count = attempt_count + 1, updated_at = CURRENT_TIMESTAMP
+                WHERE task_id = ? AND status = 'queued'
+                """,
+                (task_id,),
+            )
+        if int(cur.rowcount or 0) <= 0:
+            return {}
+        return self.deep_think_export_task_get(task_id, session_id=session_id, include_content=False)
+
+    def deep_think_export_task_requeue(self, *, task_id: str, error: str) -> None:
+        self.store.execute(
+            """
+            UPDATE deep_think_export_task
+            SET status = 'queued', error = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE task_id = ?
+            """,
+            (error, task_id),
+        )
+
     def deep_think_export_task_get(
         self,
         task_id: str,
@@ -642,7 +677,7 @@ class WebAppService:
         row = self.store.query_one(
             """
             SELECT task_id, session_id, status, format, filters_json, filename, media_type, content_text,
-                   row_count, error, created_at, updated_at, completed_at
+                   row_count, error, attempt_count, max_attempts, created_at, updated_at, completed_at
             FROM deep_think_export_task
             WHERE task_id = ?
             """,
@@ -689,12 +724,32 @@ class WebAppService:
     def deep_think_archive_audit_metrics(self, *, window_hours: int = 24) -> dict[str, Any]:
         safe_hours = max(1, min(24 * 30, int(window_hours)))
         window_expr = f"-{safe_hours} hours"
+        latency_rows = self.store.query_all(
+            """
+            SELECT duration_ms
+            FROM deep_think_archive_audit
+            WHERE created_at >= datetime('now', ?)
+            ORDER BY duration_ms ASC
+            """,
+            (window_expr,),
+        )
+        latencies = [int(x.get("duration_ms", 0) or 0) for x in latency_rows]
+
+        def _percentile(sorted_values: list[int], ratio: float) -> int:
+            if not sorted_values:
+                return 0
+            clamped = min(1.0, max(0.0, float(ratio)))
+            idx = int(round((len(sorted_values) - 1) * clamped))
+            idx = max(0, min(len(sorted_values) - 1, idx))
+            return int(sorted_values[idx])
+
         summary = self.store.query_one(
             """
             SELECT
                 COUNT(1) AS total_calls,
                 AVG(duration_ms) AS avg_latency_ms,
                 MAX(duration_ms) AS max_latency_ms,
+                SUM(CASE WHEN duration_ms >= 1000 THEN 1 ELSE 0 END) AS slow_calls_over_1000ms,
                 SUM(result_count) AS total_result_count,
                 SUM(export_bytes) AS total_export_bytes
             FROM deep_think_archive_audit
@@ -717,6 +772,34 @@ class WebAppService:
             """,
             (window_expr,),
         )
+        by_action_status = self.store.query_all(
+            """
+            SELECT
+                action,
+                status,
+                COUNT(1) AS call_count
+            FROM deep_think_archive_audit
+            WHERE created_at >= datetime('now', ?)
+            GROUP BY action, status
+            ORDER BY action ASC, status ASC
+            """,
+            (window_expr,),
+        )
+        top_sessions = self.store.query_all(
+            """
+            SELECT
+                session_id,
+                COUNT(1) AS call_count,
+                AVG(duration_ms) AS avg_latency_ms,
+                SUM(export_bytes) AS export_bytes
+            FROM deep_think_archive_audit
+            WHERE created_at >= datetime('now', ?)
+            GROUP BY session_id
+            ORDER BY call_count DESC, session_id ASC
+            LIMIT 10
+            """,
+            (window_expr,),
+        )
         by_status = self.store.query_all(
             """
             SELECT
@@ -734,6 +817,10 @@ class WebAppService:
             "total_calls": int(summary.get("total_calls", 0) or 0),
             "avg_latency_ms": round(float(summary.get("avg_latency_ms", 0) or 0.0), 2),
             "max_latency_ms": int(summary.get("max_latency_ms", 0) or 0),
+            "p50_latency_ms": _percentile(latencies, 0.50),
+            "p95_latency_ms": _percentile(latencies, 0.95),
+            "p99_latency_ms": _percentile(latencies, 0.99),
+            "slow_calls_over_1000ms": int(summary.get("slow_calls_over_1000ms", 0) or 0),
             "total_result_count": int(summary.get("total_result_count", 0) or 0),
             "total_export_bytes": int(summary.get("total_export_bytes", 0) or 0),
             "by_action": [
@@ -749,6 +836,23 @@ class WebAppService:
             "by_status": [
                 {"status": str(x.get("status", "")), "call_count": int(x.get("call_count", 0) or 0)}
                 for x in by_status
+            ],
+            "by_action_status": [
+                {
+                    "action": str(x.get("action", "")),
+                    "status": str(x.get("status", "")),
+                    "call_count": int(x.get("call_count", 0) or 0),
+                }
+                for x in by_action_status
+            ],
+            "top_sessions": [
+                {
+                    "session_id": str(x.get("session_id", "")),
+                    "call_count": int(x.get("call_count", 0) or 0),
+                    "avg_latency_ms": round(float(x.get("avg_latency_ms", 0) or 0.0), 2),
+                    "export_bytes": int(x.get("export_bytes", 0) or 0),
+                }
+                for x in top_sessions
             ],
         }
 

@@ -119,3 +119,11 @@
 - Upgraded frontend `/deep-think` with export task polling/download flow and archive cursor-history navigation.
 - Fixed error-contract edge case: API now checks non-empty `error` code, avoiding false 404 on successful export-task snapshots.
 - Validation kept green: targeted backend tests `28 passed`; full backend regression `64 passed`; frontend build + typecheck passed.
+
+## Round-M Update (2026-02-15)
+- Hardened export task execution with retry metadata (`attempt_count`, `max_attempts`) and queue claim/requeue flow.
+- Added configurable retry policy knobs in settings (`max attempts`, `retry backoff`).
+- Expanded archive metrics with percentile latency (`p50/p95/p99`), slow-call counts, action-status matrix, and top-session aggregates.
+- Upgraded frontend time filtering in `/deep-think` to structured `datetime-local` inputs with quick actions (`最近24小时`, `清空时间过滤`).
+- Added frontend export-task retry visibility (`attempt_count/max_attempts`) for better operator feedback.
+- Validation kept green: targeted backend tests `29 passed`; full backend regression `65 passed`; frontend build + typecheck passed.

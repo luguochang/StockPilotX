@@ -40,7 +40,8 @@
 13. Round-I：DeepThink 跨轮差分、冲突下钻与事件存档实现记录  
 14. Round-J：DeepThink 事件过滤与归档保留治理实现记录  
 15. Round-K：DeepThink 归档分页、时间过滤与导出实现记录  
-16. Round-L：DeepThink 归档异步导出任务与审计指标实现记录
+16. Round-L：DeepThink 归档异步导出任务与审计指标实现记录  
+17. Round-M：DeepThink 导出重试与审计分位指标实现记录
 
 ## 6. 参考资料
 - A2A Specification: https://a2aproject.github.io/A2A/specification/
