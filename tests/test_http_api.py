@@ -86,6 +86,7 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("trace_id", body)
         self.assertIn("citations", body)
         self.assertIn("workflow_runtime", body)
+        self.assertIn("analysis_brief", body)
         self.assertIn(body["workflow_runtime"], ("langgraph", "direct"))
 
         # 支持请求级运行时覆盖，便于对比验证。
@@ -122,6 +123,7 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("event: stream_runtime", text)
         self.assertIn("event: answer_delta", text)
         self.assertIn("event: stream_source", text)
+        self.assertIn("event: analysis_brief", text)
         self.assertIn("event: done", text)
 
         # 流式同样支持覆盖 direct runtime。
@@ -228,6 +230,7 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(factor_code, 200)
         self.assertIn("factors", factor)
         self.assertIn("risk_score", factor["factors"])
+        self.assertIn("history_data_mode", factor["source"])
 
         eval_code, latest = self._get("/v1/predict/evals/latest")
         self.assertEqual(eval_code, 200)

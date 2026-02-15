@@ -186,3 +186,22 @@
   - key output: `返回 capabilities 列表与 runtime/config 快照`
   - command: `POST /v1/query {"workflow_runtime":"direct"}`
   - key output: `响应 workflow_runtime=direct`
+
+### 2026-02-15 (Round-B)
+- Completed:
+  - [AGT-008] `/v1/query` 增加结构化 `analysis_brief`，并在 `/v1/query/stream` 输出 `analysis_brief` SSE 事件。
+  - [PRED-006] 预测链路改为“真实历史K线优先 + 合成序列兜底”，输出 `history_data_mode/history_source/history_sample_size`。
+  - [PRED-007] 增强量化因子与解释：`trend_strength/drawdown_60/atr_14/volume_stability_20` + `rationale`。
+  - [FRONT-002] 首页与预测页展示置信度、数据新鲜度、数据模式与解释信息。
+  - [REL-001] 公告源抓取失败统一兜底，避免网络异常导致测试链路中断。
+- Evidence:
+  - command: `.\.venv\Scripts\python -m pytest -q`
+  - key output: `57 passed`
+  - command: `cd frontend && npm run build`
+  - key output: `build passed`
+  - command: `cd frontend && npx tsc --noEmit`
+  - key output: `typecheck passed`
+  - command: `python - <<... s.query(...) ...>>`
+  - key output: `包含 analysis_brief`
+  - command: `python - <<... s.predict_run(...) ...>>`
+  - key output: `history_data_mode=real_history`

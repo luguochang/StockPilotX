@@ -35,6 +35,7 @@ class QueryResponse(BaseModel):
     risk_flags: list[str] = Field(default_factory=list)
     mode: Literal["agentic_rag", "graph_rag"] = "agentic_rag"
     workflow_runtime: str = "unknown"
+    analysis_brief: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReportRequest(BaseModel):
@@ -89,6 +90,7 @@ class PredictHorizonResult(BaseModel):
     up_probability: float
     risk_tier: Literal["low", "medium", "high"]
     signal: Literal["strong_buy", "buy", "hold", "reduce", "strong_reduce"]
+    rationale: str = ""
 
 
 class PredictItem(BaseModel):

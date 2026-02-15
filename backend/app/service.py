@@ -60,6 +60,7 @@ class AShareAgentService:
             quote_service=self.ingestion.quote_service,
             traces=self.traces,
             store=PredictionStore(),
+            history_service=self.ingestion.history_service,
         )
         self.scheduler = LocalJobScheduler()
         self._register_default_jobs()
@@ -160,6 +161,7 @@ class AShareAgentService:
         state.analysis["workflow_runtime"] = runtime_result.runtime
         self.traces.emit(trace_id, "workflow_runtime", {"runtime": runtime_result.runtime})
         answer, merged_citations = self._build_evidence_rich_answer(req.question, req.stock_codes, state.report, state.citations)
+        analysis_brief = self._build_analysis_brief(req.stock_codes, merged_citations)
         state.report = answer
         state.citations = merged_citations
 
@@ -183,6 +185,7 @@ class AShareAgentService:
             risk_flags=state.risk_flags,
             mode=state.mode,  # type: ignore[arg-type]
             workflow_runtime=runtime_result.runtime,
+            analysis_brief=analysis_brief,
         )
         return resp.model_dump(mode="json")
 
@@ -220,6 +223,8 @@ class AShareAgentService:
         yield {"event": "stream_runtime", "data": {"runtime": runtime_name}}
         for event in selected_runtime.run_stream(state, memory_hint=memory_hint):
             yield event
+        citations = [c for c in state.citations if isinstance(c, dict)]
+        yield {"event": "analysis_brief", "data": self._build_analysis_brief(req.stock_codes, citations)}
 
     def _build_evidence_rich_answer(
         self,
@@ -293,6 +298,45 @@ class AShareAgentService:
                 f"score={float(c.get('reliability_score',0.0)):.2f} | {c.get('excerpt','')}"
             )
         return "\n".join(lines), merged[:10]
+
+    def _build_analysis_brief(self, stock_codes: list[str], citations: list[dict[str, Any]]) -> dict[str, Any]:
+        """构造结构化证据摘要，供前端可视化展示。"""
+        by_code: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+        for code in stock_codes:
+            realtime = self._latest_quote(code)
+            bars = self._history_bars(code, limit=120)
+            trend = self._trend_metrics(bars) if len(bars) >= 30 else {}
+            freshness_sec = None
+            if realtime:
+                freshness_sec = int((now - self._parse_time(str(realtime.get("ts", "")))).total_seconds())
+            by_code.append(
+                {
+                    "stock_code": code,
+                    "realtime": {
+                        "price": realtime.get("price") if realtime else None,
+                        "pct_change": realtime.get("pct_change") if realtime else None,
+                        "source_id": realtime.get("source_id") if realtime else None,
+                        "source_url": realtime.get("source_url") if realtime else None,
+                        "ts": realtime.get("ts") if realtime else None,
+                        "freshness_seconds": freshness_sec,
+                    },
+                    "trend": trend,
+                    "history_sample_size": len(bars),
+                }
+            )
+
+        valid_scores = [float(c.get("reliability_score", 0.0)) for c in citations if c.get("reliability_score") is not None]
+        citation_coverage = len(citations)
+        avg_score = round(mean(valid_scores), 4) if valid_scores else 0.0
+        confidence = "high" if citation_coverage >= 4 and avg_score >= 0.8 else "medium" if citation_coverage >= 2 else "low"
+        return {
+            "confidence_level": confidence,
+            "confidence_reason": f"citations={citation_coverage}, avg_reliability={avg_score}",
+            "stocks": by_code,
+            "citation_count": citation_coverage,
+            "citation_avg_reliability": avg_score,
+        }
 
     def _build_runtime_corpus(self, stock_codes: list[str]) -> list[RetrievalItem]:
         """把摄取层数据转换为检索语料。"""

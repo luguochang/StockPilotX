@@ -43,3 +43,9 @@
 1. 将 `query_stream` 迁移到 LangGraph 事件流节点。
 2. 引入可替换向量后端（Milvus/Qdrant/PGVector 其一）并保留当前轻量检索作回退。
 3. 形成线上门禁：RAG 指标阈值 + Prompt Gate + 模型回退演练。
+
+## Round-B Update (2026-02-15)
+- Query evidence surface: `analysis_brief` response field + stream event implemented.
+- Prediction source quality: real history first, synthetic fallback explicitly tagged.
+- Frontend trust UX: confidence/freshness/source-mode/rationale visible in `/` and `/predict`.
+- Validation: backend `57 passed`, frontend build + tsc passed.

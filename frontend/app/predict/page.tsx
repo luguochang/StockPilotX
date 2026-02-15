@@ -17,12 +17,19 @@ type HorizonResult = {
   up_probability: number;
   risk_tier: string;
   signal: string;
+  rationale?: string;
 };
 
 type PredictItem = {
   stock_code: string;
   horizons: HorizonResult[];
   factors: Record<string, number>;
+  source?: {
+    source_id?: string;
+    history_data_mode?: string;
+    history_source_id?: string;
+    history_sample_size?: number;
+  };
 };
 
 type PredictRunResponse = {
@@ -133,7 +140,11 @@ export default function PredictPage() {
       expected_excess_return: h.expected_excess_return,
       up_probability: h.up_probability,
       risk_tier: h.risk_tier,
-      signal: h.signal
+      signal: h.signal,
+      rationale: h.rationale ?? "",
+      history_data_mode: item.source?.history_data_mode ?? "unknown",
+      history_sample_size: item.source?.history_sample_size ?? 0,
+      history_source_id: item.source?.history_source_id ?? "unknown"
     }))
   );
   const heroSlides = [
@@ -221,7 +232,11 @@ export default function PredictPage() {
                     { title: "超额收益", dataIndex: "expected_excess_return", key: "expected_excess_return", render: (v: number) => `${(v * 100).toFixed(2)}%` },
                     { title: "上涨概率", dataIndex: "up_probability", key: "up_probability", render: (v: number) => `${(v * 100).toFixed(2)}%` },
                     { title: "风险", dataIndex: "risk_tier", key: "risk_tier", render: (v: string) => <Tag color={riskColor(v)}>{v}</Tag> },
-                    { title: "信号", dataIndex: "signal", key: "signal" }
+                    { title: "信号", dataIndex: "signal", key: "signal" },
+                    { title: "历史数据", dataIndex: "history_data_mode", key: "history_data_mode" },
+                    { title: "样本数", dataIndex: "history_sample_size", key: "history_sample_size" },
+                    { title: "历史源", dataIndex: "history_source_id", key: "history_source_id" },
+                    { title: "解释", dataIndex: "rationale", key: "rationale", width: 320 }
                   ]}
                 />
               </Card>

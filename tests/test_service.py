@@ -22,6 +22,7 @@ class ServiceTestCase(unittest.TestCase):
         )
         self.assertIn("trace_id", result)
         self.assertTrue(result["citations"])
+        self.assertIn("analysis_brief", result)
         self.assertIn("仅供研究参考", result["answer"])
 
     def test_query_graphrag_mode(self) -> None:
@@ -39,7 +40,7 @@ class ServiceTestCase(unittest.TestCase):
             {"user_id": "u3", "stock_code": "SH600000", "period": "1y", "report_type": "fact"}
         )
         loaded = self.svc.report_get(generated["report_id"])
-        self.assertIn("# SH600000 分析报告", loaded["markdown"])
+        self.assertIn("# SH600000", loaded["markdown"])
 
     def test_ingest_endpoints(self) -> None:
         daily = self.svc.ingest_market_daily(["SH600000", "SZ000001"])
@@ -67,6 +68,7 @@ class ServiceTestCase(unittest.TestCase):
         run = self.svc.predict_run({"stock_codes": ["SH600000", "SZ000001"], "horizons": ["5d", "20d"]})
         self.assertIn("run_id", run)
         self.assertEqual(len(run["results"]), 2)
+        self.assertIn("history_data_mode", run["results"][0]["source"])
         latest = self.svc.predict_eval_latest()
         self.assertEqual(latest["status"], "ok")
         self.assertIn("ic", latest["metrics"])

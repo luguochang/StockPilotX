@@ -323,7 +323,7 @@ class AnnouncementService:
         for adapter in self.adapters:
             try:
                 events.extend(adapter.fetch_announcements(stock_code))
-            except RuntimeError:
+            except Exception:
                 continue
         if events:
             return events

@@ -16,6 +16,32 @@ const { TextArea } = Input;
 
 type Citation = { source_id: string; source_url: string; excerpt: string };
 type QueryResponse = { trace_id: string; answer: string; citations: Citation[] };
+type AnalysisBrief = {
+  confidence_level: string;
+  confidence_reason: string;
+  citation_count: number;
+  citation_avg_reliability: number;
+  stocks: Array<{
+    stock_code: string;
+    history_sample_size: number;
+    realtime: {
+      price?: number;
+      pct_change?: number;
+      source_id?: string;
+      ts?: string;
+      freshness_seconds?: number | null;
+    };
+    trend: {
+      ma20?: number;
+      ma60?: number;
+      ma20_slope?: number;
+      ma60_slope?: number;
+      momentum_20?: number;
+      volatility_20?: number;
+      max_drawdown_60?: number;
+    };
+  }>;
+};
 type MarketOverview = {
   stock_code: string;
   realtime: { price?: number; pct_change?: number; source_id?: string; source_url?: string; ts?: string };
@@ -70,6 +96,7 @@ export default function HomePage() {
   const [activeProvider, setActiveProvider] = useState("");
   const [activeModel, setActiveModel] = useState("");
   const [activeApiStyle, setActiveApiStyle] = useState("");
+  const [analysisBrief, setAnalysisBrief] = useState<AnalysisBrief | null>(null);
 
   async function ensureStockInUniverse(codes: string[]) {
     for (const code of codes) {
@@ -90,6 +117,7 @@ export default function HomePage() {
     setActiveProvider("");
     setActiveModel("");
     setActiveApiStyle("");
+    setAnalysisBrief(null);
     setError("");
     try {
       await ensureStockInUniverse([stockCode]);
@@ -170,6 +198,10 @@ export default function HomePage() {
             answer: prev?.answer ?? "",
             citations
           }));
+          return;
+        }
+        if (eventName === "analysis_brief") {
+          setAnalysisBrief(payload as AnalysisBrief);
         }
       };
 
@@ -505,6 +537,31 @@ export default function HomePage() {
                     </List.Item>
                   )}
                 />
+              </Card>
+            ) : null}
+
+            {analysisBrief ? (
+              <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>分析置信度</span>} style={{ marginTop: 12 }}>
+                <Space direction="vertical" style={{ width: "100%" }}>
+                  <Space>
+                    <Tag color={analysisBrief.confidence_level === "high" ? "green" : analysisBrief.confidence_level === "medium" ? "gold" : "red"}>
+                      {analysisBrief.confidence_level}
+                    </Tag>
+                    <Tag>引用数: {analysisBrief.citation_count}</Tag>
+                    <Tag>平均可信度: {analysisBrief.citation_avg_reliability.toFixed(2)}</Tag>
+                  </Space>
+                  <Text style={{ color: "#64748b" }}>{analysisBrief.confidence_reason}</Text>
+                  {analysisBrief.stocks.slice(0, 2).map((s) => (
+                    <Space key={s.stock_code} direction="vertical" style={{ width: "100%" }}>
+                      <Text style={{ color: "#0f172a" }}>
+                        {s.stock_code} | 样本={s.history_sample_size} | 数据新鲜度={s.realtime?.freshness_seconds ?? "-"}s
+                      </Text>
+                      <Text style={{ color: "#64748b" }}>
+                        MA20={Number(s.trend?.ma20 ?? 0).toFixed(2)}, MA60={Number(s.trend?.ma60 ?? 0).toFixed(2)}, 动量20={Number(s.trend?.momentum_20 ?? 0).toFixed(4)}
+                      </Text>
+                    </Space>
+                  ))}
+                </Space>
               </Card>
             ) : null}
           </Col>
