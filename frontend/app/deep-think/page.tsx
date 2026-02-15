@@ -365,25 +365,9 @@ export default function DeepThinkPage() {
 
       // 初始化结果容器，让前端边收边展示。
       setResult({ trace_id: "", answer: "", citations: [] });
-      const reader = streamResp.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let buffer = "";
-
-      const consumeEvent = (raw: string) => {
-        const lines = raw.split("\n");
-        let eventName = "message";
-        const dataLines: string[] = [];
-        for (const line of lines) {
-          if (line.startsWith("event:")) eventName = line.slice(6).trim();
-          if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
-        }
-        if (!dataLines.length) return;
-        let payload: any = {};
-        try {
-          payload = JSON.parse(dataLines.join("\n"));
-        } catch {
-          return;
-        }
+      let gotEvent = false;
+      const consumeEvent = (eventName: string, payload: any) => {
+        gotEvent = true;
         if (eventName === "meta") {
           setResult((prev) => ({
             trace_id: String(payload?.trace_id ?? prev?.trace_id ?? ""),
@@ -431,18 +415,10 @@ export default function DeepThinkPage() {
           setAnalysisBrief(payload as AnalysisBrief);
         }
       };
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        while (true) {
-          const splitAt = buffer.indexOf("\n\n");
-          if (splitAt < 0) break;
-          const rawEvent = buffer.slice(0, splitAt);
-          buffer = buffer.slice(splitAt + 2);
-          consumeEvent(rawEvent);
-        }
+      // 复用统一 SSE 读取器，避免 query/deep-think 两套解析逻辑分叉。
+      await readSSEAndConsume(streamResp, consumeEvent);
+      if (!gotEvent) {
+        throw new Error("query/stream 连接成功但未收到事件");
       }
 
       const overviewResp = await overviewPromise;

@@ -69,3 +69,9 @@
 - 前端 SSE 解析器增强：兼容 `\n\n` 与 `\r\n\r\n` 分隔，尾包无空行时也可解析。
 - v2 流式失败自动回退 v1 路径，避免用户卡在空白等待。
 - 执行前自动清空事件过滤条件，避免筛选条件导致误判“无流式输出”。
+
+## 7. 追加修复（/v1/query/stream 首包时延与前端解析统一）
+- 后端 `query_stream_events` 调整为先发送 `start`，再执行数据刷新，避免首包被前置刷新耗时阻塞。
+- 新增 `progress` 阶段事件（data_refresh/retriever/model），用于前端显示阶段进度。
+- 前端 `runAnalysis` 改为复用统一 SSE 读取器 `readSSEAndConsume`，统一处理 CRLF 分隔与尾包。
+- 当 `query/stream` 连接成功但未收到任何事件时，前端将直接报错，避免“静默等待”。

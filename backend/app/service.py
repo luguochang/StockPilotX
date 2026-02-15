@@ -362,8 +362,11 @@ class AShareAgentService:
         _ = chunk_size
         req = QueryRequest(**payload)
         selected_runtime = self._select_runtime(str(payload.get("workflow_runtime", "")))
+        # 先发送 start，确保前端在任何耗时步骤前就能感知“任务已启动”。
+        yield {"event": "start", "data": {"status": "started", "phase": "init"}}
         # 与同步 query 保持一致：先做数据刷新与动态语料装载。
         if req.stock_codes:
+            yield {"event": "progress", "data": {"phase": "data_refresh", "message": "正在刷新行情/公告/历史数据"}}
             try:
                 quote_refresh = [c for c in req.stock_codes if self._needs_quote_refresh(c)]
                 ann_refresh = [c for c in req.stock_codes if self._needs_announcement_refresh(c)]
@@ -375,9 +378,12 @@ class AShareAgentService:
                 if hist_refresh:
                     self.ingestion.ingest_history_daily(hist_refresh, limit=260)
             except Exception:
+                # 刷新失败不阻断主流程，只向前端透出 warning 便于定位时延与降级行为。
+                yield {"event": "progress", "data": {"phase": "data_refresh", "status": "degraded"}}
                 pass
+            yield {"event": "progress", "data": {"phase": "data_refresh", "status": "done"}}
+        yield {"event": "progress", "data": {"phase": "retriever", "message": "正在准备检索语料"}}
         self.workflow.retriever = HybridRetriever(corpus=self._build_runtime_corpus(req.stock_codes))
-        yield {"event": "start", "data": {"status": "started"}}
         trace_id = self.traces.new_trace()
         state = AgentState(
             user_id=req.user_id,
@@ -389,6 +395,7 @@ class AShareAgentService:
         runtime_name = selected_runtime.runtime_name
         self.traces.emit(trace_id, "workflow_runtime", {"runtime": runtime_name})
         yield {"event": "stream_runtime", "data": {"runtime": runtime_name}}
+        yield {"event": "progress", "data": {"phase": "model", "message": "开始模型流式输出"}}
         for event in selected_runtime.run_stream(state, memory_hint=memory_hint):
             yield event
         citations = [c for c in state.citations if isinstance(c, dict)]
