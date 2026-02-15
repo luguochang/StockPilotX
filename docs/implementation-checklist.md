@@ -205,3 +205,20 @@
   - key output: `包含 analysis_brief`
   - command: `python - <<... s.predict_run(...) ...>>`
   - key output: `history_data_mode=real_history`
+
+### 2026-02-15 (Round-C)
+- Completed:
+  - [OPS-AGT-001] 新增多 Agent 分歧分析接口 `/v1/ops/agent/debate`，输出共识与分歧分数。
+  - [OPS-RAG-001] 新增 RAG 质量接口 `/v1/ops/rag/quality`，输出 Recall/MRR/nDCG 及 case 明细。
+  - [OPS-PRM-001] 新增 Prompt 版本对比回放接口 `/v1/ops/prompts/compare`，支持渲染与 diff。
+  - [FRONT-OPS-001] `ops/evals` 页面接入 debate/rag/prompt compare 可视化。
+  - [REL-DATA-001] 重建 `data/sources.py` 并加强外部源短超时+禁代理稳定性。
+- Evidence:
+  - command: `.\.venv\Scripts\python -m pytest -q tests/test_http_api.py`
+  - key output: `12 passed`
+  - command: `.\.venv\Scripts\python -m pytest -q`
+  - key output: `58 passed`
+  - command: `cd frontend && npm run build`
+  - key output: `build passed`
+  - command: `cd frontend && npx tsc --noEmit`
+  - key output: `typecheck passed`

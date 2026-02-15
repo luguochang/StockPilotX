@@ -136,6 +136,51 @@ class PromptRegistry:
             "status": row[7],
         }
 
+    def get_prompt(self, prompt_id: str, version: str) -> dict[str, Any]:
+        """读取指定 Prompt 的特定版本。"""
+        row = self.conn.execute(
+            """
+            SELECT prompt_id, version, scenario, template_system, template_policy, template_task, variables_schema, status
+            FROM prompt_registry
+            WHERE prompt_id = ? AND version = ?
+            LIMIT 1
+            """,
+            (prompt_id, version),
+        ).fetchone()
+        if not row:
+            raise KeyError(f"prompt not found: {prompt_id}@{version}")
+        return {
+            "prompt_id": row[0],
+            "version": row[1],
+            "scenario": row[2],
+            "template_system": row[3],
+            "template_policy": row[4],
+            "template_task": row[5],
+            "variables_schema": json.loads(row[6]),
+            "status": row[7],
+        }
+
+    def list_prompt_versions(self, prompt_id: str) -> list[dict[str, Any]]:
+        """列出某个 Prompt 的所有版本。"""
+        rows = self.conn.execute(
+            """
+            SELECT prompt_id, version, scenario, status
+            FROM prompt_registry
+            WHERE prompt_id = ?
+            ORDER BY version DESC
+            """,
+            (prompt_id,),
+        ).fetchall()
+        return [
+            {
+                "prompt_id": r[0],
+                "version": r[1],
+                "scenario": r[2],
+                "status": r[3],
+            }
+            for r in rows
+        ]
+
     def save_eval_result(
         self,
         *,

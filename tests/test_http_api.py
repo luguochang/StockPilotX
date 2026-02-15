@@ -249,6 +249,29 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("capabilities", body)
         self.assertTrue(any(x.get("key") == "langgraph" for x in body["capabilities"]))
 
+    def test_ops_debate_rag_and_prompt_compare(self) -> None:
+        c1, debate = self._get("/v1/ops/agent/debate?stock_code=SH600000")
+        self.assertEqual(c1, 200)
+        self.assertIn("opinions", debate)
+        self.assertIn("disagreement_score", debate)
+
+        c2, rag = self._get("/v1/ops/rag/quality")
+        self.assertEqual(c2, 200)
+        self.assertIn("metrics", rag)
+        self.assertIn("cases", rag)
+
+        c3, comp = self._post(
+            "/v1/ops/prompts/compare",
+            {
+                "prompt_id": "fact_qa",
+                "base_version": "1.0.0",
+                "candidate_version": "1.0.0",
+                "variables": {"question": "test", "stock_codes": ["SH600000"], "evidence": "source:cninfo"},
+            },
+        )
+        self.assertEqual(c3, 200)
+        self.assertIn("diff_summary", comp)
+
 
 if __name__ == "__main__":
     unittest.main()

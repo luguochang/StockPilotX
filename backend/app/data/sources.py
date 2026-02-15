@@ -6,17 +6,17 @@ import json
 import re
 from typing import Any, Protocol
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 
 def now_utc() -> datetime:
-    """返回当前 UTC 时间。"""
+    """Return current UTC time."""
     return datetime.now(timezone.utc)
 
 
 @dataclass(slots=True)
 class Quote:
-    """行情对象。"""
+    """Market quote data object."""
 
     stock_code: str
     price: float
@@ -30,30 +30,23 @@ class Quote:
 
 
 class QuoteAdapter(Protocol):
-    """行情适配器协议。"""
-
     source_id: str
 
     def fetch_quote(self, stock_code: str) -> Quote:
-        """抓取单只股票行情。"""
         ...
 
 
 class BaseHttpQuoteAdapter:
-    """真实 HTTP 行情适配器基类。
-
-    说明：
-    - 尽量按公开接口抓取。
-    - 失败时抛 RuntimeError，由 QuoteService 做回退。
-    """
+    """HTTP quote adapter base with short timeout and no system proxy."""
 
     source_id = "http"
     reliability_score = 0.8
-    timeout_sec = 3.0
+    timeout_sec = 1.5
 
     def _fetch_text(self, url: str, headers: dict[str, str] | None = None) -> str:
         req = Request(url=url, headers=headers or {"User-Agent": "StockPilotX/1.0"})
-        with urlopen(req, timeout=self.timeout_sec) as resp:  # noqa: S310 - 仅访问公开行情接口
+        opener = build_opener(ProxyHandler({}))
+        with opener.open(req, timeout=self.timeout_sec) as resp:  # noqa: S310
             return resp.read().decode("utf-8", errors="ignore")
 
     @staticmethod
@@ -69,8 +62,6 @@ class BaseHttpQuoteAdapter:
 
 
 class TencentLiveAdapter(BaseHttpQuoteAdapter):
-    """腾讯真实行情源。"""
-
     source_id = "tencent"
     reliability_score = 0.85
 
@@ -84,16 +75,19 @@ class TencentLiveAdapter(BaseHttpQuoteAdapter):
         fields = m.group(1).split("~")
         if len(fields) < 4:
             raise RuntimeError("tencent parse failed: field too short")
-        price = _to_float(_safe_get(fields, 3))
-        pct_change = _to_float(_safe_get(fields, 32))
-        volume = _to_float(_safe_get(fields, 36))
-        turnover = _to_float(_safe_get(fields, 37))
-        return _build_quote(stock_code, price, pct_change, volume, turnover, self.source_id, url, self.reliability_score)
+        return _build_quote(
+            stock_code=stock_code,
+            price=_to_float(_safe_get(fields, 3)),
+            pct_change=_to_float(_safe_get(fields, 32)),
+            volume=_to_float(_safe_get(fields, 36)),
+            turnover=_to_float(_safe_get(fields, 37)),
+            source_id=self.source_id,
+            source_url=url,
+            reliability_score=self.reliability_score,
+        )
 
 
 class NeteaseLiveAdapter(BaseHttpQuoteAdapter):
-    """网易真实行情源。"""
-
     source_id = "netease"
     reliability_score = 0.82
 
@@ -109,23 +103,29 @@ class NeteaseLiveAdapter(BaseHttpQuoteAdapter):
         item = payload.get(api_code)
         if not item:
             raise RuntimeError("netease parse failed: symbol not found")
-        price = _to_float(item.get("price"))
-        pct_change = _to_float(item.get("percent"))
-        volume = _to_float(item.get("volume"))
-        turnover = _to_float(item.get("turnover"))
-        return _build_quote(stock_code, price, pct_change, volume, turnover, self.source_id, url, self.reliability_score)
+        return _build_quote(
+            stock_code=stock_code,
+            price=_to_float(item.get("price")),
+            pct_change=_to_float(item.get("percent")),
+            volume=_to_float(item.get("volume")),
+            turnover=_to_float(item.get("turnover")),
+            source_id=self.source_id,
+            source_url=url,
+            reliability_score=self.reliability_score,
+        )
 
 
 class SinaLiveAdapter(BaseHttpQuoteAdapter):
-    """新浪真实行情源。"""
-
     source_id = "sina"
     reliability_score = 0.8
 
     def fetch_quote(self, stock_code: str) -> Quote:
         api_code = self._to_api_code(stock_code)
         url = f"https://hq.sinajs.cn/list={api_code}"
-        text = self._fetch_text(url, headers={"Referer": "https://finance.sina.com.cn", "User-Agent": "StockPilotX/1.0"})
+        text = self._fetch_text(
+            url,
+            headers={"Referer": "https://finance.sina.com.cn", "User-Agent": "StockPilotX/1.0"},
+        )
         m = re.search(r'"([^"]+)"', text)
         if not m:
             raise RuntimeError("sina parse failed: empty payload")
@@ -135,17 +135,19 @@ class SinaLiveAdapter(BaseHttpQuoteAdapter):
         prev_close = _to_float(_safe_get(fields, 2))
         price = _to_float(_safe_get(fields, 3))
         pct_change = round(((price - prev_close) / prev_close) * 100, 4) if prev_close else 0.0
-        volume = _to_float(_safe_get(fields, 8))
-        turnover = _to_float(_safe_get(fields, 9))
-        return _build_quote(stock_code, price, pct_change, volume, turnover, self.source_id, url, self.reliability_score)
+        return _build_quote(
+            stock_code=stock_code,
+            price=price,
+            pct_change=pct_change,
+            volume=_to_float(_safe_get(fields, 8)),
+            turnover=_to_float(_safe_get(fields, 9)),
+            source_id=self.source_id,
+            source_url=url,
+            reliability_score=self.reliability_score,
+        )
 
 
 class XueqiuLiveAdapter(BaseHttpQuoteAdapter):
-    """雪球真实行情源（可选）。
-
-    默认不启用，无 cookie 时直接失败并走下一层回退。
-    """
-
     source_id = "xueqiu"
     reliability_score = 0.78
 
@@ -179,8 +181,6 @@ class XueqiuLiveAdapter(BaseHttpQuoteAdapter):
 
 
 class BaseMockAdapter:
-    """行情适配器基类（MVP 模拟数据）。"""
-
     source_id = "base"
     reliability_score = 0.7
 
@@ -207,28 +207,22 @@ class BaseMockAdapter:
 
 
 class TencentAdapter(BaseMockAdapter):
-    """腾讯模拟行情源。"""
-
     source_id = "tencent"
     reliability_score = 0.85
 
 
 class NeteaseAdapter(BaseMockAdapter):
-    """网易模拟行情源。"""
-
     source_id = "netease"
     reliability_score = 0.82
 
 
 class SinaAdapter(BaseMockAdapter):
-    """新浪模拟行情源。"""
-
     source_id = "sina"
     reliability_score = 0.8
 
 
 class QuoteService:
-    """行情服务，回退顺序：tencent -> netease -> sina -> xueqiu(可选) -> mock。"""
+    """Quote service with fallback chain."""
 
     def __init__(self, adapters: list[QuoteAdapter]) -> None:
         self.adapters = adapters
@@ -238,13 +232,12 @@ class QuoteService:
         for adapter in self.adapters:
             try:
                 return adapter.fetch_quote(stock_code)
-            except RuntimeError as ex:
+            except Exception as ex:  # noqa: BLE001
                 errors.append(str(ex))
         raise RuntimeError("all quote sources failed: " + "; ".join(errors))
 
     @classmethod
     def build_default(cls, xueqiu_cookie: str | None = None) -> "QuoteService":
-        """默认构建：真实源优先，失败后进入 mock 兜底。"""
         adapters: list[QuoteAdapter] = [
             TencentLiveAdapter(),
             NeteaseLiveAdapter(),
@@ -258,14 +251,11 @@ class QuoteService:
 
 
 class HistoryService:
-    """历史日线服务（免费源）。"""
-
     source_id = "eastmoney_history"
     reliability_score = 0.9
-    timeout_sec = 6.0
+    timeout_sec = 2.0
 
     def fetch_daily_bars(self, stock_code: str, beg: str = "20240101", end: str = "20500101", limit: int = 240) -> list[dict]:
-        """抓取历史日线（含开高低收量额）。"""
         secid = _to_eastmoney_secid(stock_code)
         url = (
             "https://push2his.eastmoney.com/api/qt/stock/kline/get"
@@ -278,12 +268,12 @@ class HistoryService:
             "&klt=101&fqt=1"
         )
         req = Request(url=url, headers={"User-Agent": "StockPilotX/1.0"})
-        with urlopen(req, timeout=self.timeout_sec) as resp:  # noqa: S310 - 访问公开行情接口
+        opener = build_opener(ProxyHandler({}))
+        with opener.open(req, timeout=self.timeout_sec) as resp:  # noqa: S310
             payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
         klines = (((payload or {}).get("data") or {}).get("klines")) or []
         bars: list[dict] = []
         for row in klines[-limit:]:
-            # row: 日期,开盘,收盘,最高,最低,成交量,成交额,振幅
             parts = row.split(",")
             if len(parts) < 7:
                 continue
@@ -308,10 +298,78 @@ class HistoryService:
         return bars
 
 
-class AnnouncementService:
-    """公告服务：真实源优先，失败时自动回退 mock。"""
+class AnnouncementAdapter(Protocol):
+    source_id: str
 
-    def __init__(self, adapters: list["AnnouncementAdapter"] | None = None) -> None:
+    def fetch_announcements(self, stock_code: str) -> list[dict]:
+        ...
+
+
+class BaseLiveAnnouncementAdapter:
+    source_id = "announcement"
+    source_url = ""
+    reliability_score = 0.95
+    timeout_sec = 1.2
+
+    def _fetch_text(self, url: str) -> str:
+        req = Request(url=url, headers={"User-Agent": "StockPilotX/1.0"})
+        opener = build_opener(ProxyHandler({}))
+        with opener.open(req, timeout=self.timeout_sec) as resp:  # noqa: S310
+            return resp.read().decode("utf-8", errors="ignore")
+
+    def _extract_title(self, html: str) -> str:
+        m = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        if not m:
+            return "公告源页面抓取成功"
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+
+    def _to_event(self, stock_code: str, title: str) -> dict:
+        return {
+            "stock_code": stock_code,
+            "event_type": "announcement_snapshot",
+            "title": title[:120],
+            "content": f"{self.source_id} 页面抓取成功，可后续扩展结构化公告解析。",
+            "event_time": now_utc().isoformat(),
+            "source_id": self.source_id,
+            "source_url": self.source_url,
+            "reliability_score": self.reliability_score,
+        }
+
+
+class CninfoLiveAnnouncementAdapter(BaseLiveAnnouncementAdapter):
+    source_id = "cninfo"
+    source_url = "https://www.cninfo.com.cn/"
+    reliability_score = 0.98
+
+    def fetch_announcements(self, stock_code: str) -> list[dict]:
+        html = self._fetch_text(self.source_url)
+        return [self._to_event(stock_code, self._extract_title(html))]
+
+
+class SSELiveAnnouncementAdapter(BaseLiveAnnouncementAdapter):
+    source_id = "sse"
+    source_url = "https://www.sse.com.cn/disclosure/listedinfo/announcement/"
+    reliability_score = 0.97
+
+    def fetch_announcements(self, stock_code: str) -> list[dict]:
+        html = self._fetch_text(self.source_url)
+        return [self._to_event(stock_code, self._extract_title(html))]
+
+
+class SZSELiveAnnouncementAdapter(BaseLiveAnnouncementAdapter):
+    source_id = "szse"
+    source_url = "https://www.szse.cn/disclosure/listed/index.html"
+    reliability_score = 0.97
+
+    def fetch_announcements(self, stock_code: str) -> list[dict]:
+        html = self._fetch_text(self.source_url)
+        return [self._to_event(stock_code, self._extract_title(html))]
+
+
+class AnnouncementService:
+    """Announcement service with live-first fallback."""
+
+    def __init__(self, adapters: list[AnnouncementAdapter] | None = None) -> None:
         self.adapters = adapters or [
             CninfoLiveAnnouncementAdapter(),
             SSELiveAnnouncementAdapter(),
@@ -330,76 +388,6 @@ class AnnouncementService:
         return _mock_announcements(stock_code)
 
 
-class AnnouncementAdapter(Protocol):
-    source_id: str
-
-    def fetch_announcements(self, stock_code: str) -> list[dict]:
-        ...
-
-
-class BaseLiveAnnouncementAdapter:
-    source_id = "announcement"
-    source_url = ""
-    reliability_score = 0.95
-    timeout_sec = 4.0
-
-    def _fetch_text(self, url: str) -> str:
-        req = Request(url=url, headers={"User-Agent": "StockPilotX/1.0"})
-        with urlopen(req, timeout=self.timeout_sec) as resp:  # noqa: S310 - 公开披露页面
-            return resp.read().decode("utf-8", errors="ignore")
-
-    def _extract_title(self, html: str) -> str:
-        m = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
-        if not m:
-            return "公告源页面抓取成功"
-        return re.sub(r"\s+", " ", m.group(1)).strip()
-
-    def _to_event(self, stock_code: str, title: str) -> dict:
-        return {
-            "stock_code": stock_code,
-            "event_type": "announcement_snapshot",
-            "title": title[:120],
-            "content": f"{self.source_id} 页面抓取成功，后续可扩展为结构化公告解析。",
-            "event_time": now_utc().isoformat(),
-            "source_id": self.source_id,
-            "source_url": self.source_url,
-            "reliability_score": self.reliability_score,
-        }
-
-
-class CninfoLiveAnnouncementAdapter(BaseLiveAnnouncementAdapter):
-    source_id = "cninfo"
-    source_url = "https://www.cninfo.com.cn/"
-    reliability_score = 0.98
-
-    def fetch_announcements(self, stock_code: str) -> list[dict]:
-        html = self._fetch_text(self.source_url)
-        title = self._extract_title(html)
-        return [self._to_event(stock_code, title)]
-
-
-class SSELiveAnnouncementAdapter(BaseLiveAnnouncementAdapter):
-    source_id = "sse"
-    source_url = "https://www.sse.com.cn/disclosure/listedinfo/announcement/"
-    reliability_score = 0.97
-
-    def fetch_announcements(self, stock_code: str) -> list[dict]:
-        html = self._fetch_text(self.source_url)
-        title = self._extract_title(html)
-        return [self._to_event(stock_code, title)]
-
-
-class SZSELiveAnnouncementAdapter(BaseLiveAnnouncementAdapter):
-    source_id = "szse"
-    source_url = "https://www.szse.cn/disclosure/listed/index.html"
-    reliability_score = 0.97
-
-    def fetch_announcements(self, stock_code: str) -> list[dict]:
-        html = self._fetch_text(self.source_url)
-        title = self._extract_title(html)
-        return [self._to_event(stock_code, title)]
-
-
 def _safe_get(values: list[str], idx: int) -> str:
     return values[idx] if 0 <= idx < len(values) else "0"
 
@@ -412,6 +400,7 @@ def _to_float(value: Any) -> float:
 
 
 def _build_quote(
+    *,
     stock_code: str,
     price: float,
     pct_change: float,
@@ -447,7 +436,7 @@ def _to_netease_code(stock_code: str) -> str:
 
 def _to_xueqiu_symbol(stock_code: str) -> str:
     code = stock_code.upper().replace(".", "")
-    if code.startswith("SH") or code.startswith("SZ"):
+    if code.startswith(("SH", "SZ")):
         return code
     if code.startswith("6"):
         return "SH" + code
@@ -471,7 +460,6 @@ def _normalize_stock_code(stock_code: str) -> str:
 
 
 def _mock_announcements(stock_code: str) -> list[dict]:
-    """公告兜底数据：真实源不可达时保证系统可用。"""
     year = datetime.now().year
     return [
         {

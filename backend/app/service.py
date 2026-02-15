@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import difflib
 import uuid
 from datetime import datetime, timezone
 from statistics import mean
@@ -21,6 +22,7 @@ from backend.app.observability.tracing import TraceStore
 from backend.app.prompt.registry import PromptRegistry
 from backend.app.prompt.runtime import PromptRuntime
 from backend.app.predict.service import PredictionService, PredictionStore
+from backend.app.rag.evaluation import RetrievalEvaluator, default_retrieval_dataset
 from backend.app.rag.graphrag import GraphRAGService
 from backend.app.rag.retriever import HybridRetriever, RetrievalItem
 from backend.app.state import AgentState
@@ -776,6 +778,140 @@ class AShareAgentService:
             llm_external_enabled=self.settings.llm_external_enabled,
         )
 
+    def ops_agent_debate(self, stock_code: str, question: str = "") -> dict[str, Any]:
+        """多 Agent 分歧分析：产品、量化、风控三方观点。"""
+        code = stock_code.upper().replace(".", "")
+        if self._needs_quote_refresh(code):
+            self.ingest_market_daily([code])
+        if self._needs_history_refresh(code):
+            self.ingestion.ingest_history_daily([code], limit=260)
+
+        quote = self._latest_quote(code) or {}
+        bars = self._history_bars(code, limit=160)
+        trend = self._trend_metrics(bars) if len(bars) >= 30 else {}
+        pred = self.predict_run({"stock_codes": [code], "horizons": ["5d", "20d"]})
+        horizon_map = {h["horizon"]: h for h in pred["results"][0]["horizons"]} if pred.get("results") else {}
+
+        pm_signal = "hold"
+        if trend.get("ma20_slope", 0.0) > 0 and float(quote.get("pct_change", 0.0)) > 0:
+            pm_signal = "buy"
+        elif trend.get("ma20_slope", 0.0) < 0:
+            pm_signal = "reduce"
+
+        quant_20 = horizon_map.get("20d", {})
+        quant_signal = str(quant_20.get("signal", "hold")).replace("strong_", "")
+
+        risk_signal = "hold"
+        if trend.get("max_drawdown_60", 0.0) > 0.2 or trend.get("volatility_20", 0.0) > 0.025:
+            risk_signal = "reduce"
+        elif trend.get("volatility_20", 0.0) < 0.012 and trend.get("momentum_20", 0.0) > 0:
+            risk_signal = "buy"
+
+        opinions = [
+            {
+                "agent": "pm_agent",
+                "signal": pm_signal,
+                "confidence": 0.66,
+                "reason": f"基于趋势斜率与当日涨跌构建产品侧可解释观点，question={question or 'default'}",
+            },
+            {
+                "agent": "quant_agent",
+                "signal": quant_signal,
+                "confidence": float(quant_20.get("up_probability", 0.5)),
+                "reason": f"来自20日预测：{quant_20.get('rationale', '')}",
+            },
+            {
+                "agent": "risk_agent",
+                "signal": risk_signal,
+                "confidence": 0.72,
+                "reason": (
+                    f"回撤={trend.get('max_drawdown_60', 0.0):.4f}, 波动={trend.get('volatility_20', 0.0):.4f}, "
+                    f"动量={trend.get('momentum_20', 0.0):.4f}"
+                ),
+            },
+        ]
+
+        bucket = {"buy": 0, "hold": 0, "reduce": 0}
+        for x in opinions:
+            bucket[str(x["signal"])] += 1
+        consensus_signal = max(bucket, key=lambda k: bucket[k])
+        disagreement_score = round(1.0 - (bucket[consensus_signal] / len(opinions)), 4)
+
+        return {
+            "stock_code": code,
+            "consensus_signal": consensus_signal,
+            "disagreement_score": disagreement_score,
+            "opinions": opinions,
+            "market_snapshot": {
+                "price": quote.get("price"),
+                "pct_change": quote.get("pct_change"),
+                "trend": trend,
+            },
+        }
+
+    def ops_rag_quality(self) -> dict[str, Any]:
+        """RAG 质量面板数据：聚合指标 + 用例明细。"""
+        dataset = default_retrieval_dataset()
+        retriever = HybridRetriever(corpus=self._build_runtime_corpus([]))
+        evaluator = RetrievalEvaluator(retriever)
+        metrics = evaluator.run(dataset, k=5)
+        cases: list[dict[str, Any]] = []
+        for case in dataset:
+            query = case["query"]
+            positives = set(case["positive_source_ids"])
+            results = retriever.retrieve(query, rerank_top_n=5)
+            pred = [item.source_id for item in results]
+            hit = [x for x in pred if x in positives]
+            cases.append(
+                {
+                    "query": query,
+                    "positive_source_ids": list(positives),
+                    "predicted_source_ids": pred,
+                    "hit_source_ids": hit,
+                    "recall_at_k": round(RetrievalEvaluator._recall_at_k(pred, positives), 4),
+                    "mrr": round(RetrievalEvaluator._mrr(pred, positives), 4),
+                    "ndcg_at_k": round(RetrievalEvaluator._ndcg_at_k(pred, positives, 5), 4),
+                }
+            )
+        return {
+            "metrics": metrics,
+            "dataset_size": len(dataset),
+            "cases": cases,
+        }
+
+    def ops_prompt_compare(
+        self,
+        *,
+        prompt_id: str,
+        base_version: str,
+        candidate_version: str,
+        variables: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Prompt 版本对比回放。"""
+        base_prompt = self.prompts.get_prompt(prompt_id, base_version)
+        cand_prompt = self.prompts.get_prompt(prompt_id, candidate_version)
+        base_rendered, base_meta = self.prompt_runtime.build_from_prompt(base_prompt, variables)
+        cand_rendered, cand_meta = self.prompt_runtime.build_from_prompt(cand_prompt, variables)
+        diff_rows = list(
+            difflib.unified_diff(
+                base_rendered.splitlines(),
+                cand_rendered.splitlines(),
+                fromfile=f"{prompt_id}@{base_version}",
+                tofile=f"{prompt_id}@{candidate_version}",
+                lineterm="",
+            )
+        )
+        return {
+            "prompt_id": prompt_id,
+            "base": {"version": base_version, "meta": base_meta, "rendered": base_rendered},
+            "candidate": {"version": candidate_version, "meta": cand_meta, "rendered": cand_rendered},
+            "diff_summary": {
+                "line_count": len(diff_rows),
+                "changed": bool(diff_rows),
+            },
+            "diff_preview": diff_rows[:120],
+        }
+
     def alerts_list(self, token: str) -> list[dict[str, Any]]:
         return self.web.alerts_list(token)
 
@@ -814,3 +950,4 @@ class AShareAgentService:
         self.memory.close()
         self.prompts.close()
         self.web.close()
+

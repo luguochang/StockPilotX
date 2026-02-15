@@ -21,6 +21,15 @@ class PromptRuntime:
 
     def build(self, prompt_id: str, variables: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         prompt = self.registry.get_stable_prompt(prompt_id)
+        return self.build_from_prompt(prompt, variables)
+
+    def build_version(self, prompt_id: str, version: str, variables: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """按指定版本渲染 Prompt，便于版本对比与回放。"""
+        prompt = self.registry.get_prompt(prompt_id, version)
+        return self.build_from_prompt(prompt, variables)
+
+    def build_from_prompt(self, prompt: dict[str, Any], variables: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """直接使用 Prompt 对象渲染，供 compare/replay 等场景复用。"""
         self._validate_variables(prompt["variables_schema"], variables)
         assembled = self._build_with_langchain(prompt, variables) if LANGCHAIN_PROMPT_AVAILABLE else self._build_with_format(prompt, variables)
         return assembled, {

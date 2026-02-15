@@ -299,6 +299,26 @@ def create_app() -> FastAPI:
         # 技术实现核查接口：用于确认关键技术点当前落地状态。
         return svc.ops_capabilities()
 
+    @app.get("/v1/ops/agent/debate")
+    def ops_agent_debate(stock_code: str, question: str = ""):
+        return svc.ops_agent_debate(stock_code=stock_code, question=question)
+
+    @app.get("/v1/ops/rag/quality")
+    def ops_rag_quality():
+        return svc.ops_rag_quality()
+
+    @app.post("/v1/ops/prompts/compare")
+    def ops_prompt_compare(payload: dict):
+        return svc.ops_prompt_compare(
+            prompt_id=payload.get("prompt_id", "fact_qa"),
+            base_version=payload.get("base_version", "1.0.0"),
+            candidate_version=payload.get("candidate_version", "1.0.0"),
+            variables=payload.get(
+                "variables",
+                {"question": "请分析SH600000", "stock_codes": ["SH600000"], "evidence": "source:cninfo"},
+            ),
+        )
+
     @app.post("/v1/scheduler/pause")
     def scheduler_pause(payload: dict, authorization: str | None = Header(default=None)):
         token = _extract_bearer_token(authorization)

@@ -24,6 +24,15 @@ class PromptEngineeringTestCase(unittest.TestCase):
             self.assertIn("[TASK]", prompt)
             self.assertEqual(meta["prompt_id"], "fact_qa")
             self.assertIn(meta["prompt_engine"], ("langchain_chat_prompt", "python_format"))
+            prompt_v, meta_v = runtime.build_version(
+                "fact_qa",
+                "1.0.0",
+                {"question": "版本回放", "stock_codes": ["SH600000"], "evidence": "source:cninfo"},
+            )
+            self.assertIn("[TASK]", prompt_v)
+            self.assertEqual(meta_v["prompt_version"], "1.0.0")
+            versions = registry.list_prompt_versions("fact_qa")
+            self.assertTrue(any(v["version"] == "1.0.0" for v in versions))
             registry.close()
 
     def test_eval_service_contains_prompt_suite_metrics(self) -> None:

@@ -49,3 +49,9 @@
 - Prediction source quality: real history first, synthetic fallback explicitly tagged.
 - Frontend trust UX: confidence/freshness/source-mode/rationale visible in `/` and `/predict`.
 - Validation: backend `57 passed`, frontend build + tsc passed.
+
+## Round-C Update (2026-02-15)
+- Added ops endpoints: `/v1/ops/agent/debate`, `/v1/ops/rag/quality`, `/v1/ops/prompts/compare`.
+- Added prompt runtime versioned replay and registry version listing.
+- Integrated new ops panels in frontend `/ops/evals`.
+- Full validation: backend 58 passed; http_api 12 passed; frontend build + tsc passed.
