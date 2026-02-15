@@ -56,6 +56,17 @@ class Settings:
     deep_archive_tenant_policy_json: str = "{}"
     deep_archive_export_task_max_attempts: int = 2
     deep_archive_export_retry_backoff_seconds: float = 0.35
+    rag_vector_enabled: bool = True
+    rag_vector_index_dir: str = str(_DATA_DIR / "vector")
+    rag_vector_top_k: int = 8
+    embedding_provider: str = "local_hash"
+    embedding_model: str = ""
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_dim: int = 256
+    embedding_timeout_seconds: float = 12.0
+    embedding_batch_size: int = 32
+    embedding_fallback_to_local: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -96,6 +107,17 @@ class Settings:
             deep_archive_export_retry_backoff_seconds=max(
                 0.0, float(os.getenv("DEEP_ARCHIVE_EXPORT_RETRY_BACKOFF_SECONDS", "0.35"))
             ),
+            rag_vector_enabled=_to_bool(os.getenv("RAG_VECTOR_ENABLED"), True),
+            rag_vector_index_dir=os.getenv("RAG_VECTOR_INDEX_DIR", str(_DATA_DIR / "vector")),
+            rag_vector_top_k=max(1, int(os.getenv("RAG_VECTOR_TOP_K", "8"))),
+            embedding_provider=os.getenv("EMBEDDING_PROVIDER", "local_hash").strip() or "local_hash",
+            embedding_model=os.getenv("EMBEDDING_MODEL", "").strip(),
+            embedding_base_url=os.getenv("EMBEDDING_BASE_URL", "").strip(),
+            embedding_api_key=os.getenv("EMBEDDING_API_KEY", "").strip(),
+            embedding_dim=max(64, int(os.getenv("EMBEDDING_DIM", "256"))),
+            embedding_timeout_seconds=max(1.0, float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "12"))),
+            embedding_batch_size=max(1, int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))),
+            embedding_fallback_to_local=_to_bool(os.getenv("EMBEDDING_FALLBACK_TO_LOCAL"), True),
         )
 
     def load_llm_provider_configs(self) -> list[dict]:

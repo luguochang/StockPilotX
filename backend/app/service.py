@@ -32,7 +32,10 @@ from backend.app.prompt.runtime import PromptRuntime
 from backend.app.predict.service import PredictionService, PredictionStore
 from backend.app.rag.evaluation import RetrievalEvaluator, default_retrieval_dataset
 from backend.app.rag.graphrag import GraphRAGService
+from backend.app.rag.embedding_provider import EmbeddingProvider, EmbeddingRuntimeConfig
+from backend.app.rag.hybrid_retriever_v2 import HybridRetrieverV2
 from backend.app.rag.retriever import HybridRetriever, RetrievalItem
+from backend.app.rag.vector_store import LocalSummaryVectorStore, VectorSummaryRecord
 from backend.app.state import AgentState
 from backend.app.web.service import WebAppService
 from backend.app.web.store import WebStore
@@ -58,6 +61,28 @@ class AShareAgentService:
             jwt_secret=self.settings.jwt_secret,
             jwt_expire_seconds=self.settings.jwt_expire_seconds,
         )
+        # Phase-B 向量检索组件：支持可配置 embedding provider + 本地向量索引。
+        self.embedding_provider = EmbeddingProvider(
+            EmbeddingRuntimeConfig(
+                provider=self.settings.embedding_provider,
+                model=self.settings.embedding_model,
+                base_url=self.settings.embedding_base_url,
+                api_key=self.settings.embedding_api_key,
+                dim=self.settings.embedding_dim,
+                timeout_seconds=self.settings.embedding_timeout_seconds,
+                batch_size=self.settings.embedding_batch_size,
+                fallback_to_local=self.settings.embedding_fallback_to_local,
+            ),
+            trace_emit=self.traces.emit,
+        )
+        self.vector_store = LocalSummaryVectorStore(
+            index_dir=self.settings.rag_vector_index_dir,
+            embedding_provider=self.embedding_provider,
+            dim=self.settings.embedding_dim,
+            enable_faiss=self.settings.rag_vector_enabled,
+        )
+        self._vector_signature = ""
+        self._vector_refreshed_at = 0.0
 
         self.ingestion_store = IngestionStore()
         self.ingestion = IngestionService(
@@ -783,6 +808,7 @@ class AShareAgentService:
 
     def query(self, payload: dict[str, Any]) -> dict[str, Any]:
         """执行问答主链路并返回标准化响应。"""
+        started_at = time.perf_counter()
         req = QueryRequest(**payload)
         selected_runtime = self._select_runtime(str(payload.get("workflow_runtime", "")))
 
@@ -803,7 +829,7 @@ class AShareAgentService:
                 pass
 
         # 基于最新摄取数据动态构建检索语料，避免固定示例语料导致输出雷同。
-        self.workflow.retriever = HybridRetriever(corpus=self._build_runtime_corpus(req.stock_codes))
+        self.workflow.retriever = self._build_runtime_retriever(req.stock_codes)
         enriched_question = self._augment_question_with_history_context(req.question, req.stock_codes)
 
         trace_id = self.traces.new_trace()
@@ -837,6 +863,22 @@ class AShareAgentService:
             },
         )
         self._record_rag_eval_case(req.question, state.evidence_pack, state.citations)
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        self._record_rag_retrieval_trace(
+            trace_id=trace_id,
+            query_text=req.question,
+            query_type="query",
+            evidence_pack=state.evidence_pack,
+            citations=state.citations,
+            latency_ms=latency_ms,
+        )
+        self._persist_query_knowledge_memory(
+            user_id=req.user_id,
+            question=req.question,
+            stock_codes=req.stock_codes,
+            state=state,
+            query_type="query",
+        )
 
         resp = QueryResponse(
             trace_id=trace_id,
@@ -853,6 +895,7 @@ class AShareAgentService:
     def query_stream_events(self, payload: dict[str, Any], chunk_size: int = 80):
         """以事件流形式输出问答结果，便于前端逐段渲染。"""
         _ = chunk_size
+        started_at = time.perf_counter()
         req = QueryRequest(**payload)
         selected_runtime = self._select_runtime(str(payload.get("workflow_runtime", "")))
         # 先发送 start，确保前端在任何耗时步骤前就能感知“任务已启动”。
@@ -876,7 +919,7 @@ class AShareAgentService:
                 pass
             yield {"event": "progress", "data": {"phase": "data_refresh", "status": "done"}}
         yield {"event": "progress", "data": {"phase": "retriever", "message": "正在准备检索语料"}}
-        self.workflow.retriever = HybridRetriever(corpus=self._build_runtime_corpus(req.stock_codes))
+        self.workflow.retriever = self._build_runtime_retriever(req.stock_codes)
         enriched_question = self._augment_question_with_history_context(req.question, req.stock_codes)
         trace_id = self.traces.new_trace()
         state = AgentState(
@@ -931,6 +974,24 @@ class AShareAgentService:
             yield {"event": "done", "data": {"ok": False, "trace_id": trace_id, "error": runtime_error["message"]}}
             return
         citations = [c for c in state.citations if isinstance(c, dict)]
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        self._record_rag_retrieval_trace(
+            trace_id=trace_id,
+            query_text=req.question,
+            query_type="query_stream",
+            evidence_pack=state.evidence_pack,
+            citations=state.citations,
+            latency_ms=latency_ms,
+        )
+        self._persist_query_knowledge_memory(
+            user_id=req.user_id,
+            question=req.question,
+            stock_codes=req.stock_codes,
+            state=state,
+            query_type="query_stream",
+        )
+        # 结果沉淀事件：便于前端/运维确认本轮问答已进入共享语料池。
+        yield {"event": "knowledge_persisted", "data": {"trace_id": trace_id}}
         yield {"event": "analysis_brief", "data": self._build_analysis_brief(req.stock_codes, citations)}
 
     def _build_evidence_rich_answer(
@@ -1022,6 +1083,26 @@ class AShareAgentService:
         lines.append("## Dev Manager Agent View")
         lines.append("## 开发经理 Agent 观点（工程侧）")
         lines.extend(dev_section)
+
+        # 业务可读性补充：告诉用户“本轮结论是否命中了共享知识资产”。
+        shared_hits = [
+            c
+            for c in merged
+            if str(c.get("source_id", "")).startswith("doc::")
+            or str(c.get("source_id", "")) == "qa_memory_summary"
+        ]
+        lines.append("")
+        lines.append("## Shared Knowledge Hits")
+        lines.append("## 共享知识命中")
+        if shared_hits:
+            lines.append(f"- 命中条数: `{len(shared_hits)}`")
+            for idx, item in enumerate(shared_hits[:4], start=1):
+                lines.append(
+                    f"- [{idx}] source=`{item.get('source_id','unknown')}` | "
+                    f"{item.get('excerpt', '')[:140]}"
+                )
+        else:
+            lines.append("- 本轮未命中共享知识资产，结论主要来自实时行情/公告/历史序列。")
         lines.append("")
         lines.append("## Evidence References")
         lines.append("## 引用清单")
@@ -1087,6 +1168,106 @@ class AShareAgentService:
             return
         self.web.rag_eval_add(query_text=query_text, positive_source_ids=pos_u, predicted_source_ids=pred_u)
 
+    def _record_rag_retrieval_trace(
+        self,
+        *,
+        trace_id: str,
+        query_text: str,
+        query_type: str,
+        evidence_pack: list[dict[str, Any]],
+        citations: list[dict[str, Any]],
+        latency_ms: int,
+    ) -> None:
+        """记录召回/选用轨迹，便于线上排查“召回命中但答案未使用”问题。"""
+        retrieved_ids = [
+            str(x.get("source_id", "")).strip()
+            for x in evidence_pack[:12]
+            if str(x.get("source_id", "")).strip()
+        ]
+        selected_ids = [
+            str(x.get("source_id", "")).strip()
+            for x in citations[:12]
+            if str(x.get("source_id", "")).strip()
+        ]
+        if not trace_id.strip():
+            return
+        self.web.rag_retrieval_trace_add(
+            trace_id=trace_id,
+            query_text=query_text[:500],
+            query_type=query_type[:40],
+            retrieved_ids=list(dict.fromkeys(retrieved_ids)),
+            selected_ids=list(dict.fromkeys(selected_ids)),
+            latency_ms=latency_ms,
+        )
+
+    def _persist_query_knowledge_memory(
+        self,
+        *,
+        user_id: str,
+        question: str,
+        stock_codes: list[str],
+        state: AgentState,
+        query_type: str,
+    ) -> None:
+        """把问答结果写入共享语料池（raw + redacted/summary 双轨）。"""
+        answer_text = str(state.report or "").strip()
+        if not answer_text:
+            return
+        citations = [c for c in state.citations if isinstance(c, dict)]
+        risk_flags = [str(x) for x in state.risk_flags]
+        quality_score = self._estimate_qa_quality(answer_text, citations, risk_flags)
+        high_risk_flags = {"missing_citation", "compliance_block"}
+        retrieval_enabled = bool(len(citations) >= 2 and quality_score >= 0.65 and not (high_risk_flags & set(risk_flags)))
+        primary_code = str(stock_codes[0]).upper() if stock_codes else "GLOBAL"
+        answer_redacted = self._redact_text(answer_text)
+        summary_text = self._build_qa_summary(answer_redacted, citations, query_type=query_type)
+        memory_id = f"qam-{uuid.uuid4().hex[:16]}"
+        self.web.rag_qa_memory_add(
+            memory_id=memory_id,
+            user_id=str(user_id),
+            stock_code=primary_code,
+            query_text=str(question)[:1000],
+            answer_text=answer_text[:12000],
+            answer_redacted=answer_redacted[:12000],
+            summary_text=summary_text[:1000],
+            citations=citations[:12],
+            risk_flags=risk_flags[:12],
+            intent=str(state.intent),
+            quality_score=quality_score,
+            share_scope="global",
+            retrieval_enabled=retrieval_enabled,
+        )
+
+    @staticmethod
+    def _estimate_qa_quality(answer_text: str, citations: list[dict[str, Any]], risk_flags: list[str]) -> float:
+        """轻量质量评分：用于共享语料的上线门禁。"""
+        score = 0.25
+        score += min(0.35, len(citations) * 0.08)
+        length = len(answer_text)
+        if length >= 400:
+            score += 0.25
+        elif length >= 180:
+            score += 0.18
+        elif length >= 80:
+            score += 0.10
+        penalties = 0.0
+        if "missing_citation" in risk_flags:
+            penalties += 0.20
+        if "external_model_failed" in risk_flags:
+            penalties += 0.08
+        if "compliance_block" in risk_flags:
+            penalties += 0.20
+        return round(max(0.0, min(1.0, score - penalties)), 4)
+
+    @staticmethod
+    def _build_qa_summary(answer_redacted: str, citations: list[dict[str, Any]], *, query_type: str) -> str:
+        """构造可检索摘要：优先结构化前缀 + 截断正文。"""
+        source_ids = [str(x.get("source_id", "")) for x in citations if str(x.get("source_id", "")).strip()]
+        source_head = ",".join(list(dict.fromkeys(source_ids))[:4]) or "unknown"
+        head = f"[{query_type}] sources={source_head}; "
+        body = answer_redacted.replace("\n", " ").strip()
+        return head + body[:780]
+
     def _calc_retrieval_metrics_from_cases(self, cases: list[dict[str, Any]], k: int = 5) -> dict[str, float]:
         if not cases:
             return {"recall_at_k": 0.0, "mrr": 0.0, "ndcg_at_k": 0.0}
@@ -1105,6 +1286,148 @@ class AShareAgentService:
             "mrr": round(sum(mrrs) / n, 4),
             "ndcg_at_k": round(sum(ndcgs) / n, 4),
         }
+
+    def _build_runtime_retriever(self, stock_codes: list[str]):
+        """统一构建查询期 retriever：可按配置启用向量语义增强。"""
+        corpus = self._build_runtime_corpus(stock_codes)
+        if not self.settings.rag_vector_enabled:
+            return HybridRetriever(corpus=corpus)
+        self._refresh_summary_vector_index(stock_codes)
+
+        def _semantic_search(query: str, top_k: int) -> list[RetrievalItem]:
+            return self._semantic_summary_origin_hits(query, top_k=max(1, top_k))
+
+        return HybridRetrieverV2(corpus=corpus, semantic_search_fn=_semantic_search)
+
+    def _build_summary_vector_records(self, stock_codes: list[str]) -> list[VectorSummaryRecord]:
+        """把持久化资产映射为“摘要索引记录”，用于 summary-first 检索。"""
+        symbols = {str(x).upper() for x in stock_codes}
+        rows: list[VectorSummaryRecord] = []
+        doc_rows = self.web.rag_doc_chunk_list_internal(status="active", limit=2500)
+        for row in doc_rows:
+            row_codes = {str(x).upper() for x in row.get("stock_codes", [])}
+            if symbols and row_codes and symbols.isdisjoint(row_codes):
+                continue
+            summary_text = str(row.get("chunk_text_redacted") or row.get("chunk_text") or "").strip()
+            parent_text = str(row.get("chunk_text") or "").strip()
+            if not summary_text or not parent_text:
+                continue
+            source = str(row.get("source", "doc_upload"))
+            record_id = f"doc:{row.get('chunk_id', '')}"
+            rows.append(
+                VectorSummaryRecord(
+                    record_id=record_id,
+                    kind="doc_chunk",
+                    summary_text=summary_text[:1800],
+                    parent_text=parent_text[:4000],
+                    source_id=f"doc::{source}",
+                    source_url=str(row.get("source_url") or f"local://docs/{row.get('doc_id', 'unknown')}"),
+                    event_time=str(row.get("updated_at", "")),
+                    reliability_score=float(max(0.5, min(1.0, row.get("quality_score", 0.7) or 0.7))),
+                    stock_code=",".join(sorted(row_codes)) if row_codes else "GLOBAL",
+                    updated_at=str(row.get("updated_at", "")),
+                    metadata={
+                        "doc_id": str(row.get("doc_id", "")),
+                        "chunk_id": str(row.get("chunk_id", "")),
+                        "track": "doc_summary",
+                    },
+                )
+            )
+        qa_rows = self.web.rag_qa_memory_list_internal(retrieval_enabled=1, limit=3000, offset=0)
+        for row in qa_rows:
+            row_code = str(row.get("stock_code", "")).upper()
+            if symbols and row_code not in symbols and row_code != "GLOBAL":
+                continue
+            summary = str(row.get("summary_text", "")).strip()
+            parent = str(row.get("answer_redacted", "") or row.get("answer_text", "")).strip()
+            if not summary or not parent:
+                continue
+            record_id = f"qa:{row.get('memory_id', '')}"
+            rows.append(
+                VectorSummaryRecord(
+                    record_id=record_id,
+                    kind="qa_memory",
+                    summary_text=summary[:1800],
+                    parent_text=parent[:4000],
+                    source_id="qa_memory_summary",
+                    source_url=f"local://qa/{row.get('memory_id', 'unknown')}",
+                    event_time=str(row.get("created_at", "")),
+                    reliability_score=float(max(0.5, min(1.0, row.get("quality_score", 0.65) or 0.65))),
+                    stock_code=row_code or "GLOBAL",
+                    updated_at=str(row.get("created_at", "")),
+                    metadata={
+                        "memory_id": str(row.get("memory_id", "")),
+                        "track": "qa_summary",
+                    },
+                )
+            )
+        return rows
+
+    def _refresh_summary_vector_index(self, stock_codes: list[str], force: bool = False) -> dict[str, Any]:
+        records = self._build_summary_vector_records(stock_codes)
+        signature = self._summary_vector_signature(records)
+        # 减少重复 rebuild：签名未变化时复用现有索引。
+        if not force and signature == self._vector_signature and self.vector_store.record_count:
+            return {"status": "reused", "indexed_count": self.vector_store.record_count, "backend": self.vector_store.backend}
+        result = self.vector_store.rebuild(records)
+        self._vector_signature = signature
+        self._vector_refreshed_at = time.time()
+        return {"status": "rebuilt", **result}
+
+    @staticmethod
+    def _summary_vector_signature(records: list[VectorSummaryRecord]) -> str:
+        if not records:
+            return "empty"
+        parts = [f"{r.record_id}:{r.updated_at}" for r in records]
+        return f"{len(records)}:{hash('|'.join(parts))}"
+
+    def _semantic_summary_origin_hits(self, query: str, top_k: int = 8) -> list[RetrievalItem]:
+        """摘要先召回 -> 原文回补：返回 summary hit 与 origin backfill hit。"""
+        hits = self.vector_store.search(query, top_k=max(1, top_k))
+        out: list[RetrievalItem] = []
+        for hit in hits:
+            record = hit.get("record", {}) if isinstance(hit, dict) else {}
+            if not isinstance(record, dict):
+                continue
+            score = float(hit.get("score", 0.0))
+            source_id = str(record.get("source_id", "summary"))
+            source_url = str(record.get("source_url", ""))
+            event_time = self._parse_time(str(record.get("event_time", "")))
+            reliability = float(record.get("reliability_score", 0.6))
+            summary_text = str(record.get("summary_text", ""))
+            parent_text = str(record.get("parent_text", ""))
+            meta = {
+                "semantic_score": round(score, 6),
+                "record_id": str(record.get("record_id", "")),
+                "retrieval_track": str(record.get("kind", "summary")),
+            }
+            out.append(
+                RetrievalItem(
+                    text=summary_text,
+                    source_id=source_id,
+                    source_url=source_url,
+                    score=score,
+                    event_time=event_time,
+                    reliability_score=reliability,
+                    metadata=dict(meta),
+                )
+            )
+            # 回补原文：让最终证据更可读且可用于生成更完整答案。
+            if parent_text:
+                backfill_meta = dict(meta)
+                backfill_meta.update({"origin_backfill": True, "retrieval_track": "origin_backfill"})
+                out.append(
+                    RetrievalItem(
+                        text=parent_text,
+                        source_id=source_id,
+                        source_url=source_url,
+                        score=score * 0.92,
+                        event_time=event_time,
+                        reliability_score=reliability,
+                        metadata=backfill_meta,
+                    )
+                )
+        return out
 
     def _build_runtime_corpus(self, stock_codes: list[str]) -> list[RetrievalItem]:
         """把摄取层数据转换为检索语料。"""
@@ -1218,6 +1541,58 @@ class AShareAgentService:
                         reliability_score=0.75,
                     )
                 )
+
+        # 持久化文档 chunk（白名单/审核后生效）-> 在线检索语料。
+        persisted_chunks = self.web.rag_doc_chunk_list_internal(status="active", limit=1200)
+        for row in persisted_chunks:
+            row_codes = {str(x).upper() for x in row.get("stock_codes", [])}
+            if symbols and row_codes and symbols.isdisjoint(row_codes):
+                continue
+            summary_text = str(row.get("chunk_text_redacted") or row.get("chunk_text") or "").strip()
+            if not summary_text:
+                continue
+            source = str(row.get("source", "doc_upload"))
+            corpus.append(
+                RetrievalItem(
+                    text=summary_text,
+                    source_id=f"doc::{source}",
+                    source_url=str(row.get("source_url") or f"local://docs/{row.get('doc_id', 'unknown')}"),
+                    score=0.0,
+                    event_time=self._parse_time(str(row.get("updated_at", ""))),
+                    reliability_score=float(max(0.5, min(1.0, row.get("quality_score", 0.7) or 0.7))),
+                    metadata={
+                        "chunk_id": str(row.get("chunk_id", "")),
+                        "doc_id": str(row.get("doc_id", "")),
+                        "retrieval_track": "doc_summary",
+                    },
+                )
+            )
+
+        # 共享 QA 摘要语料（全站共享）-> 在线检索语料。
+        qa_rows = self.web.rag_qa_memory_list_internal(retrieval_enabled=1, limit=1500, offset=0)
+        for row in qa_rows:
+            row_code = str(row.get("stock_code", "")).upper()
+            if symbols and row_code not in symbols and row_code != "GLOBAL":
+                continue
+            summary = str(row.get("summary_text", "")).strip()
+            if not summary:
+                continue
+            corpus.append(
+                RetrievalItem(
+                    text=summary,
+                    source_id="qa_memory_summary",
+                    source_url=f"local://qa/{row.get('memory_id', 'unknown')}",
+                    score=0.0,
+                    event_time=self._parse_time(str(row.get("created_at", ""))),
+                    reliability_score=float(max(0.5, min(1.0, row.get("quality_score", 0.65) or 0.65))),
+                    metadata={
+                        "memory_id": str(row.get("memory_id", "")),
+                        # 为 Phase-B“摘要召回 -> 原文回补”预留 parent 文本。
+                        "parent_answer_text": str(row.get("answer_text", "")),
+                        "retrieval_track": "qa_summary",
+                    },
+                )
+            )
         return corpus
 
     @staticmethod
@@ -3216,7 +3591,7 @@ class AShareAgentService:
     def ops_rag_quality(self) -> dict[str, Any]:
         """RAG 质量面板数据：聚合指标 + 用例明细。"""
         dataset = default_retrieval_dataset()
-        retriever = HybridRetriever(corpus=self._build_runtime_corpus([]))
+        retriever = self._build_runtime_retriever([])
         evaluator = RetrievalEvaluator(retriever)
         offline_metrics = evaluator.run(dataset, k=5)
         cases: list[dict[str, Any]] = []
@@ -3260,12 +3635,15 @@ class AShareAgentService:
         }
 
     def ops_rag_reindex(self, token: str, *, limit: int = 2000) -> dict[str, Any]:
-        """向量索引重建入口：Phase-B 使用；Phase-A 先返回可观测占位结果。"""
+        """向量索引重建入口：重建摘要索引并回传统计信息。"""
         self.web.require_role(token, {"admin", "ops"})
+        del limit  # 当前实现按实时资产全集重建，后续可扩展增量重建窗口。
+        result = self._refresh_summary_vector_index([], force=True)
         return {
-            "status": "pending_phase_b",
-            "message": "vector index rebuild is enabled after phase-b components are wired",
-            "limit": max(1, int(limit)),
+            "status": "ok",
+            "index_backend": self.vector_store.backend,
+            "indexed_count": int(result.get("indexed_count", 0)),
+            "rebuild_state": str(result.get("status", "rebuilt")),
         }
 
     def ops_prompt_compare(

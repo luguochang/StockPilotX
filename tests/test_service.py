@@ -30,6 +30,22 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("analysis_brief", result)
         self.assertIn("仅供研究参考", result["answer"])
 
+    def test_query_persists_rag_qa_memory_and_trace(self) -> None:
+        _ = self.svc.query(
+            {
+                "user_id": "u-rag-memory-1",
+                "question": "请分析SH600000近期风险与机会并给出证据",
+                "stock_codes": ["SH600000"],
+            }
+        )
+        pool = self.svc.rag_qa_memory_list("", stock_code="SH600000", limit=30)
+        self.assertGreater(len(pool), 0)
+        self.assertIn("summary_text", pool[0])
+        self.assertIn("retrieval_enabled", pool[0])
+
+        traces = self.svc.ops_rag_retrieval_trace("", limit=30)
+        self.assertGreaterEqual(int(traces.get("count", 0)), 1)
+
     def test_query_graphrag_mode(self) -> None:
         result = self.svc.query(
             {
@@ -76,6 +92,37 @@ class ServiceTestCase(unittest.TestCase):
         _ = self.svc.rag_source_policy_set("", "user_upload", {"auto_approve": True, "trust_score": 0.8, "enabled": True})
         policy_after = self.svc.web.rag_source_policy_get("user_upload")
         self.assertTrue(bool(policy_after.get("auto_approve")))
+
+    def test_runtime_corpus_contains_persisted_docs_and_qa_memory(self) -> None:
+        _ = self.svc.docs_upload("rag-doc-2", "cninfo-rag.pdf", "SH600000 经营数据纪要" * 220, "cninfo")
+        _ = self.svc.docs_index("rag-doc-2")
+        _ = self.svc.query(
+            {
+                "user_id": "u-rag-memory-2",
+                "question": "请分析SH600000近期变化并引用历史经验",
+                "stock_codes": ["SH600000"],
+            }
+        )
+        corpus = self.svc._build_runtime_corpus(["SH600000"])  # type: ignore[attr-defined]
+        source_ids = [item.source_id for item in corpus]
+        self.assertTrue(any(s.startswith("doc::") for s in source_ids))
+        self.assertIn("qa_memory_summary", source_ids)
+
+    def test_semantic_summary_then_origin_backfill(self) -> None:
+        _ = self.svc.docs_upload("rag-doc-3", "semantic-rag.pdf", "SH600000 纪要 提及现金流改善与订单增长" * 200, "cninfo")
+        _ = self.svc.docs_index("rag-doc-3")
+        _ = self.svc.query(
+            {
+                "user_id": "u-rag-memory-3",
+                "question": "请分析SH600000现金流改善是否可持续",
+                "stock_codes": ["SH600000"],
+            }
+        )
+        reindex = self.svc.ops_rag_reindex("", limit=2000)
+        self.assertEqual(reindex["status"], "ok")
+        hits = self.svc._semantic_summary_origin_hits("现金流改善 纪要", top_k=5)  # type: ignore[attr-defined]
+        self.assertGreater(len(hits), 0)
+        self.assertTrue(any(bool((x.metadata or {}).get("origin_backfill")) for x in hits))
 
     def test_eval_gate(self) -> None:
         run = self.svc.evals_run(

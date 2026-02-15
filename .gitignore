@@ -9,6 +9,7 @@ __pycache__/
 # Runtime logs
 *.log
 backend/logs/*.log
+backend/data/vector/
 
 # Secrets / local configs
 backend/config/*.local.json

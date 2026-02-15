@@ -90,6 +90,11 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("analysis_brief", body)
         self.assertIn(body["workflow_runtime"], ("langgraph", "direct"))
 
+        code_mem, memory_rows = self._get("/v1/rag/qa-memory?stock_code=SH600000&limit=20")
+        self.assertEqual(code_mem, 200)
+        self.assertTrue(isinstance(memory_rows, list))
+        self.assertGreater(len(memory_rows), 0)
+
         # 支持请求级运行时覆盖，便于对比验证。
         code2, body2 = self._post(
             "/v1/query",
@@ -124,6 +129,7 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("event: stream_runtime", text)
         self.assertIn("event: answer_delta", text)
         self.assertIn("event: stream_source", text)
+        self.assertIn("event: knowledge_persisted", text)
         self.assertIn("event: analysis_brief", text)
         self.assertIn("event: done", text)
 
@@ -222,6 +228,10 @@ class HttpApiTestCase(unittest.TestCase):
         c6, trace = self._get("/v1/ops/rag/retrieval-trace?limit=10")
         self.assertEqual(c6, 200)
         self.assertIn("count", trace)
+
+        c7, reindex = self._post("/v1/ops/rag/reindex", {"limit": 2000})
+        self.assertEqual(c7, 200)
+        self.assertEqual(str(reindex.get("status", "")), "ok")
 
     def test_evals_run_and_get(self) -> None:
         code, run = self._post(
