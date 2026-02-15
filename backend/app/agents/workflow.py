@@ -68,10 +68,16 @@ class AgentWorkflow:
         prompt = self.prepare_prompt(state, memory_hint=memory_hint)
         prompt = self.apply_before_model(state, prompt)
         yield {"event": "meta", "data": {"trace_id": state.trace_id, "intent": state.intent, "mode": state.mode}}
-
-        output, stream_events = self.stream_model_collect(state, prompt)
-        for event in stream_events:
-            yield event
+        # 关键：必须边收边吐，不能先 collect 完整事件列表再返回，否则前端会“假流式”。
+        stream_iter = self.stream_model_iter(state, prompt)
+        output = ""
+        while True:
+            try:
+                event = next(stream_iter)
+                yield event
+            except StopIteration as stop:
+                output = str(stop.value or "")
+                break
 
         output = self.apply_after_model(state, output)
         self.finalize_with_output(state, output)
@@ -102,10 +108,24 @@ class AgentWorkflow:
 
     def stream_model_collect(self, state: AgentState, prompt: str, chunk_size: int = 80) -> tuple[str, list[dict[str, Any]]]:
         """阶段3(流式)：收集模型增量并返回完整输出及事件列表。"""
+        # 保留 collect 版本用于测试与非实时场景；实时链路应走 stream_model_iter。
         events: list[dict[str, Any]] = []
+        stream_iter = self.stream_model_iter(state, prompt, chunk_size=chunk_size)
+        output = ""
+        while True:
+            try:
+                events.append(next(stream_iter))
+            except StopIteration as stop:
+                output = str(stop.value or "")
+                break
+        return output, events
+
+    def stream_model_iter(self, state: AgentState, prompt: str, chunk_size: int = 80) -> Iterator[dict[str, Any]]:
+        """阶段3(真流式)：边接收模型增量边产出 answer_delta 事件，并在结束时返回完整输出。"""
         # 先触发预算中间件模型调用计数与阈值检查。
         self.middleware.call_model(state, prompt, lambda s, p: "")
         output = ""
+        # 先触发预算中间件模型调用计数与阈值检查。
         try:
             if self.external_model_stream_call is None:
                 raise RuntimeError("external stream model is not configured")
@@ -114,11 +134,12 @@ class AgentWorkflow:
                 if not delta:
                     continue
                 chunks.append(delta)
-                events.append({"event": "answer_delta", "data": {"delta": delta}})
+                yield {"event": "answer_delta", "data": {"delta": delta}}
             output = "".join(chunks)
             if not output.strip():
                 raise RuntimeError("external stream returned empty output")
-            events.append(
+            # 上游流结束后，gateway 会写入 provider/model 信息，此时再透传来源信息。
+            yield (
                 {
                     "event": "stream_source",
                     "data": {
@@ -135,7 +156,7 @@ class AgentWorkflow:
             if not self.enable_local_fallback:
                 raise
             output = self._synthesize_model_output(state, prompt)
-            events.append(
+            yield (
                 {
                     "event": "stream_source",
                     "data": {
@@ -147,8 +168,8 @@ class AgentWorkflow:
                 }
             )
             for idx in range(0, len(output), chunk_size):
-                events.append({"event": "answer_delta", "data": {"delta": output[idx : idx + chunk_size]}})
-        return output, events
+                yield {"event": "answer_delta", "data": {"delta": output[idx : idx + chunk_size]}}
+        return output
 
     def _prepare_state(self, state: AgentState, memory_hint: list[dict[str, Any]] | None = None) -> str:
         self.middleware.run_before_agent(state)

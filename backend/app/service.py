@@ -4,6 +4,7 @@ import csv
 import difflib
 import io
 import json
+import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -396,8 +397,46 @@ class AShareAgentService:
         self.traces.emit(trace_id, "workflow_runtime", {"runtime": runtime_name})
         yield {"event": "stream_runtime", "data": {"runtime": runtime_name}}
         yield {"event": "progress", "data": {"phase": "model", "message": "开始模型流式输出"}}
-        for event in selected_runtime.run_stream(state, memory_hint=memory_hint):
-            yield event
+        # 为了避免“模型首 token 迟迟不来时前端无反馈”，
+        # 在独立线程消费 runtime 事件，并在主协程周期性发送 model_wait 心跳。
+        event_queue: queue.Queue[Any] = queue.Queue()
+        done_sentinel = object()
+        runtime_error: dict[str, str] = {}
+
+        def _pump_runtime_events() -> None:
+            try:
+                for event in selected_runtime.run_stream(state, memory_hint=memory_hint):
+                    event_queue.put(event)
+            except Exception as ex:  # noqa: BLE001
+                runtime_error["message"] = str(ex)
+            finally:
+                event_queue.put(done_sentinel)
+
+        pump_thread = threading.Thread(target=_pump_runtime_events, daemon=True)
+        pump_thread.start()
+        model_started_at = time.perf_counter()
+        while True:
+            try:
+                item = event_queue.get(timeout=0.8)
+            except queue.Empty:
+                wait_ms = int((time.perf_counter() - model_started_at) * 1000)
+                yield {
+                    "event": "progress",
+                    "data": {
+                        "phase": "model_wait",
+                        "message": "模型推理中，等待首个增量输出",
+                        "wait_ms": wait_ms,
+                    },
+                }
+                continue
+            if item is done_sentinel:
+                break
+            if isinstance(item, dict):
+                yield item
+        if runtime_error:
+            yield {"event": "error", "data": {"error": runtime_error["message"], "trace_id": trace_id}}
+            yield {"event": "done", "data": {"ok": False, "trace_id": trace_id, "error": runtime_error["message"]}}
+            return
         citations = [c for c in state.citations if isinstance(c, dict)]
         yield {"event": "analysis_brief", "data": self._build_analysis_brief(req.stock_codes, citations)}
 

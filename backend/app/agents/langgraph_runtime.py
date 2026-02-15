@@ -52,9 +52,22 @@ class DirectWorkflowRuntime(WorkflowRuntime):
         prompt = self.workflow.prepare_prompt(state, memory_hint=memory_hint)
         prompt = self.workflow.apply_before_model(state, prompt)
         yield {"event": "meta", "data": {"trace_id": state.trace_id, "intent": state.intent, "mode": state.mode}}
-        output, stream_events = self.workflow.stream_model_collect(state, prompt)
-        for event in stream_events:
-            yield event
+        if hasattr(self.workflow, "stream_model_iter"):
+            # 实时路径：边收边推送事件，避免“先收集后统一返回”。
+            stream_iter = self.workflow.stream_model_iter(state, prompt)
+            output = ""
+            while True:
+                try:
+                    event = next(stream_iter)
+                    yield event
+                except StopIteration as stop:
+                    output = str(stop.value or "")
+                    break
+        else:
+            # 兼容测试桩（DummyWorkflow 只有 stream_model_collect）。
+            output, stream_events = self.workflow.stream_model_collect(state, prompt)
+            for event in stream_events:
+                yield event
         output = self.workflow.apply_after_model(state, output)
         self.workflow.finalize_with_output(state, output)
         yield {"event": "citations", "data": {"citations": state.citations}}
@@ -176,9 +189,20 @@ class LangGraphWorkflowRuntime(WorkflowRuntime):
         prompt = str(pre.get("prompt", ""))
 
         yield {"event": "meta", "data": {"trace_id": state.trace_id, "intent": state.intent, "mode": state.mode}}
-        output, stream_events = self.workflow.stream_model_collect(state, prompt)
-        for event in stream_events:
-            yield event
+        if hasattr(self.workflow, "stream_model_iter"):
+            stream_iter = self.workflow.stream_model_iter(state, prompt)
+            output = ""
+            while True:
+                try:
+                    event = next(stream_iter)
+                    yield event
+                except StopIteration as stop:
+                    output = str(stop.value or "")
+                    break
+        else:
+            output, stream_events = self.workflow.stream_model_collect(state, prompt)
+            for event in stream_events:
+                yield event
 
         post = self._stream_post_graph.invoke({"state": state, "output": output})
         state = post["state"]

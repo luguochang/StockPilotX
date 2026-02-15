@@ -75,3 +75,10 @@
 - 新增 `progress` 阶段事件（data_refresh/retriever/model），用于前端显示阶段进度。
 - 前端 `runAnalysis` 改为复用统一 SSE 读取器 `readSSEAndConsume`，统一处理 CRLF 分隔与尾包。
 - 当 `query/stream` 连接成功但未收到任何事件时，前端将直接报错，避免“静默等待”。
+
+## 8. 追加修复（高级分析 /v1/query/stream 真流式与等待态可视化）
+- 修复后端核心“假流式”根因：`AgentWorkflow.run_stream` 改为直接消费 `stream_model_iter`，实现边接收边发送 `answer_delta`。
+- `stream_model_collect` 仅保留为收集版兼容方法，不再作为实时路径主实现。
+- `DirectWorkflowRuntime` 与 `LangGraphWorkflowRuntime` 的流式分支同步切换到实时迭代逻辑（并保留 DummyWorkflow 兼容回退）。
+- `/v1/query/stream` 增加 `model_wait` 心跳事件，模型首 token 较慢时前端不再“静默等待”。
+- 前端高级分析页新增阶段文本展示：会实时显示 `data_refresh/model_wait` 等阶段状态。

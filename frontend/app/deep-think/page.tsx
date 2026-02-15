@@ -223,6 +223,7 @@ export default function DeepThinkPage() {
   const [activeProvider, setActiveProvider] = useState("");
   const [activeModel, setActiveModel] = useState("");
   const [activeApiStyle, setActiveApiStyle] = useState("");
+  const [queryProgressText, setQueryProgressText] = useState("");
   const [analysisBrief, setAnalysisBrief] = useState<AnalysisBrief | null>(null);
   const [deepSession, setDeepSession] = useState<DeepThinkSession | null>(null);
   const [deepLoading, setDeepLoading] = useState(false);
@@ -344,6 +345,7 @@ export default function DeepThinkPage() {
     setActiveProvider("");
     setActiveModel("");
     setActiveApiStyle("");
+    setQueryProgressText("");
     setAnalysisBrief(null);
     setError("");
     try {
@@ -402,6 +404,17 @@ export default function DeepThinkPage() {
           setRuntimeEngine(String(payload?.runtime ?? "unknown"));
           return;
         }
+        if (eventName === "progress") {
+          const phase = String(payload?.phase ?? "").trim();
+          const message = String(payload?.message ?? "").trim();
+          const waitMs = Number(payload?.wait_ms ?? 0);
+          if (phase === "model_wait" && Number.isFinite(waitMs) && waitMs > 0) {
+            setQueryProgressText(`${message || "模型推理中"}（${(waitMs / 1000).toFixed(1)}s）`);
+          } else {
+            setQueryProgressText(message || phase || "处理中");
+          }
+          return;
+        }
         if (eventName === "citations") {
           const citations = Array.isArray(payload?.citations) ? payload.citations : [];
           setResult((prev) => ({
@@ -425,10 +438,12 @@ export default function DeepThinkPage() {
       const overviewBody = await overviewResp.json();
       if (!overviewResp.ok) throw new Error(overviewBody?.detail ?? `overview HTTP ${overviewResp.status}`);
       setOverview(overviewBody as MarketOverview);
+      setQueryProgressText("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "请求失败");
       setResult(null);
       setOverview(null);
+      setQueryProgressText("");
     } finally {
       setStreaming(false);
       setLoading(false);
@@ -1229,6 +1244,7 @@ export default function DeepThinkPage() {
                 <TextArea rows={5} value={question} onChange={(e) => setQuestion(e.target.value)} />
                 <Button type="primary" size="large" loading={loading} onClick={runAnalysis}>开始高级分析</Button>
                 {streaming ? <Text style={{ color: "#2563eb" }}>流式输出中...</Text> : null}
+                {streaming && queryProgressText ? <Text style={{ color: "#475569" }}>阶段：{queryProgressText}</Text> : null}
               </Space>
             </Card>
 
