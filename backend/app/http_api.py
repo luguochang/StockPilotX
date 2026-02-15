@@ -481,6 +481,83 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    # ---------------- RAG Asset Management ----------------
+    @app.get("/v1/rag/source-policy")
+    def rag_source_policy_list(authorization: str | None = Header(default=None)):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_source_policy_list(token)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.post("/v1/rag/source-policy/{source}")
+    def rag_source_policy_set(source: str, payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_source_policy_set(token, source, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/rag/docs/chunks")
+    def rag_doc_chunks_list(
+        authorization: str | None = Header(default=None),
+        doc_id: str = "",
+        status: str = "",
+        source: str = "",
+        stock_code: str = "",
+        limit: int = 60,
+        offset: int = 0,
+    ):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_doc_chunks_list(
+                token,
+                doc_id=doc_id,
+                status=status,
+                source=source,
+                stock_code=stock_code,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.post("/v1/rag/docs/chunks/{chunk_id}/status")
+    def rag_doc_chunk_status_set(chunk_id: str, payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_doc_chunk_status_set(token, chunk_id, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/rag/qa-memory")
+    def rag_qa_memory_list(
+        authorization: str | None = Header(default=None),
+        stock_code: str = "",
+        retrieval_enabled: int = -1,
+        limit: int = 100,
+        offset: int = 0,
+    ):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_qa_memory_list(
+                token,
+                stock_code=stock_code,
+                retrieval_enabled=retrieval_enabled,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.post("/v1/rag/qa-memory/{memory_id}/toggle")
+    def rag_qa_memory_toggle(memory_id: str, payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_qa_memory_toggle(token, memory_id, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     # ---------------- WEB-005/006/007/008 Ops ----------------
     @app.get("/v1/ops/data-sources/health")
     def ops_source_health(authorization: str | None = Header(default=None)):
@@ -526,6 +603,26 @@ def create_app() -> FastAPI:
     @app.get("/v1/ops/rag/quality")
     def ops_rag_quality():
         return svc.ops_rag_quality()
+
+    @app.get("/v1/ops/rag/retrieval-trace")
+    def ops_rag_retrieval_trace(
+        authorization: str | None = Header(default=None),
+        trace_id: str = "",
+        limit: int = 120,
+    ):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.ops_rag_retrieval_trace(token, trace_id=trace_id, limit=limit)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.post("/v1/ops/rag/reindex")
+    def ops_rag_reindex(payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.ops_rag_reindex(token, limit=int(payload.get("limit", 2000)))
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
 
     @app.post("/v1/ops/prompts/compare")
     def ops_prompt_compare(payload: dict):

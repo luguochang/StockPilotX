@@ -185,6 +185,44 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(index_code, 200)
         self.assertEqual(indexed["status"], "indexed")
 
+    def test_rag_asset_management_endpoints(self) -> None:
+        c1, policies = self._get("/v1/rag/source-policy")
+        self.assertEqual(c1, 200)
+        self.assertTrue(isinstance(policies, list))
+        self.assertTrue(any(str(x.get("source")) == "cninfo" for x in policies))
+
+        c2, policy_updated = self._post(
+            "/v1/rag/source-policy/user_upload",
+            {"auto_approve": True, "trust_score": 0.8, "enabled": True},
+        )
+        self.assertEqual(c2, 200)
+        self.assertEqual(str(policy_updated.get("source", "")), "user_upload")
+
+        _ = self._post(
+            "/v1/docs/upload",
+            {"doc_id": "api-rag-doc-1", "filename": "rag-demo.pdf", "content": "SH600000 纪要" * 380, "source": "cninfo"},
+        )
+        _ = self._post("/v1/docs/api-rag-doc-1/index", {})
+
+        c3, chunks = self._get("/v1/rag/docs/chunks?doc_id=api-rag-doc-1&limit=20")
+        self.assertEqual(c3, 200)
+        self.assertTrue(isinstance(chunks, list))
+        self.assertGreater(len(chunks), 0)
+        chunk_id = str(chunks[0].get("chunk_id", ""))
+        self.assertTrue(chunk_id)
+
+        c4, updated = self._post(f"/v1/rag/docs/chunks/{chunk_id}/status", {"status": "review"})
+        self.assertEqual(c4, 200)
+        self.assertEqual(str(updated.get("effective_status", "")), "review")
+
+        c5, qa_pool = self._get("/v1/rag/qa-memory?limit=10")
+        self.assertEqual(c5, 200)
+        self.assertTrue(isinstance(qa_pool, list))
+
+        c6, trace = self._get("/v1/ops/rag/retrieval-trace?limit=10")
+        self.assertEqual(c6, 200)
+        self.assertIn("count", trace)
+
     def test_evals_run_and_get(self) -> None:
         code, run = self._post(
             "/v1/evals/run",

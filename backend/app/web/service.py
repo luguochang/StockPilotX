@@ -17,6 +17,27 @@ class WebAppService:
         self.jwt_expire_seconds = jwt_expire_seconds
         self.auth_bypass = auth_bypass
         self.universe = AShareUniverseSyncService(store)
+        # 默认白名单来源：用于“上传后自动生效”策略，避免初始状态全部进入 review。
+        self._seed_default_rag_source_policies()
+
+    def _seed_default_rag_source_policies(self) -> None:
+        """写入默认 RAG 来源白名单策略（幂等）。"""
+        defaults = [
+            ("exchange_announcement", 1, 0.95, 1),
+            ("cninfo", 1, 0.95, 1),
+            ("eastmoney", 1, 0.85, 1),
+            ("sse", 1, 0.95, 1),
+            ("szse", 1, 0.95, 1),
+            ("user_upload", 0, 0.70, 1),
+        ]
+        for source, auto_approve, trust_score, enabled in defaults:
+            self.store.execute(
+                """
+                INSERT OR IGNORE INTO rag_doc_source_policy (source, auto_approve, trust_score, enabled)
+                VALUES (?, ?, ?, ?)
+                """,
+                (source, auto_approve, trust_score, enabled),
+            )
 
     # ----------------- Auth / RBAC -----------------
     def auth_register(self, username: str, password: str, tenant_name: str | None = None) -> dict[str, Any]:
@@ -229,6 +250,380 @@ class WebAppService:
             (doc_id, action, me["user_id"], comment),
         )
         return {"status": "ok", "doc_id": doc_id, "action": action}
+
+    # ----------------- RAG Assets -----------------
+    def rag_source_policy_list(self, token: str) -> list[dict[str, Any]]:
+        _ = self.require_role(token, {"admin", "ops"})
+        rows = self.store.query_all(
+            """
+            SELECT source, auto_approve, trust_score, enabled, updated_at
+            FROM rag_doc_source_policy
+            ORDER BY source ASC
+            """
+        )
+        for row in rows:
+            row["auto_approve"] = bool(int(row.get("auto_approve", 0)))
+            row["enabled"] = bool(int(row.get("enabled", 0)))
+        return rows
+
+    def rag_source_policy_upsert(
+        self,
+        token: str,
+        *,
+        source: str,
+        auto_approve: bool,
+        trust_score: float,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        _ = self.require_role(token, {"admin", "ops"})
+        normalized = str(source or "").strip().lower()
+        if not normalized:
+            raise ValueError("source is required")
+        self.store.execute(
+            """
+            INSERT OR REPLACE INTO rag_doc_source_policy (source, auto_approve, trust_score, enabled, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                normalized,
+                int(bool(auto_approve)),
+                float(max(0.0, min(1.0, trust_score))),
+                int(bool(enabled)),
+            ),
+        )
+        return self.rag_source_policy_get(normalized)
+
+    def rag_source_policy_get(self, source: str) -> dict[str, Any]:
+        row = self.store.query_one(
+            """
+            SELECT source, auto_approve, trust_score, enabled, updated_at
+            FROM rag_doc_source_policy
+            WHERE source = ?
+            """,
+            (str(source or "").strip().lower(),),
+        )
+        if not row:
+            return {}
+        row["auto_approve"] = bool(int(row.get("auto_approve", 0)))
+        row["enabled"] = bool(int(row.get("enabled", 0)))
+        return row
+
+    def rag_doc_chunk_replace(
+        self,
+        *,
+        doc_id: str,
+        source: str,
+        source_url: str,
+        effective_status: str,
+        quality_score: float,
+        chunks: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        self.store.execute("DELETE FROM rag_doc_chunk WHERE doc_id = ?", (doc_id,))
+        for chunk in chunks:
+            self.store.execute(
+                """
+                INSERT INTO rag_doc_chunk
+                (chunk_id, doc_id, chunk_no, chunk_text, chunk_text_redacted, source, source_url,
+                 stock_codes_json, industry_tags_json, effective_status, quality_score, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    str(chunk.get("chunk_id", "")),
+                    str(doc_id),
+                    int(chunk.get("chunk_no", 0)),
+                    str(chunk.get("chunk_text", "")),
+                    str(chunk.get("chunk_text_redacted", "")),
+                    str(source),
+                    str(source_url or ""),
+                    json.dumps(chunk.get("stock_codes", []), ensure_ascii=False),
+                    json.dumps(chunk.get("industry_tags", []), ensure_ascii=False),
+                    str(effective_status),
+                    float(max(0.0, min(1.0, quality_score))),
+                ),
+            )
+        return {"doc_id": doc_id, "chunk_count": len(chunks), "status": "ok"}
+
+    def rag_doc_chunk_set_status(self, token: str, *, chunk_id: str, status: str) -> dict[str, Any]:
+        _ = self.require_role(token, {"admin", "ops"})
+        normalized = str(status).strip().lower()
+        if normalized not in {"active", "review", "rejected", "archived"}:
+            raise ValueError("invalid status")
+        self.store.execute(
+            "UPDATE rag_doc_chunk SET effective_status = ?, updated_at = CURRENT_TIMESTAMP WHERE chunk_id = ?",
+            (normalized, chunk_id),
+        )
+        row = self.store.query_one(
+            """
+            SELECT chunk_id, doc_id, chunk_no, source, effective_status, quality_score, updated_at
+            FROM rag_doc_chunk
+            WHERE chunk_id = ?
+            """,
+            (chunk_id,),
+        )
+        return row or {"error": "not_found", "chunk_id": chunk_id}
+
+    def rag_doc_chunk_set_status_by_doc(self, *, doc_id: str, status: str) -> None:
+        normalized = str(status).strip().lower()
+        if normalized not in {"active", "review", "rejected", "archived"}:
+            raise ValueError("invalid status")
+        self.store.execute(
+            "UPDATE rag_doc_chunk SET effective_status = ?, updated_at = CURRENT_TIMESTAMP WHERE doc_id = ?",
+            (normalized, doc_id),
+        )
+
+    def rag_doc_chunk_list(
+        self,
+        token: str,
+        *,
+        doc_id: str = "",
+        status: str = "",
+        source: str = "",
+        stock_code: str = "",
+        limit: int = 60,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        _ = self.require_role(token, {"admin", "ops"})
+        safe_limit = max(1, min(500, int(limit)))
+        safe_offset = max(0, int(offset))
+        cond = ["1=1"]
+        params: list[Any] = []
+        if doc_id.strip():
+            cond.append("doc_id = ?")
+            params.append(doc_id.strip())
+        if status.strip():
+            cond.append("effective_status = ?")
+            params.append(status.strip().lower())
+        if source.strip():
+            cond.append("source = ?")
+            params.append(source.strip().lower())
+        sql = f"""
+            SELECT chunk_id, doc_id, chunk_no, source, source_url, effective_status, quality_score,
+                   stock_codes_json, industry_tags_json, updated_at
+            FROM rag_doc_chunk
+            WHERE {' AND '.join(cond)}
+            ORDER BY updated_at DESC, chunk_no ASC
+            LIMIT ? OFFSET ?
+            """
+        params.extend([safe_limit, safe_offset])
+        rows = self.store.query_all(sql, tuple(params))
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
+            row["stock_codes"] = self._json_loads_or(row.get("stock_codes_json"), [])
+            row["industry_tags"] = self._json_loads_or(row.get("industry_tags_json"), [])
+            row.pop("stock_codes_json", None)
+            row.pop("industry_tags_json", None)
+            if stock_code.strip():
+                target = stock_code.strip().upper()
+                if target not in {str(x).upper() for x in row.get("stock_codes", [])}:
+                    continue
+            filtered.append(row)
+        return filtered
+
+    def rag_doc_chunk_list_internal(
+        self,
+        *,
+        status: str = "",
+        stock_code: str = "",
+        limit: int = 800,
+    ) -> list[dict[str, Any]]:
+        """内部查询：给服务层构建检索语料使用，不走权限检查。"""
+        safe_limit = max(1, min(5000, int(limit)))
+        cond = ["1=1"]
+        params: list[Any] = []
+        if status.strip():
+            cond.append("effective_status = ?")
+            params.append(status.strip().lower())
+        sql = f"""
+            SELECT chunk_id, doc_id, chunk_no, chunk_text, chunk_text_redacted, source, source_url,
+                   stock_codes_json, industry_tags_json, quality_score, updated_at
+            FROM rag_doc_chunk
+            WHERE {' AND '.join(cond)}
+            ORDER BY updated_at DESC, chunk_no ASC
+            LIMIT ?
+            """
+        params.append(safe_limit)
+        rows = self.store.query_all(sql, tuple(params))
+        target = stock_code.strip().upper()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            row["stock_codes"] = self._json_loads_or(row.get("stock_codes_json"), [])
+            row["industry_tags"] = self._json_loads_or(row.get("industry_tags_json"), [])
+            row.pop("stock_codes_json", None)
+            row.pop("industry_tags_json", None)
+            if target:
+                if target not in {str(x).upper() for x in row.get("stock_codes", [])}:
+                    continue
+            result.append(row)
+        return result
+
+    def rag_qa_memory_add(
+        self,
+        *,
+        memory_id: str,
+        user_id: str,
+        stock_code: str,
+        query_text: str,
+        answer_text: str,
+        answer_redacted: str,
+        summary_text: str,
+        citations: list[dict[str, Any]],
+        risk_flags: list[str],
+        intent: str,
+        quality_score: float,
+        share_scope: str,
+        retrieval_enabled: bool,
+    ) -> None:
+        self.store.execute(
+            """
+            INSERT OR REPLACE INTO rag_qa_memory
+            (memory_id, user_id, stock_code, query_text, answer_text, answer_redacted, summary_text,
+             citations_json, risk_flags_json, intent, quality_score, share_scope, retrieval_enabled, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                memory_id,
+                user_id,
+                stock_code,
+                query_text,
+                answer_text,
+                answer_redacted,
+                summary_text,
+                json.dumps(citations, ensure_ascii=False),
+                json.dumps(risk_flags, ensure_ascii=False),
+                intent,
+                float(max(0.0, min(1.0, quality_score))),
+                share_scope,
+                int(bool(retrieval_enabled)),
+            ),
+        )
+
+    def rag_qa_memory_list(
+        self,
+        token: str,
+        *,
+        stock_code: str = "",
+        retrieval_enabled: int = -1,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        _ = self.require_role(token, {"admin", "ops"})
+        return self.rag_qa_memory_list_internal(
+            stock_code=stock_code,
+            retrieval_enabled=retrieval_enabled,
+            limit=limit,
+            offset=offset,
+        )
+
+    def rag_qa_memory_list_internal(
+        self,
+        *,
+        stock_code: str = "",
+        retrieval_enabled: int = -1,
+        limit: int = 300,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(2000, int(limit)))
+        safe_offset = max(0, int(offset))
+        cond = ["1=1"]
+        params: list[Any] = []
+        if stock_code.strip():
+            cond.append("stock_code = ?")
+            params.append(stock_code.strip().upper())
+        if retrieval_enabled in (0, 1):
+            cond.append("retrieval_enabled = ?")
+            params.append(int(retrieval_enabled))
+        sql = f"""
+            SELECT memory_id, user_id, stock_code, query_text, answer_text, answer_redacted, summary_text,
+                   citations_json, risk_flags_json, intent, quality_score, share_scope, retrieval_enabled, created_at
+            FROM rag_qa_memory
+            WHERE {' AND '.join(cond)}
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """
+        params.extend([safe_limit, safe_offset])
+        rows = self.store.query_all(sql, tuple(params))
+        for row in rows:
+            row["citations"] = self._json_loads_or(row.get("citations_json"), [])
+            row["risk_flags"] = self._json_loads_or(row.get("risk_flags_json"), [])
+            row["retrieval_enabled"] = bool(int(row.get("retrieval_enabled", 0)))
+            row.pop("citations_json", None)
+            row.pop("risk_flags_json", None)
+        return rows
+
+    def rag_qa_memory_toggle(self, token: str, *, memory_id: str, retrieval_enabled: bool) -> dict[str, Any]:
+        _ = self.require_role(token, {"admin", "ops"})
+        self.store.execute(
+            "UPDATE rag_qa_memory SET retrieval_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE memory_id = ?",
+            (int(bool(retrieval_enabled)), memory_id),
+        )
+        row = self.store.query_one(
+            """
+            SELECT memory_id, stock_code, retrieval_enabled, quality_score, updated_at
+            FROM rag_qa_memory
+            WHERE memory_id = ?
+            """,
+            (memory_id,),
+        )
+        if not row:
+            return {"error": "not_found", "memory_id": memory_id}
+        row["retrieval_enabled"] = bool(int(row.get("retrieval_enabled", 0)))
+        return row
+
+    def rag_qa_feedback_add(self, *, memory_id: str, signal: str) -> None:
+        self.store.execute(
+            "INSERT INTO rag_qa_feedback (memory_id, signal) VALUES (?, ?)",
+            (memory_id, str(signal).strip().lower()),
+        )
+
+    def rag_retrieval_trace_add(
+        self,
+        *,
+        trace_id: str,
+        query_text: str,
+        query_type: str,
+        retrieved_ids: list[str],
+        selected_ids: list[str],
+        latency_ms: int,
+    ) -> None:
+        self.store.execute(
+            """
+            INSERT INTO rag_retrieval_trace
+            (trace_id, query_text, query_type, retrieved_ids_json, selected_ids_json, latency_ms)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                trace_id,
+                query_text,
+                query_type,
+                json.dumps(retrieved_ids, ensure_ascii=False),
+                json.dumps(selected_ids, ensure_ascii=False),
+                int(max(0, latency_ms)),
+            ),
+        )
+
+    def rag_retrieval_trace_list(self, token: str, *, trace_id: str = "", limit: int = 120) -> list[dict[str, Any]]:
+        _ = self.require_role(token, {"admin", "ops"})
+        safe_limit = max(1, min(2000, int(limit)))
+        cond = ["1=1"]
+        params: list[Any] = []
+        if trace_id.strip():
+            cond.append("trace_id = ?")
+            params.append(trace_id.strip())
+        sql = f"""
+            SELECT id, trace_id, query_text, query_type, retrieved_ids_json, selected_ids_json, latency_ms, created_at
+            FROM rag_retrieval_trace
+            WHERE {' AND '.join(cond)}
+            ORDER BY id DESC
+            LIMIT ?
+            """
+        params.append(safe_limit)
+        rows = self.store.query_all(sql, tuple(params))
+        for row in rows:
+            row["retrieved_ids"] = self._json_loads_or(row.get("retrieved_ids_json"), [])
+            row["selected_ids"] = self._json_loads_or(row.get("selected_ids_json"), [])
+            row.pop("retrieved_ids_json", None)
+            row.pop("selected_ids_json", None)
+        return rows
 
     # ----------------- Ops / Health / Alerts -----------------
     def source_health_upsert(self, source_id: str, success_rate: float, circuit_open: bool, last_error: str = "") -> None:

@@ -1465,7 +1465,61 @@ class AShareAgentService:
                 parse_confidence=float(doc.get("parse_confidence", 0.0)),
                 needs_review=bool(float(doc.get("parse_confidence", 0.0)) < 0.7),
             )
+            # 文档索引完成后，把 chunk 持久化到 RAG 资产库，供后续检索与治理复用。
+            self._persist_doc_chunks_to_rag(doc_id, doc)
         return result
+
+    def _persist_doc_chunks_to_rag(self, doc_id: str, doc: dict[str, Any]) -> None:
+        """把内存态文档 chunk 同步到 Web 持久层。"""
+        chunks = [str(x) for x in doc.get("chunks", []) if str(x).strip()]
+        if not chunks:
+            return
+        source = str(doc.get("source", "user_upload")).strip().lower() or "user_upload"
+        source_url = f"local://docs/{doc_id}"
+        policy = self.web.rag_source_policy_get(source)
+        auto_approve = bool(policy.get("auto_approve", False))
+        enabled = bool(policy.get("enabled", True))
+        effective_status = "active" if (auto_approve and enabled) else "review"
+        quality_score = float(doc.get("parse_confidence", 0.0))
+        stock_codes = self._extract_stock_codes_from_text(
+            f"{doc.get('filename', '')}\n{doc.get('cleaned_text', '')}\n{doc.get('content', '')}"
+        )
+        payload_chunks: list[dict[str, Any]] = []
+        for idx, chunk in enumerate(chunks, start=1):
+            payload_chunks.append(
+                {
+                    "chunk_id": f"{doc_id}-c{idx}",
+                    "chunk_no": idx,
+                    "chunk_text": chunk,
+                    # 双轨中的“摘要/脱敏轨”：在线检索默认使用 redacted 文本。
+                    "chunk_text_redacted": self._redact_text(chunk),
+                    "stock_codes": stock_codes,
+                    "industry_tags": [],
+                }
+            )
+        self.web.rag_doc_chunk_replace(
+            doc_id=doc_id,
+            source=source,
+            source_url=source_url,
+            effective_status=effective_status,
+            quality_score=quality_score,
+            chunks=payload_chunks,
+        )
+
+    @staticmethod
+    def _extract_stock_codes_from_text(text: str) -> list[str]:
+        """从文本中提取 SH/SZ 股票代码，用于检索时的标的过滤。"""
+        items = re.findall(r"\b(?:SH|SZ)\d{6}\b", str(text or "").upper())
+        return list(dict.fromkeys(items))
+
+    @staticmethod
+    def _redact_text(text: str) -> str:
+        """轻量脱敏：去除邮箱/手机号/连续证件号，降低共享语料风险。"""
+        value = str(text or "")
+        value = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[REDACTED_EMAIL]", value)
+        value = re.sub(r"\b1\d{10}\b", "[REDACTED_PHONE]", value)
+        value = re.sub(r"\b\d{15,18}[0-9Xx]?\b", "[REDACTED_ID]", value)
+        return value
 
     def evals_run(self, samples: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """运行评测并返回门禁结果。"""
@@ -1585,7 +1639,74 @@ class AShareAgentService:
         return self.web.docs_review_queue(token)
 
     def docs_review_action(self, token: str, doc_id: str, action: str, comment: str = "") -> dict[str, Any]:
-        return self.web.docs_review_action(token, doc_id, action, comment)
+        result = self.web.docs_review_action(token, doc_id, action, comment)
+        # 审核动作需要同步到 chunk 生效状态，避免“文档状态已改但检索仍命中旧片段”。
+        if action == "approve":
+            self.web.rag_doc_chunk_set_status_by_doc(doc_id=doc_id, status="active")
+        elif action == "reject":
+            self.web.rag_doc_chunk_set_status_by_doc(doc_id=doc_id, status="rejected")
+        return result
+
+    # ----------------- RAG Asset APIs -----------------
+    def rag_source_policy_list(self, token: str) -> list[dict[str, Any]]:
+        return self.web.rag_source_policy_list(token)
+
+    def rag_source_policy_set(self, token: str, source: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.web.rag_source_policy_upsert(
+            token,
+            source=source,
+            auto_approve=bool(payload.get("auto_approve", False)),
+            trust_score=float(payload.get("trust_score", 0.7)),
+            enabled=bool(payload.get("enabled", True)),
+        )
+
+    def rag_doc_chunks_list(
+        self,
+        token: str,
+        *,
+        doc_id: str = "",
+        status: str = "",
+        source: str = "",
+        stock_code: str = "",
+        limit: int = 60,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        return self.web.rag_doc_chunk_list(
+            token,
+            doc_id=doc_id,
+            status=status,
+            source=source,
+            stock_code=stock_code,
+            limit=limit,
+            offset=offset,
+        )
+
+    def rag_doc_chunk_status_set(self, token: str, chunk_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.web.rag_doc_chunk_set_status(token, chunk_id=chunk_id, status=str(payload.get("status", "review")))
+
+    def rag_qa_memory_list(
+        self,
+        token: str,
+        *,
+        stock_code: str = "",
+        retrieval_enabled: int = -1,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        return self.web.rag_qa_memory_list(
+            token,
+            stock_code=stock_code,
+            retrieval_enabled=retrieval_enabled,
+            limit=limit,
+            offset=offset,
+        )
+
+    def rag_qa_memory_toggle(self, token: str, memory_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.web.rag_qa_memory_toggle(
+            token,
+            memory_id=memory_id,
+            retrieval_enabled=bool(payload.get("retrieval_enabled", False)),
+        )
 
     def _parse_deep_archive_timestamp(self, value: str | None, field: str) -> str | None:
         clean = str(value or "").strip() or None
@@ -3127,6 +3248,24 @@ class AShareAgentService:
             "metrics": merged_metrics,
             "offline": {"dataset_size": len(dataset), "metrics": offline_metrics, "cases": cases},
             "online": {"dataset_size": len(online_cases), "metrics": online_metrics, "cases": online_cases[:50]},
+        }
+
+    def ops_rag_retrieval_trace(self, token: str, *, trace_id: str = "", limit: int = 120) -> dict[str, Any]:
+        self.web.require_role(token, {"admin", "ops"})
+        rows = self.web.rag_retrieval_trace_list(token, trace_id=trace_id, limit=limit)
+        return {
+            "trace_id": trace_id.strip(),
+            "count": len(rows),
+            "items": rows,
+        }
+
+    def ops_rag_reindex(self, token: str, *, limit: int = 2000) -> dict[str, Any]:
+        """向量索引重建入口：Phase-B 使用；Phase-A 先返回可观测占位结果。"""
+        self.web.require_role(token, {"admin", "ops"})
+        return {
+            "status": "pending_phase_b",
+            "message": "vector index rebuild is enabled after phase-b components are wired",
+            "limit": max(1, int(limit)),
         }
 
     def ops_prompt_compare(

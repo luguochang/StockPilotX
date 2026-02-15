@@ -60,6 +60,23 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(idx["status"], "indexed")
         self.assertGreater(idx["chunk_count"], 1)
 
+    def test_rag_doc_policy_and_chunk_management(self) -> None:
+        policies = self.svc.rag_source_policy_list("")
+        self.assertTrue(any(str(x.get("source")) == "cninfo" for x in policies))
+
+        _ = self.svc.docs_upload("rag-doc-1", "cninfo-demo.pdf", "SH600000 业绩说明会纪要" * 120, "cninfo")
+        _ = self.svc.docs_index("rag-doc-1")
+        chunks = self.svc.rag_doc_chunks_list("", doc_id="rag-doc-1", status="active", limit=30)
+        self.assertGreater(len(chunks), 0)
+        chunk_id = str(chunks[0]["chunk_id"])
+
+        updated = self.svc.rag_doc_chunk_status_set("", chunk_id, {"status": "review"})
+        self.assertEqual(str(updated.get("effective_status", "")), "review")
+
+        _ = self.svc.rag_source_policy_set("", "user_upload", {"auto_approve": True, "trust_score": 0.8, "enabled": True})
+        policy_after = self.svc.web.rag_source_policy_get("user_upload")
+        self.assertTrue(bool(policy_after.get("auto_approve")))
+
     def test_eval_gate(self) -> None:
         run = self.svc.evals_run(
             [

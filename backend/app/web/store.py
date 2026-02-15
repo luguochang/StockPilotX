@@ -153,6 +153,67 @@ class WebStore:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS rag_doc_source_policy (
+                source TEXT PRIMARY KEY,
+                auto_approve INTEGER NOT NULL DEFAULT 0,
+                trust_score REAL NOT NULL DEFAULT 0.6,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS rag_doc_chunk (
+                chunk_id TEXT PRIMARY KEY,
+                doc_id TEXT NOT NULL,
+                chunk_no INTEGER NOT NULL,
+                chunk_text TEXT NOT NULL,
+                chunk_text_redacted TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_url TEXT NOT NULL DEFAULT '',
+                stock_codes_json TEXT NOT NULL DEFAULT '[]',
+                industry_tags_json TEXT NOT NULL DEFAULT '[]',
+                effective_status TEXT NOT NULL DEFAULT 'review',
+                quality_score REAL NOT NULL DEFAULT 0.0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS rag_qa_memory (
+                memory_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                query_text TEXT NOT NULL,
+                answer_text TEXT NOT NULL,
+                answer_redacted TEXT NOT NULL,
+                summary_text TEXT NOT NULL,
+                citations_json TEXT NOT NULL DEFAULT '[]',
+                risk_flags_json TEXT NOT NULL DEFAULT '[]',
+                intent TEXT NOT NULL DEFAULT 'fact',
+                quality_score REAL NOT NULL DEFAULT 0.0,
+                share_scope TEXT NOT NULL DEFAULT 'global',
+                retrieval_enabled INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS rag_qa_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_id TEXT NOT NULL,
+                signal TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS rag_retrieval_trace (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trace_id TEXT NOT NULL,
+                query_text TEXT NOT NULL,
+                query_type TEXT NOT NULL DEFAULT 'query',
+                retrieved_ids_json TEXT NOT NULL DEFAULT '[]',
+                selected_ids_json TEXT NOT NULL DEFAULT '[]',
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS deep_think_session (
                 session_id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
@@ -279,6 +340,11 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_stock_universe_industry ON stock_universe(industry_l1);
             CREATE INDEX IF NOT EXISTS idx_stock_industry_map_code ON stock_universe_industry_map(stock_code);
             CREATE INDEX IF NOT EXISTS idx_stock_industry_map_l1 ON stock_universe_industry_map(industry_l1);
+            CREATE INDEX IF NOT EXISTS idx_rag_doc_chunk_doc_status ON rag_doc_chunk(doc_id, effective_status, chunk_no);
+            CREATE INDEX IF NOT EXISTS idx_rag_doc_chunk_source_status ON rag_doc_chunk(source, effective_status, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_rag_qa_memory_stock_retrieval ON rag_qa_memory(stock_code, retrieval_enabled, created_at);
+            CREATE INDEX IF NOT EXISTS idx_rag_qa_feedback_memory ON rag_qa_feedback(memory_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_rag_retrieval_trace_trace_id ON rag_retrieval_trace(trace_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_deep_think_round_session ON deep_think_round(session_id, round_no);
             CREATE INDEX IF NOT EXISTS idx_deep_think_opinion_round ON deep_think_opinion(round_id);
             CREATE INDEX IF NOT EXISTS idx_deep_think_event_session ON deep_think_event(session_id, round_no, event_seq);
