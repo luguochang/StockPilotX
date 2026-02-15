@@ -162,4 +162,4 @@
   - Result: `Compiled successfully`, route `/rag-center` and `/docs-center` generated.
 
 ### Commit
-- `TBD` - `feat(rag): make uploads active immediately without review approval`
+- `3be2e59` - `feat(rag): activate uploads immediately without review gate`
