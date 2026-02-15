@@ -20,33 +20,33 @@
   - [x] Run tests and capture evidence.
   - [x] Commit Batch-1.
 
-- [ ] Batch-2: QA memory persistence and quality gate
-  - [ ] Persist query/query-stream outputs into `rag_qa_memory`.
-  - [ ] Add retrieval gate (`retrieval_enabled`) based on citation/risk/quality.
-  - [ ] Write retrieval trace rows for observability.
-  - [ ] Run tests and capture evidence.
-  - [ ] Commit Batch-2.
+- [x] Batch-2: QA memory persistence and quality gate
+  - [x] Persist query/query-stream outputs into `rag_qa_memory`.
+  - [x] Add retrieval gate (`retrieval_enabled`) based on citation/risk/quality.
+  - [x] Write retrieval trace rows for observability.
+  - [x] Run tests and capture evidence.
+  - [x] Commit Batch-2.
 
-- [ ] Batch-3: Business retrieval integration (non-vector baseline)
-  - [ ] Fuse active doc chunks + QA summaries into runtime corpus.
-  - [ ] Add business-facing retrieval references in stock analysis chain.
-  - [ ] Run tests and capture evidence.
-  - [ ] Commit Batch-3.
+- [x] Batch-3: Business retrieval integration (non-vector baseline)
+  - [x] Fuse active doc chunks + QA summaries into runtime corpus.
+  - [x] Add business-facing retrieval references in stock analysis chain.
+  - [x] Run tests and capture evidence.
+  - [x] Commit Batch-3.
 
-- [ ] Batch-4: Embedding abstraction + local FAISS store
-  - [ ] Add configurable embedding provider (current transit model; later switchable small model).
-  - [ ] Add local FAISS-backed summary index with fallback path.
-  - [ ] Add ops reindex endpoint wiring.
-  - [ ] Run tests and capture evidence.
-  - [ ] Commit Batch-4.
+- [x] Batch-4: Embedding abstraction + local FAISS store
+  - [x] Add configurable embedding provider (current transit model; later switchable small model).
+  - [x] Add local FAISS-backed summary index with fallback path.
+  - [x] Add ops reindex endpoint wiring.
+  - [x] Run tests and capture evidence.
+  - [x] Commit Batch-4.
 
-- [ ] Batch-5: Summary-first retrieval then origin-backfill
-  - [ ] Implement coarse-to-fine retrieval path.
-  - [ ] Merge semantic + lexical ranking outputs.
-  - [ ] Add regression tests for semantic recall and fallback behavior.
-  - [ ] Commit Batch-5.
+- [x] Batch-5: Summary-first retrieval then origin-backfill
+  - [x] Implement coarse-to-fine retrieval path.
+  - [x] Merge semantic + lexical ranking outputs.
+  - [x] Add regression tests for semantic recall and fallback behavior.
+  - [x] Commit Batch-5.
 
-- [ ] Batch-6: Final regression and delivery docs
-  - [ ] End-to-end chain self-test (`/v1/query/stream`, `/v1/rag/*`, `/v1/ops/rag/*`).
-  - [ ] Update report docs and date README indexes.
-  - [ ] Final commit and delivery summary.
+- [x] Batch-6: Final regression and delivery docs
+  - [x] End-to-end chain self-test (`/v1/query/stream`, `/v1/rag/*`, `/v1/ops/rag/*`).
+  - [x] Update report docs and date README indexes.
+  - [x] Final commit and delivery summary.

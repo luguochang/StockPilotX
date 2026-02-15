@@ -1,4 +1,4 @@
-# Reports 2026-02-15
+﻿# Reports 2026-02-15
 
 ## Files
 - `docs/reports/2026-02-15/frontend-backend-gap-remediation-2026-02-15.md`
@@ -10,6 +10,7 @@
 - `docs/reports/2026-02-15/query-3m-summary-card-ui-2026-02-15.md`
 - `docs/reports/2026-02-15/deepthink-business-console-clarity-2026-02-15.md`
 - `docs/reports/2026-02-15/deepthink-checklist-conversation-summary-2026-02-15.md`
+- `docs/reports/2026-02-15/rag-two-phase-architecture-business-plan-2026-02-15.md`
 
 ## Notes
 - Keep all reports for this date in this folder.
