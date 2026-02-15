@@ -67,6 +67,12 @@ class Settings:
     embedding_timeout_seconds: float = 12.0
     embedding_batch_size: int = 32
     embedding_fallback_to_local: bool = True
+    # A-share regime controls: model "bull short, bear long" market behavior using short/mid horizon signals.
+    a_share_regime_enabled: bool = True
+    a_share_regime_vol_threshold: float = 0.025
+    a_share_regime_conf_discount_bear: float = 0.82
+    a_share_regime_conf_discount_range: float = 0.88
+    a_share_regime_conf_discount_bull_high_vol: float = 0.90
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -118,6 +124,18 @@ class Settings:
             embedding_timeout_seconds=max(1.0, float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "12"))),
             embedding_batch_size=max(1, int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))),
             embedding_fallback_to_local=_to_bool(os.getenv("EMBEDDING_FALLBACK_TO_LOCAL"), True),
+            a_share_regime_enabled=_to_bool(os.getenv("A_SHARE_REGIME_ENABLED"), True),
+            a_share_regime_vol_threshold=max(0.005, float(os.getenv("A_SHARE_REGIME_VOL_THRESHOLD", "0.025"))),
+            a_share_regime_conf_discount_bear=max(
+                0.5, min(1.0, float(os.getenv("A_SHARE_REGIME_CONF_DISCOUNT_BEAR", "0.82")))
+            ),
+            a_share_regime_conf_discount_range=max(
+                0.5, min(1.0, float(os.getenv("A_SHARE_REGIME_CONF_DISCOUNT_RANGE", "0.88")))
+            ),
+            a_share_regime_conf_discount_bull_high_vol=max(
+                0.5,
+                min(1.0, float(os.getenv("A_SHARE_REGIME_CONF_DISCOUNT_BULL_HIGH_VOL", "0.90"))),
+            ),
         )
 
     def load_llm_provider_configs(self) -> list[dict]:

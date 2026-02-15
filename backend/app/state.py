@@ -19,6 +19,8 @@ class AgentState:
     intent: str = "fact"
     stock_codes: list[str] = field(default_factory=list)
     retrieval_plan: dict[str, Any] = field(default_factory=dict)
+    # A-share market regime context shared by query/deep-think for strategy-aware prompting and post-processing.
+    market_regime_context: dict[str, Any] = field(default_factory=dict)
 
     # 证据与风险
     evidence_pack: list[dict[str, Any]] = field(default_factory=list)

@@ -777,6 +777,7 @@ class AShareAgentService:
         arbitration: dict[str, Any],
         budget_usage: dict[str, Any],
         intel: dict[str, Any],
+        regime_context: dict[str, Any] | None,
         replan_triggered: bool,
         stop_reason: str,
     ) -> dict[str, Any]:
@@ -789,6 +790,10 @@ class AShareAgentService:
             signal = bias
         base_conf = max(0.0, min(1.0, 1.0 - float(arbitration.get("disagreement_score", 0.0))))
         confidence = max(0.0, min(1.0, base_conf + float(decision.get("confidence_adjustment", 0.0) or 0.0)))
+        regime = regime_context if isinstance(regime_context, dict) else self._build_a_share_regime_context([stock_code])
+        signal_guard = self._apply_a_share_signal_guard(signal, confidence, regime)
+        signal = str(signal_guard.get("signal", signal))
+        confidence = float(signal_guard.get("confidence", confidence))
         calendar = intel.get("calendar_watchlist", []) if isinstance(intel, dict) else []
         next_event = calendar[0] if isinstance(calendar, list) and calendar else {}
         return {
@@ -808,6 +813,12 @@ class AShareAgentService:
             "budget_warn": bool(budget_usage.get("warn")),
             "budget_exceeded": bool(budget_usage.get("exceeded")),
             "citations": citations[:6],
+            "market_regime": str(regime.get("regime_label", "")),
+            "regime_confidence": float(regime.get("regime_confidence", 0.0) or 0.0),
+            "risk_bias": str(regime.get("risk_bias", "")),
+            "regime_rationale": str(regime.get("regime_rationale", "")),
+            "signal_guard_applied": bool(signal_guard.get("applied", False)),
+            "confidence_adjustment_detail": signal_guard.get("detail", {}),
             "intel_status": str(intel.get("intel_status", "")) if isinstance(intel, dict) else "",
             "intel_fallback_reason": str(intel.get("fallback_reason", "")) if isinstance(intel, dict) else "",
             "intel_confidence_note": str(intel.get("confidence_note", "")) if isinstance(intel, dict) else "",
@@ -840,6 +851,7 @@ class AShareAgentService:
         # 基于最新摄取数据动态构建检索语料，避免固定示例语料导致输出雷同。
         self.workflow.retriever = self._build_runtime_retriever(req.stock_codes)
         enriched_question = self._augment_question_with_history_context(req.question, req.stock_codes)
+        regime_context = self._build_a_share_regime_context(req.stock_codes)
 
         trace_id = self.traces.new_trace()
         state = AgentState(
@@ -847,6 +859,7 @@ class AShareAgentService:
             # 仅增强模型输入上下文，输出层仍使用用户原始问题文案。
             question=enriched_question,
             stock_codes=req.stock_codes,
+            market_regime_context=regime_context,
             trace_id=trace_id,
         )
 
@@ -855,8 +868,14 @@ class AShareAgentService:
         state = runtime_result.state
         state.analysis["workflow_runtime"] = runtime_result.runtime
         self.traces.emit(trace_id, "workflow_runtime", {"runtime": runtime_result.runtime})
-        answer, merged_citations = self._build_evidence_rich_answer(req.question, req.stock_codes, state.report, state.citations)
-        analysis_brief = self._build_analysis_brief(req.stock_codes, merged_citations)
+        answer, merged_citations = self._build_evidence_rich_answer(
+            req.question,
+            req.stock_codes,
+            state.report,
+            state.citations,
+            regime_context=regime_context,
+        )
+        analysis_brief = self._build_analysis_brief(req.stock_codes, merged_citations, regime_context=regime_context)
         state.report = answer
         state.citations = merged_citations
 
@@ -930,16 +949,27 @@ class AShareAgentService:
         yield {"event": "progress", "data": {"phase": "retriever", "message": "正在准备检索语料"}}
         self.workflow.retriever = self._build_runtime_retriever(req.stock_codes)
         enriched_question = self._augment_question_with_history_context(req.question, req.stock_codes)
+        regime_context = self._build_a_share_regime_context(req.stock_codes)
         trace_id = self.traces.new_trace()
         state = AgentState(
             user_id=req.user_id,
             question=enriched_question,
             stock_codes=req.stock_codes,
+            market_regime_context=regime_context,
             trace_id=trace_id,
         )
         memory_hint = self.memory.list_memory(req.user_id, limit=3)
         runtime_name = selected_runtime.runtime_name
         self.traces.emit(trace_id, "workflow_runtime", {"runtime": runtime_name})
+        yield {
+            "event": "market_regime",
+            "data": {
+                "regime_label": str(regime_context.get("regime_label", "")),
+                "regime_confidence": float(regime_context.get("regime_confidence", 0.0) or 0.0),
+                "risk_bias": str(regime_context.get("risk_bias", "")),
+                "regime_rationale": str(regime_context.get("regime_rationale", "")),
+            },
+        }
         yield {"event": "stream_runtime", "data": {"runtime": runtime_name}}
         yield {"event": "progress", "data": {"phase": "model", "message": "开始模型流式输出"}}
         # 为了避免“模型首 token 迟迟不来时前端无反馈”，
@@ -1001,7 +1031,10 @@ class AShareAgentService:
         )
         # 结果沉淀事件：便于前端/运维确认本轮问答已进入共享语料池。
         yield {"event": "knowledge_persisted", "data": {"trace_id": trace_id}}
-        yield {"event": "analysis_brief", "data": self._build_analysis_brief(req.stock_codes, citations)}
+        yield {
+            "event": "analysis_brief",
+            "data": self._build_analysis_brief(req.stock_codes, citations, regime_context=regime_context),
+        }
 
     def _build_evidence_rich_answer(
         self,
@@ -1009,6 +1042,7 @@ class AShareAgentService:
         stock_codes: list[str],
         base_answer: str,
         citations: list[dict[str, Any]],
+        regime_context: dict[str, Any] | None = None,
     ) -> tuple[str, list[dict[str, Any]]]:
         """生成带数据支撑的增强回答（实时+历史+双Agent讨论）。"""
         lines: list[str] = []
@@ -1018,6 +1052,18 @@ class AShareAgentService:
         lines.append("## 结论摘要")
         lines.append(base_answer)
         lines.append("")
+        regime = regime_context if isinstance(regime_context, dict) else {}
+        if regime:
+            lines.append(
+                "## A-share Regime Snapshot"
+            )
+            lines.append(
+                "- "
+                f"label=`{regime.get('regime_label', 'unknown')}` | "
+                f"confidence=`{float(regime.get('regime_confidence', 0.0) or 0.0):.2f}` | "
+                f"risk_bias=`{regime.get('risk_bias', 'neutral')}`"
+            )
+            lines.append(f"- rationale: {regime.get('regime_rationale', '')}")
         lines.append("## Data Snapshot and History Trend")
         lines.append("## 数据证据分析")
         for code in stock_codes:
@@ -1122,7 +1168,12 @@ class AShareAgentService:
             )
         return "\n".join(lines), merged[:10]
 
-    def _build_analysis_brief(self, stock_codes: list[str], citations: list[dict[str, Any]]) -> dict[str, Any]:
+    def _build_analysis_brief(
+        self,
+        stock_codes: list[str],
+        citations: list[dict[str, Any]],
+        regime_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """构造结构化证据摘要，供前端可视化展示。"""
         by_code: list[dict[str, Any]] = []
         now = datetime.now(timezone.utc)
@@ -1153,12 +1204,33 @@ class AShareAgentService:
         citation_coverage = len(citations)
         avg_score = round(mean(valid_scores), 4) if valid_scores else 0.0
         confidence = "high" if citation_coverage >= 4 and avg_score >= 0.8 else "medium" if citation_coverage >= 2 else "low"
+        regime = regime_context if isinstance(regime_context, dict) else self._build_a_share_regime_context(stock_codes)
+        seed_signal = "hold"
+        seed_conf = max(0.45, min(0.92, 0.48 + avg_score * 0.4 + min(0.08, citation_coverage * 0.015)))
+        if by_code and isinstance(by_code[0].get("trend"), dict):
+            trend0 = by_code[0]["trend"]
+            slope_20 = float(trend0.get("ma20_slope", 0.0) or 0.0)
+            momentum_20 = float(trend0.get("momentum_20", 0.0) or 0.0)
+            drawdown_60 = float(trend0.get("max_drawdown_60", 0.0) or 0.0)
+            if slope_20 > 0 and momentum_20 > 0:
+                seed_signal = "buy"
+            elif slope_20 < 0 and (momentum_20 < 0 or drawdown_60 > 0.18):
+                seed_signal = "reduce"
+        signal_guard = self._apply_a_share_signal_guard(seed_signal, seed_conf, regime)
         return {
             "confidence_level": confidence,
             "confidence_reason": f"citations={citation_coverage}, avg_reliability={avg_score}",
             "stocks": by_code,
             "citation_count": citation_coverage,
             "citation_avg_reliability": avg_score,
+            "market_regime": str(regime.get("regime_label", "")),
+            "regime_confidence": float(regime.get("regime_confidence", 0.0) or 0.0),
+            "risk_bias": str(regime.get("risk_bias", "")),
+            "regime_rationale": str(regime.get("regime_rationale", "")),
+            "signal_guard_applied": bool(signal_guard.get("applied", False)),
+            "signal_guard_detail": signal_guard.get("detail", {}),
+            "guarded_signal_preview": str(signal_guard.get("signal", seed_signal)),
+            "guarded_confidence_preview": float(signal_guard.get("confidence", seed_conf)),
         }
 
     def _record_rag_eval_case(
@@ -1732,6 +1804,188 @@ class AShareAgentService:
             "momentum_20": momentum_20,
             "volatility_20": vol20,
             "max_drawdown_60": max_dd,
+        }
+
+    def _build_a_share_regime_context(self, stock_codes: list[str]) -> dict[str, Any]:
+        """Build A-share market regime context for 1-20 trading day decisions."""
+        code = str(stock_codes[0]).upper() if stock_codes else "SH600000"
+        if not self.settings.a_share_regime_enabled:
+            return {
+                "enabled": False,
+                "stock_code": code,
+                "regime_label": "disabled",
+                "regime_confidence": 0.0,
+                "risk_bias": "neutral",
+                "regime_rationale": "a_share_regime_disabled",
+                "short_horizon_signals": {},
+                "style_rotation_hint": "none",
+                "action_constraints": {
+                    "max_confidence_cap": 1.0,
+                    "position_pacing_hint": "no_extra_constraints",
+                    "invalidation_window_days": 5,
+                },
+            }
+
+        bars = self._history_bars(code, limit=260)
+        closes = [float(x.get("close", 0.0)) for x in bars if float(x.get("close", 0.0)) > 0]
+        if len(closes) < 30:
+            return {
+                "enabled": True,
+                "stock_code": code,
+                "regime_label": "range_chop",
+                "regime_confidence": 0.32,
+                "risk_bias": "neutral",
+                "regime_rationale": "insufficient_history_for_regime",
+                "short_horizon_signals": {
+                    "trend_5d": 0.0,
+                    "trend_20d": 0.0,
+                    "vol_20d": 0.0,
+                    "drawdown_20d": 0.0,
+                    "up_day_ratio_20d": 0.0,
+                    "gap_risk_flag": False,
+                },
+                "style_rotation_hint": "wait_for_more_data",
+                "action_constraints": {
+                    "max_confidence_cap": 0.72,
+                    "position_pacing_hint": "small_probe_only",
+                    "invalidation_window_days": 3,
+                },
+            }
+
+        returns = [closes[i] / closes[i - 1] - 1.0 for i in range(1, len(closes))]
+        recent_returns = returns[-20:] if len(returns) >= 20 else returns
+        trend_5d = closes[-1] / closes[-6] - 1.0 if len(closes) >= 6 else 0.0
+        trend_20d = closes[-1] / closes[-21] - 1.0 if len(closes) >= 21 else 0.0
+        up_days = [r for r in recent_returns if r > 0]
+        up_day_ratio = len(up_days) / max(1, len(recent_returns))
+        mean_ret = mean(recent_returns) if recent_returns else 0.0
+        vol_20d = (mean([(x - mean_ret) ** 2 for x in recent_returns]) ** 0.5) if recent_returns else 0.0
+        drawdown_20d = self._max_drawdown(closes[-20:])
+        gap_risk_flag = sum(1 for r in recent_returns if abs(r) >= 0.06) >= 2
+
+        regime_label = "range_chop"
+        regime_confidence = 0.55
+        risk_bias = "neutral"
+        regime_rationale = "sideways_with_mixed_signals"
+        if trend_20d <= -0.06 or (drawdown_20d >= 0.12 and up_day_ratio < 0.45):
+            regime_label = "bear_grind"
+            regime_confidence = min(0.92, 0.62 + min(0.22, abs(trend_20d) + drawdown_20d))
+            risk_bias = "defensive"
+            regime_rationale = "downtrend_dominates_short_horizon"
+        elif trend_20d < 0.0 and trend_5d >= 0.02:
+            regime_label = "rebound_probe"
+            regime_confidence = min(0.88, 0.58 + min(0.18, trend_5d + max(0.0, -trend_20d)))
+            risk_bias = "balanced"
+            regime_rationale = "short_rebound_inside_prior_weak_cycle"
+        elif trend_20d >= 0.06 and trend_5d >= 0.0 and up_day_ratio >= 0.55:
+            regime_label = "bull_burst"
+            regime_confidence = min(0.9, 0.60 + min(0.2, trend_20d + trend_5d))
+            risk_bias = "pro_risk"
+            regime_rationale = "uptrend_present_but_needs_fast_review"
+        elif abs(trend_20d) <= 0.03:
+            regime_label = "range_chop"
+            regime_confidence = min(0.86, 0.56 + min(0.2, vol_20d * 4.0))
+            risk_bias = "neutral"
+            regime_rationale = "range_chop_with_rotation_noise"
+
+        # Constraints are consumed by confidence guard and frontend explainability.
+        max_cap = 0.84
+        pacing_hint = "ladder_entries"
+        invalidation_days = 5
+        if regime_label == "bear_grind":
+            max_cap = 0.72
+            pacing_hint = "defensive_small_size"
+            invalidation_days = 2
+        elif regime_label == "range_chop":
+            max_cap = 0.76
+            pacing_hint = "wait_breakout_or_mean_reversion"
+            invalidation_days = 3
+        elif regime_label == "rebound_probe":
+            max_cap = 0.79
+            pacing_hint = "probe_then_confirm"
+            invalidation_days = 2
+        elif regime_label == "bull_burst":
+            max_cap = 0.86 if vol_20d <= self.settings.a_share_regime_vol_threshold else 0.8
+            pacing_hint = "chase_controlled_pullback"
+            invalidation_days = 3
+
+        style_hint = "quality_large_cap"
+        if regime_label in {"range_chop", "rebound_probe"}:
+            style_hint = "event_driven_selective_beta"
+        elif regime_label == "bear_grind":
+            style_hint = "cashflow_defensive_low_beta"
+        elif regime_label == "bull_burst":
+            style_hint = "high_momentum_with_risk_limits"
+
+        return {
+            "enabled": True,
+            "stock_code": code,
+            "regime_label": regime_label,
+            "regime_confidence": round(max(0.0, min(1.0, regime_confidence)), 4),
+            "risk_bias": risk_bias,
+            "regime_rationale": regime_rationale,
+            "short_horizon_signals": {
+                "trend_5d": round(trend_5d, 6),
+                "trend_20d": round(trend_20d, 6),
+                "vol_20d": round(vol_20d, 6),
+                "drawdown_20d": round(drawdown_20d, 6),
+                "up_day_ratio_20d": round(up_day_ratio, 6),
+                "gap_risk_flag": bool(gap_risk_flag),
+            },
+            "style_rotation_hint": style_hint,
+            "action_constraints": {
+                "max_confidence_cap": float(max_cap),
+                "position_pacing_hint": pacing_hint,
+                "invalidation_window_days": int(invalidation_days),
+            },
+        }
+
+    def _apply_a_share_signal_guard(
+        self,
+        signal: str,
+        confidence: float,
+        regime_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Apply A-share regime confidence guard while keeping signal direction unchanged."""
+        normalized_signal = str(signal or "hold").strip().lower()
+        if normalized_signal not in {"buy", "hold", "reduce"}:
+            normalized_signal = "hold"
+        base_conf = max(0.0, min(1.0, float(confidence or 0.0)))
+        regime = regime_context if isinstance(regime_context, dict) else {}
+        label = str(regime.get("regime_label", "unknown"))
+        signals = regime.get("short_horizon_signals", {}) if isinstance(regime.get("short_horizon_signals"), dict) else {}
+        vol_20d = float(signals.get("vol_20d", 0.0) or 0.0)
+        cap = 1.0
+        constraints = regime.get("action_constraints", {}) if isinstance(regime.get("action_constraints"), dict) else {}
+        if constraints:
+            cap = max(0.0, min(1.0, float(constraints.get("max_confidence_cap", 1.0) or 1.0)))
+
+        multiplier = 1.0
+        reason = "no_adjustment"
+        if label == "bear_grind":
+            multiplier = float(self.settings.a_share_regime_conf_discount_bear)
+            reason = "bear_grind_confidence_discount"
+        elif label == "range_chop":
+            multiplier = float(self.settings.a_share_regime_conf_discount_range)
+            reason = "range_chop_confidence_discount"
+        elif label == "bull_burst" and vol_20d > float(self.settings.a_share_regime_vol_threshold):
+            multiplier = float(self.settings.a_share_regime_conf_discount_bull_high_vol)
+            reason = "bull_burst_high_vol_discount"
+
+        adjusted = max(0.0, min(cap, base_conf * multiplier))
+        applied = abs(adjusted - base_conf) >= 1e-6
+        return {
+            "signal": normalized_signal,
+            "confidence": round(adjusted, 4),
+            "applied": applied,
+            "detail": {
+                "regime_label": label,
+                "multiplier": round(multiplier, 4),
+                "cap": round(cap, 4),
+                "input_confidence": round(base_conf, 4),
+                "adjusted_confidence": round(adjusted, 4),
+                "reason": reason,
+            },
         }
 
     @staticmethod
@@ -2540,6 +2794,7 @@ class AShareAgentService:
 
         try:
             code = stock_codes[0] if stock_codes else "SH600000"
+            regime_context = self._build_a_share_regime_context([code])
             task_graph = self._deep_plan_tasks(question, round_no)
             budget = session.get("budget", {}) if isinstance(session.get("budget", {}), dict) else {}
             budget_usage = self._deep_budget_snapshot(budget, round_no, len(task_graph))
@@ -2586,6 +2841,15 @@ class AShareAgentService:
                 },
             )
             yield emit(
+                "market_regime",
+                {
+                    "regime_label": str(regime_context.get("regime_label", "")),
+                    "regime_confidence": float(regime_context.get("regime_confidence", 0.0) or 0.0),
+                    "risk_bias": str(regime_context.get("risk_bias", "")),
+                    "regime_rationale": str(regime_context.get("regime_rationale", "")),
+                },
+            )
+            yield emit(
                 "progress",
                 {
                     "stage": "planning",
@@ -2619,6 +2883,17 @@ class AShareAgentService:
                 quote = self._latest_quote(code) or {}
                 bars = self._history_bars(code, limit=180)
                 trend = self._trend_metrics(bars) if len(bars) >= 30 else {}
+                # Re-evaluate regime after refresh so later guard uses freshest 1-20d signals.
+                regime_context = self._build_a_share_regime_context([code])
+                yield emit(
+                    "market_regime",
+                    {
+                        "regime_label": str(regime_context.get("regime_label", "")),
+                        "regime_confidence": float(regime_context.get("regime_confidence", 0.0) or 0.0),
+                        "risk_bias": str(regime_context.get("risk_bias", "")),
+                        "regime_rationale": str(regime_context.get("regime_rationale", "")),
+                    },
+                )
                 pred = self.predict_run({"stock_codes": [code], "horizons": ["20d"]})
                 horizon_map = {h["horizon"]: h for h in pred["results"][0]["horizons"]} if pred.get("results") else {}
                 quant_20 = horizon_map.get("20d", {})
@@ -2809,6 +3084,7 @@ class AShareAgentService:
                 arbitration=arbitration,
                 budget_usage=budget_usage,
                 intel=intel_payload,
+                regime_context=regime_context,
                 replan_triggered=replan_triggered,
                 stop_reason=stop_reason,
             )

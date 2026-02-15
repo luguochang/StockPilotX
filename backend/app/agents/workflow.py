@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+import json
 from typing import Any, Iterator
 
 from backend.app.agents.tools import (
@@ -176,12 +177,13 @@ class AgentWorkflow:
         self.trace_emit(state.trace_id, "before_agent", {"question": state.question})
         state.intent = route_intent(state.question)
         self.trace_emit(state.trace_id, "router", {"intent": state.intent})
-        state.retrieval_plan = {
-            "top_k_vector": 12,
-            "top_k_bm25": 20,
-            "rerank_top_n": 10,
-            "memory_hint_count": len(memory_hint or []),
-        }
+        # Preserve caller-side metadata and only fill retrieval defaults when absent.
+        plan = dict(state.retrieval_plan or {})
+        plan.setdefault("top_k_vector", 12)
+        plan.setdefault("top_k_bm25", 20)
+        plan.setdefault("rerank_top_n", 10)
+        plan["memory_hint_count"] = len(memory_hint or [])
+        state.retrieval_plan = plan
         _ = self._call_tool("data", "quote_tool", {"stock_codes": state.stock_codes or ["SH600000"]})
         self.trace_emit(state.trace_id, "data_plan", state.retrieval_plan)
 
@@ -280,24 +282,39 @@ class AgentWorkflow:
     def _analyze(self, state: AgentState) -> dict[str, Any]:
         positives = [e for e in state.evidence_pack if e.get("reliability_score", 0) >= 0.9]
         risks = [e for e in state.evidence_pack if e.get("reliability_score", 0) < 0.75]
+        regime_ctx = state.market_regime_context if isinstance(state.market_regime_context, dict) else {}
         return {
             "fact_count": len(state.evidence_pack),
             "high_confidence_count": len(positives),
             "low_confidence_count": len(risks),
             "summary": "证据显示公司存在业绩改善线索，但仍需关注行业波动风险。",
             "deep_subtasks": state.analysis.get("deep_subtasks", []),
+            "market_regime": {
+                "label": str(regime_ctx.get("regime_label", "")),
+                "confidence": float(regime_ctx.get("regime_confidence", 0.0) or 0.0),
+                "risk_bias": str(regime_ctx.get("risk_bias", "")),
+            },
         }
 
     def _build_prompt(self, state: AgentState) -> str:
+        regime_ctx = state.market_regime_context if isinstance(state.market_regime_context, dict) else {}
+        regime_line = (
+            f"- [a_share_regime] label={regime_ctx.get('regime_label', 'unknown')}, "
+            f"risk_bias={regime_ctx.get('risk_bias', 'neutral')}, "
+            f"confidence={float(regime_ctx.get('regime_confidence', 0.0) or 0.0):.3f}"
+        )
         evidence = "\n".join(
             f"- [{e['source_id']}] {e['text']} (score={e['reliability_score']})" for e in state.evidence_pack[:6]
         )
+        evidence = f"{evidence}\n{regime_line}" if evidence else regime_line
         if self.prompt_renderer:
             rendered, prompt_meta = self.prompt_renderer(
                 {
                     "question": state.question,
                     "stock_codes": state.stock_codes,
                     "evidence": evidence,
+                    # Keep a structured regime payload so prompt templates can consume it directly.
+                    "market_regime": json.dumps(regime_ctx, ensure_ascii=False),
                 }
             )
             self.trace_emit(state.trace_id, "prompt_meta", prompt_meta)

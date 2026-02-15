@@ -29,6 +29,10 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("trace_id", result)
         self.assertTrue(result["citations"])
         self.assertIn("analysis_brief", result)
+        self.assertIn("market_regime", result["analysis_brief"])
+        self.assertIn("regime_confidence", result["analysis_brief"])
+        self.assertIn("signal_guard_applied", result["analysis_brief"])
+        self.assertIn("signal_guard_detail", result["analysis_brief"])
         self.assertIn("仅供研究参考", result["answer"])
 
     def test_query_persists_rag_qa_memory_and_trace(self) -> None:
@@ -226,12 +230,18 @@ class ServiceTestCase(unittest.TestCase):
         stream_events = list(self.svc.deep_think_stream_events(session_id))
         names = [x["event"] for x in stream_events]
         self.assertIn("round_started", names)
+        self.assertIn("market_regime", names)
         self.assertIn("intel_snapshot", names)
         self.assertIn("intel_status", names)
         self.assertIn("agent_opinion_final", names)
         self.assertIn("arbitration_final", names)
         self.assertIn("business_summary", names)
         self.assertEqual(names[-1], "done")
+        business_payload = next((x.get("data", {}) for x in stream_events if str(x.get("event", "")) == "business_summary"), {})
+        self.assertIn("market_regime", business_payload)
+        self.assertIn("regime_confidence", business_payload)
+        self.assertIn("signal_guard_applied", business_payload)
+        self.assertIn("confidence_adjustment_detail", business_payload)
         events_snapshot = self.svc.deep_think_list_events(session_id)
         self.assertGreater(events_snapshot["count"], 0)
         stored_names = [str(x.get("event", "")) for x in events_snapshot["events"]]
@@ -311,6 +321,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(snapshot["current_round"], 1)
         names = [str(x.get("event", "")) for x in events]
         self.assertIn("round_started", names)
+        self.assertIn("market_regime", names)
         self.assertIn("intel_snapshot", names)
         self.assertIn("intel_status", names)
         self.assertIn("agent_opinion_final", names)
@@ -319,6 +330,11 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("round_persisted", names)
         self.assertEqual(names[-1], "done")
         self.assertTrue(bool(events[-1].get("data", {}).get("ok")))
+        business_payload = next((x.get("data", {}) for x in events if str(x.get("event", "")) == "business_summary"), {})
+        self.assertIn("market_regime", business_payload)
+        self.assertIn("regime_confidence", business_payload)
+        self.assertIn("signal_guard_applied", business_payload)
+        self.assertIn("confidence_adjustment_detail", business_payload)
 
         round_ids = {str(x.get("data", {}).get("round_id", "")) for x in events if "data" in x}
         self.assertEqual(len(round_ids), 1)

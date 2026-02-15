@@ -16,6 +16,7 @@
 - `docs/reports/2026-02-15/rag-upload-immediate-activation-2026-02-15.md`
 - `docs/reports/2026-02-15/rag-end-to-end-cleaning-retrieval-flow-2026-02-15.md`
 - `docs/reports/2026-02-15/rag-end-to-end-sequence-diagram-2026-02-15.md`
+- `docs/reports/2026-02-15/a-share-regime-strategy-implementation-2026-02-15.md`
 
 ## Notes
 - Keep all reports for this date in this folder.

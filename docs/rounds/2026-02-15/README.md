@@ -18,6 +18,7 @@
 - `docs/rounds/2026-02-15/round-S-deepthink-business-console-clarity.md`
 - `docs/rounds/2026-02-15/round-T-deepthink-agent-role-collapsible.md`
 - `docs/rounds/2026-02-15/round-U-deepthink-agent-role-popover.md`
+- `docs/rounds/2026-02-15/round-V-a-share-regime-guard-query-deepthink.md`
 
 ## Notes
 - Round records are append-only history for implementation execution.
