@@ -93,6 +93,31 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=result)
         return result
 
+    @app.post("/v2/deep-think/sessions/{session_id}/rounds/stream")
+    def deep_think_run_round_stream_v2(session_id: str, payload: dict):
+        """V2 真流式执行：同一请求内完成“执行 + 事件推送 + 最终收口”。
+
+        说明：
+        - 与 v1 `/rounds` + `/stream` 回放不同，此接口在执行过程中实时输出事件。
+        - 前端可直接消费 SSE 事件来更新轮次进度，减少“空等待”。
+        """
+
+        def event_gen():
+            for event in svc.deep_think_run_round_stream_events(session_id, payload):
+                event_name = str(event.get("event", "message"))
+                data = event.get("data", {})
+                yield f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            event_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @app.get("/v1/deep-think/sessions/{session_id}")
     def deep_think_get_session(session_id: str):
         result = svc.deep_think_get_session(session_id)

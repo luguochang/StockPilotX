@@ -8,6 +8,8 @@ import MediaCarousel from "../components/MediaCarousel";
 import StockSelectorModal from "../components/StockSelectorModal";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
+// 默认开启 V2 真流式；设置 NEXT_PUBLIC_DEEPTHINK_V2_STREAM=0 可临时回退 V1。
+const ENABLE_DEEPTHINK_V2_STREAM = process.env.NEXT_PUBLIC_DEEPTHINK_V2_STREAM !== "0";
 const HERO_VIDEO_URL =
   process.env.NEXT_PUBLIC_HERO_VIDEO_URL ??
   "/assets/media/hero-stock-analysis.mp4";
@@ -710,21 +712,73 @@ export default function DeepThinkPage() {
     }
   }
 
+  async function runDeepThinkRoundStreamV2(sessionId: string, requestPayload: Record<string, any>) {
+    // V2 路径：单个请求内完成“执行 + 流式推送”，不再先等 round 完成再回放。
+    setDeepStreaming(true);
+    setDeepError("");
+    let streamFailure = "";
+    try {
+      const resp = await fetch(`${API_BASE}/v2/deep-think/sessions/${sessionId}/rounds/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestPayload)
+      });
+      if (!resp.ok) {
+        const detail = await resp.text();
+        throw new Error(detail || `HTTP ${resp.status}`);
+      }
+      await readSSEAndConsume(resp, (eventName, payload) => {
+        // 所有流事件都写入回放面板，便于在线排障与复盘。
+        appendDeepEvent(eventName, payload);
+        // done(ok=false) 统一视作本轮失败，外层再抛错中断流程。
+        if (eventName === "done" && payload && payload.ok === false) {
+          streamFailure = String(payload.error ?? payload.message ?? "DeepThink round failed");
+        }
+      });
+      if (streamFailure) throw new Error(streamFailure);
+    } finally {
+      setDeepStreaming(false);
+    }
+  }
+
   async function runDeepThinkRound() {
     setDeepLoading(true);
     setDeepError("");
     try {
       await ensureStockInUniverse([stockCode]);
       const session = deepSession ?? (await createDeepThinkSessionRequest());
-      const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${session.session_id}/rounds`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, stock_codes: [stockCode] })
-      });
-      const body = await resp.json();
-      if (!resp.ok) throw new Error(body?.detail ?? `HTTP ${resp.status}`);
-      setDeepSession(body as DeepThinkSession);
-      await replayDeepThinkStream(session.session_id);
+      setDeepSession(session);
+      setDeepStreamEvents([]);
+
+      const roundPayload = {
+        question,
+        stock_codes: [stockCode],
+        archive_max_events: deepArchiveLimit
+      };
+      if (ENABLE_DEEPTHINK_V2_STREAM) {
+        // 默认走 V2 真流式：用户可在执行过程中持续看到事件。
+        await runDeepThinkRoundStreamV2(session.session_id, roundPayload);
+      } else {
+        // 回退路径：沿用 V1，同步执行后再读取回放。
+        const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${session.session_id}/rounds`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(roundPayload)
+        });
+        const body = await resp.json();
+        if (!resp.ok) throw new Error(body?.detail ?? `HTTP ${resp.status}`);
+        setDeepSession(body as DeepThinkSession);
+        await replayDeepThinkStream(session.session_id);
+      }
+
+      // 无论 V1/V2，最后都刷新一次会话快照并重载归档，确保前端状态与后端一致。
+      const refreshResp = await fetch(`${API_BASE}/v1/deep-think/sessions/${session.session_id}`);
+      const refreshBody = await refreshResp.json();
+      if (!refreshResp.ok) throw new Error(refreshBody?.detail ?? `HTTP ${refreshResp.status}`);
+      const loaded = refreshBody as DeepThinkSession;
+      setDeepSession(loaded);
+      const latest = loaded.rounds?.length ? loaded.rounds[loaded.rounds.length - 1] : null;
+      await loadDeepThinkEventArchive(loaded.session_id, { roundId: String(latest?.round_id ?? ""), cursor: 0, historyMode: "reset" });
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "执行 DeepThink 下一轮失败");
     } finally {

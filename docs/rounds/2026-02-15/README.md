@@ -10,6 +10,7 @@
 - `docs/rounds/2026-02-15/round-K-deepthink-archive-pagination-export.md`
 - `docs/rounds/2026-02-15/round-L-deepthink-archive-async-export-audit.md`
 - `docs/rounds/2026-02-15/round-M-deepthink-export-retry-metrics-ux.md`
+- `docs/rounds/2026-02-15/round-N-deepthink-v2-true-stream.md`
 
 ## Notes
 - Round records are append-only history for implementation execution.

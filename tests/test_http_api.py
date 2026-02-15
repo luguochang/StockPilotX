@@ -422,6 +422,46 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c6, 200)
         self.assertEqual(loaded_task["task_id"], task_id)
 
+    def test_deep_think_v2_round_stream(self) -> None:
+        c1, session = self._post(
+            "/v1/deep-think/sessions",
+            {
+                "user_id": "api-deep-v2-1",
+                "question": "请流式输出多角色研判过程",
+                "stock_codes": ["SH600000"],
+                "max_rounds": 2,
+            },
+        )
+        self.assertEqual(c1, 200)
+        session_id = session["session_id"]
+
+        body = json.dumps(
+            {
+                "question": "请执行下一轮并输出过程事件",
+                "stock_codes": ["SH600000"],
+                "archive_max_events": 220,
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self.base_url + f"/v2/deep-think/sessions/{session_id}/rounds/stream",
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            self.assertEqual(resp.status, 200)
+            stream_text = resp.read().decode("utf-8", errors="ignore")
+        self.assertIn("event: round_started", stream_text)
+        self.assertIn("event: agent_opinion_final", stream_text)
+        self.assertIn("event: arbitration_final", stream_text)
+        self.assertIn("event: round_persisted", stream_text)
+        self.assertIn("event: done", stream_text)
+        self.assertIn('"ok": true', stream_text)
+
+        c2, loaded = self._get(f"/v1/deep-think/sessions/{session_id}")
+        self.assertEqual(c2, 200)
+        self.assertEqual(int(loaded.get("current_round", 0)), 1)
+
     def test_deep_think_budget_exceeded(self) -> None:
         c1, session = self._post(
             "/v1/deep-think/sessions",

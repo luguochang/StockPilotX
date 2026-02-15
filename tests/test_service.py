@@ -164,6 +164,70 @@ class ServiceTestCase(unittest.TestCase):
         if latest_round.get("replan_triggered") or latest_round.get("budget_usage", {}).get("warn"):
             self.assertTrue(has_optional_event)
 
+    def test_deep_think_v2_stream_round(self) -> None:
+        created = self.svc.deep_think_create_session(
+            {
+                "user_id": "deep-v2-u1",
+                "question": "请对SH600000做流式多角色研判",
+                "stock_codes": ["SH600000"],
+                "max_rounds": 2,
+            }
+        )
+        session_id = created["session_id"]
+
+        stream = self.svc.deep_think_run_round_stream_events(session_id, {"question": "请输出可追踪过程"})
+        events: list[dict] = []
+        snapshot: dict | None = None
+        while True:
+            try:
+                events.append(next(stream))
+            except StopIteration as stop:
+                snapshot = stop.value if isinstance(stop.value, dict) else None
+                break
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["current_round"], 1)
+        names = [str(x.get("event", "")) for x in events]
+        self.assertIn("round_started", names)
+        self.assertIn("agent_opinion_final", names)
+        self.assertIn("arbitration_final", names)
+        self.assertIn("round_persisted", names)
+        self.assertEqual(names[-1], "done")
+        self.assertTrue(bool(events[-1].get("data", {}).get("ok")))
+
+        round_ids = {str(x.get("data", {}).get("round_id", "")) for x in events if "data" in x}
+        self.assertEqual(len(round_ids), 1)
+        for idx, item in enumerate(events, start=1):
+            data = item.get("data", {})
+            self.assertEqual(int(data.get("event_seq", 0)), idx)
+            self.assertEqual(str(data.get("session_id", "")), session_id)
+            self.assertTrue(str(data.get("round_id", "")).startswith("dtr-"))
+
+        stored = self.svc.deep_think_list_events(session_id, limit=200)
+        stored_names = [str(x.get("event", "")) for x in stored["events"]]
+        self.assertIn("round_persisted", stored_names)
+        self.assertIn("done", stored_names)
+
+    def test_deep_think_v2_stream_round_mutex_conflict(self) -> None:
+        created = self.svc.deep_think_create_session(
+            {
+                "user_id": "deep-v2-u2",
+                "question": "请模拟并发冲突",
+                "stock_codes": ["SH600000"],
+                "max_rounds": 2,
+            }
+        )
+        session_id = created["session_id"]
+        self.assertTrue(self.svc._deep_round_try_acquire(session_id))
+        try:
+            events = list(self.svc.deep_think_run_round_stream_events(session_id, {}))
+        finally:
+            self.svc._deep_round_release(session_id)
+        self.assertTrue(events)
+        self.assertEqual(str(events[-1].get("event", "")), "done")
+        self.assertEqual(str(events[-1].get("data", {}).get("error", "")), "round_in_progress")
+
     def test_deep_think_budget_exceeded_stop(self) -> None:
         created = self.svc.deep_think_create_session(
             {

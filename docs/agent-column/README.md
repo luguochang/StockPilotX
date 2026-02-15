@@ -1,4 +1,4 @@
-# Agent Column Index
+﻿# Agent Column Index
 
 ## Purpose
 Store deep-dive notes and round-by-round implementation records for multi-agent and DeepThink work.
@@ -22,6 +22,7 @@ Store deep-dive notes and round-by-round implementation records for multi-agent 
 - `docs/agent-column/15-Round-K-DeepThink归档分页时间过滤与导出实现记录.md`
 - `docs/agent-column/16-Round-L-DeepThink归档异步导出任务与审计指标实现记录.md`
 - `docs/agent-column/17-Round-M-DeepThink导出重试与审计分位指标实现记录.md`
+- `docs/agent-column/18-Round-N-DeepThink-V2真流式执行实现记录.md`
 
 ## Add New Article
 - Path format: `docs/agent-column/<sequence>-<topic>.md`.
