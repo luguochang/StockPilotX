@@ -42,3 +42,9 @@
 - [x] Add report with business/architecture rationale and self-test evidence.
 - [x] Update checklist/round/report index files.
 - [x] Commit with clear summary.
+
+## Batch T - Agent Role Area Compression
+- [x] Convert “Agent 角色说明” to default-collapsed block with animation.
+- [x] Keep full role details available on demand (no information loss).
+- [x] Validate with frontend production build.
+- [x] Add Round-T doc and commit.

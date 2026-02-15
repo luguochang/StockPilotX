@@ -16,6 +16,7 @@
 - `docs/rounds/2026-02-15/round-Q-interface-driven-query-deepthink-optimization.md`
 - `docs/rounds/2026-02-15/round-R-query-3m-summary-fixed-card.md`
 - `docs/rounds/2026-02-15/round-S-deepthink-business-console-clarity.md`
+- `docs/rounds/2026-02-15/round-T-deepthink-agent-role-collapsible.md`
 
 ## Notes
 - Round records are append-only history for implementation execution.

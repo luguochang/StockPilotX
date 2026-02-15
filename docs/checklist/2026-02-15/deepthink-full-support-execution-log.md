@@ -129,3 +129,11 @@
   - `npx tsc --noEmit` (frontend): passed.
   - `npm --prefix frontend run -s build`: passed.
   - `.\.venv\Scripts\python.exe -m pytest tests/test_service.py tests/test_http_api.py -q`: `37 passed`.
+
+## 2026-02-15T14:05:00Z - Batch J (Role Panel Footprint Optimization)
+- User requested reducing agent role description footprint in analysis mode.
+- Implemented collapsible role panel with animated expand/collapse:
+  - Replaced always-expanded role list with default-collapsed `Collapse`.
+  - Preserved complete role information for on-demand viewing.
+- Validation:
+  - `npm run -s build` (workdir `frontend`) passed.

@@ -70,3 +70,14 @@
   - `docs/checklist/2026-02-15/README.md`
   - `docs/rounds/2026-02-15/README.md`
   - `docs/reports/2026-02-15/README.md`
+
+## 2026-02-15T14:05:00Z - Round-T Agent Role Compression
+- User feedback: role explanation area occupies too much screen space.
+- Frontend change:
+  - Replaced always-expanded role list card with default-collapsed `Collapse`.
+  - Keeps animated expand/collapse and full information availability.
+  - Added inline comment explaining “collapsed by default” rationale.
+- Verification:
+  - `npm run -s build` (workdir `frontend`) passed.
+- Docs:
+  - Added `docs/rounds/2026-02-15/round-T-deepthink-agent-role-collapsible.md`.

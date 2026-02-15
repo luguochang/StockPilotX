@@ -70,3 +70,8 @@
 - [x] Auto-clear DeepThink state when stock code changes to avoid cross-stock contamination
 - [x] Split analysis/engineering panels to reduce business-view cognitive load
 - [x] Run interface-level self-test for query stream + deep-think round stream + business export
+
+## Batch J - Agent Role Panel Footprint
+- [x] Compress role description area in analysis mode (default-collapsed)
+- [x] Keep full role details available via animated expand/collapse
+- [x] Rebuild frontend to verify rendering and type/lint pipeline
