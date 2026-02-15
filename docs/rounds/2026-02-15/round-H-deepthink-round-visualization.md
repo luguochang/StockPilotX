@@ -51,7 +51,7 @@ Scope: Frontend DeepThink workspace visualization and operator controls
 - `docs/agent-column/00-总览-多agent-a2a-deepagent.md`
 - `docs/implementation-checklist.md`
 - `docs/spec-traceability-matrix.md`
-- `docs/implementation-status-matrix-2026-02-15.md`
+- `docs/reports/2026-02-15/implementation-status-matrix-2026-02-15.md`
 
 ## 5. Checklist Mapping
 - `FRONT-005` (new): DeepThink governance visualization on frontend.

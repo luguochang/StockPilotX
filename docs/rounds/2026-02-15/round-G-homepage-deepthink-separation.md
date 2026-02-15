@@ -35,7 +35,7 @@ Scope: Frontend information architecture refactor
 - `frontend/tsconfig.json`
 - `docs/implementation-checklist.md`
 - `docs/spec-traceability-matrix.md`
-- `docs/implementation-status-matrix-2026-02-15.md`
+- `docs/reports/2026-02-15/implementation-status-matrix-2026-02-15.md`
 - `docs/rounds/2026-02-15/round-G-homepage-deepthink-separation.md`
 - `docs/agent-column/11-Round-G-首页导航化与DeepThink独立页面实现记录.md`
 

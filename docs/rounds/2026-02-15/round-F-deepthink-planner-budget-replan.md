@@ -45,7 +45,7 @@ Scope: DeepThink reasoning quality and governance hardening
 - `tests/test_http_api.py`
 - `docs/implementation-checklist.md`
 - `docs/spec-traceability-matrix.md`
-- `docs/implementation-status-matrix-2026-02-15.md`
+- `docs/reports/2026-02-15/implementation-status-matrix-2026-02-15.md`
 - `docs/rounds/2026-02-15/round-F-deepthink-planner-budget-replan.md`
 - `docs/agent-column/10-Round-F-DeepThink-Planner-Budget-Replan实现记录.md`
 - `docs/agent-column/00-总览-多agent-a2a-deepagent.md`

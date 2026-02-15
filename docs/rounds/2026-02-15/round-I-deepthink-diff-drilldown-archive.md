@@ -59,7 +59,7 @@ Scope: DeepThink observability and replay persistence (backend + frontend)
 - `docs/agent-column/00-总览-多agent-a2a-deepagent.md`
 - `docs/implementation-checklist.md`
 - `docs/spec-traceability-matrix.md`
-- `docs/implementation-status-matrix-2026-02-15.md`
+- `docs/reports/2026-02-15/implementation-status-matrix-2026-02-15.md`
 
 ## 5. Checklist Mapping
 - `AGT-013` (new): DeepThink persisted event archive and replay API.
