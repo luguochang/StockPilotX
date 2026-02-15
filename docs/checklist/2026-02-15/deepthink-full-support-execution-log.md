@@ -53,6 +53,7 @@
 - `edf7618` - `feat(deep-think): redesign console and add LLM-intel business export`
 - `442a260` - `feat(deep-think): add intel diagnostics self-test and trace APIs`
 - `f2b9e50` - `fix(runtime): self-test driven query sample context and deep-intel parsing`
+- `4383f6a` - `feat(ui): add fixed 3-month sample summary card for advanced analysis`
 
 ## 2026-02-15T10:40:00Z - Batch F (Intel Observability + Self-Test)
 - Backend diagnostics hardening:
