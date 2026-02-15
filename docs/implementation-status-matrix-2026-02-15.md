@@ -55,3 +55,9 @@
 - Added prompt runtime versioned replay and registry version listing.
 - Integrated new ops panels in frontend `/ops/evals`.
 - Full validation: backend 58 passed; http_api 12 passed; frontend build + tsc passed.
+
+## Round-D Update (2026-02-15)
+- Prompt compare upgraded from same-version replay to real multi-version replay (1.0.0 vs 1.1.0).
+- Agent debate upgraded to optional LLM-parallel mode with fallback.
+- RAG quality upgraded with online continuous dataset persistence and merged metrics.
+- Validation kept green: backend 58 passed; frontend build + typecheck passed.

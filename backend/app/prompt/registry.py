@@ -63,32 +63,50 @@ class PromptRegistry:
 
     def _seed_default_prompts(self) -> None:
         """若数据库为空，插入默认稳定 Prompt。"""
-        exists = self.conn.execute(
-            "SELECT COUNT(1) FROM prompt_registry WHERE prompt_id = 'fact_qa'"
-        ).fetchone()[0]
-        if exists:
-            return
-
-        self.upsert_prompt(
-            {
-                "prompt_id": "fact_qa",
-                "version": "1.0.0",
-                "scenario": "fact",
-                "template_system": "你是A股研究助手。输出必须可追溯，并避免确定性投资建议。",
-                "template_policy": "关键结论必须附引用；无法验证要明确不确定性。",
-                "template_task": "问题：{question}\n股票：{stock_codes}\n证据：{evidence}",
-                "variables_schema": {
-                    "type": "object",
-                    "properties": {
-                        "question": {"type": "string"},
-                        "stock_codes": {"type": "array"},
-                        "evidence": {"type": "string"},
-                    },
-                    "required": ["question", "stock_codes", "evidence"],
+        base_payload = {
+            "prompt_id": "fact_qa",
+            "version": "1.0.0",
+            "scenario": "fact",
+            "template_system": "你是A股研究助手。输出必须可追溯，并避免确定性投资建议。",
+            "template_policy": "关键结论必须附引用；无法验证要明确不确定性。",
+            "template_task": "问题：{question}\n股票：{stock_codes}\n证据：{evidence}",
+            "variables_schema": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "stock_codes": {"type": "array"},
+                    "evidence": {"type": "string"},
                 },
-                "status": "stable",
-            }
-        )
+                "required": ["question", "stock_codes", "evidence"],
+            },
+            "status": "stable",
+        }
+        candidate_payload = {
+            "prompt_id": "fact_qa",
+            "version": "1.1.0",
+            "scenario": "fact",
+            "template_system": "你是A股研究助手。必须输出证据链、时间戳和数据新鲜度提示。",
+            "template_policy": "关键结论附引用，明确不确定性；给出短中期观点并标记触发条件。",
+            "template_task": "问题：{question}\n股票：{stock_codes}\n证据：{evidence}\n请输出：结论、风险、观察指标。",
+            "variables_schema": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "stock_codes": {"type": "array"},
+                    "evidence": {"type": "string"},
+                },
+                "required": ["question", "stock_codes", "evidence"],
+            },
+            "status": "candidate",
+        }
+        if not self.conn.execute(
+            "SELECT 1 FROM prompt_registry WHERE prompt_id = 'fact_qa' AND version = '1.0.0' LIMIT 1"
+        ).fetchone():
+            self.upsert_prompt(base_payload)
+        if not self.conn.execute(
+            "SELECT 1 FROM prompt_registry WHERE prompt_id = 'fact_qa' AND version = '1.1.0' LIMIT 1"
+        ).fetchone():
+            self.upsert_prompt(candidate_payload)
 
     def upsert_prompt(self, payload: dict[str, Any]) -> None:
         """插入或更新一条 Prompt 版本。"""

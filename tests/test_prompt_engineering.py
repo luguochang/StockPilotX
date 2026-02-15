@@ -33,6 +33,7 @@ class PromptEngineeringTestCase(unittest.TestCase):
             self.assertEqual(meta_v["prompt_version"], "1.0.0")
             versions = registry.list_prompt_versions("fact_qa")
             self.assertTrue(any(v["version"] == "1.0.0" for v in versions))
+            self.assertTrue(any(v["version"] == "1.1.0" for v in versions))
             registry.close()
 
     def test_eval_service_contains_prompt_suite_metrics(self) -> None:

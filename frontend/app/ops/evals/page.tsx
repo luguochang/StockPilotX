@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Alert, Button, Card, Input, Space, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, Input, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
@@ -18,6 +18,7 @@ type RagCase = {
   mrr: number;
   ndcg_at_k: number;
 };
+type PromptVersion = { prompt_id: string; version: string; scenario: string; status: string };
 
 export default function OpsEvalsPage() {
   const [token, setToken] = useState("");
@@ -34,6 +35,9 @@ export default function OpsEvalsPage() {
   const [ragRaw, setRagRaw] = useState("");
   const [ragCases, setRagCases] = useState<RagCase[]>([]);
   const [promptCompareRaw, setPromptCompareRaw] = useState("");
+  const [promptVersions, setPromptVersions] = useState<PromptVersion[]>([]);
+  const [baseVersion, setBaseVersion] = useState("1.0.0");
+  const [candidateVersion, setCandidateVersion] = useState("1.1.0");
 
   async function parseOrThrow(resp: Response) {
     const body = await resp.json();
@@ -47,18 +51,20 @@ export default function OpsEvalsPage() {
     try {
       const headers: Record<string, string> = {};
       if (token.trim()) headers.Authorization = `Bearer ${token}`;
-      const [a, b, c, d, e] = await Promise.all([
+      const [a, b, c, d, e, f] = await Promise.all([
         fetch(`${API_BASE}/v1/ops/evals/history`, { headers }),
         fetch(`${API_BASE}/v1/ops/prompts/releases`, { headers }),
         fetch(`${API_BASE}/v1/ops/capabilities`),
         fetch(`${API_BASE}/v1/ops/agent/debate?stock_code=SH600000&question=${encodeURIComponent("请给出短中期观点")}`),
-        fetch(`${API_BASE}/v1/ops/rag/quality`)
+        fetch(`${API_BASE}/v1/ops/rag/quality`),
+        fetch(`${API_BASE}/v1/ops/prompts/fact_qa/versions`)
       ]);
       const evalData = await parseOrThrow(a);
       const releaseData = await parseOrThrow(b);
       const capabilityData = await parseOrThrow(c);
       const debateData = await parseOrThrow(d);
       const ragData = await parseOrThrow(e);
+      const versionData = await parseOrThrow(f);
       setEvals(JSON.stringify(evalData, null, 2));
       setReleases(JSON.stringify(releaseData, null, 2));
       setCapabilities((capabilityData?.capabilities ?? []) as CapabilityRow[]);
@@ -66,15 +72,16 @@ export default function OpsEvalsPage() {
       setDebateRaw(JSON.stringify(debateData, null, 2));
       setDebateOpinions((debateData?.opinions ?? []) as DebateOpinion[]);
       setRagRaw(JSON.stringify(ragData?.metrics ?? {}, null, 2));
-      setRagCases((ragData?.cases ?? []) as RagCase[]);
+      setRagCases((ragData?.offline?.cases ?? []) as RagCase[]);
+      setPromptVersions((versionData ?? []) as PromptVersion[]);
 
       const compareResp = await fetch(`${API_BASE}/v1/ops/prompts/compare`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt_id: "fact_qa",
-          base_version: "1.0.0",
-          candidate_version: "1.0.0",
+          base_version: baseVersion,
+          candidate_version: candidateVersion,
           variables: { question: "请分析SH600000", stock_codes: ["SH600000"], evidence: "source:cninfo" }
         })
       });
@@ -160,6 +167,21 @@ export default function OpsEvalsPage() {
       </Card>
 
       <Card className="premium-card" style={{ marginTop: 12 }} title="Prompt 版本对比回放">
+        <Space style={{ marginBottom: 8 }}>
+          <Select
+            style={{ minWidth: 160 }}
+            value={baseVersion}
+            onChange={setBaseVersion}
+            options={promptVersions.map((x) => ({ label: `${x.version} (${x.status})`, value: x.version }))}
+          />
+          <Select
+            style={{ minWidth: 160 }}
+            value={candidateVersion}
+            onChange={setCandidateVersion}
+            options={promptVersions.map((x) => ({ label: `${x.version} (${x.status})`, value: x.version }))}
+          />
+          <Button onClick={load}>重新对比</Button>
+        </Space>
         <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>{promptCompareRaw}</pre>
       </Card>
 

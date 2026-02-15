@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from backend.app.stock.universe_sync import AShareUniverseSyncService
@@ -265,6 +266,37 @@ class WebAppService:
         self.store.execute("UPDATE alert_event SET status='acked' WHERE id = ?", (alert_id,))
         self.store.execute("INSERT INTO alert_ack (alert_id, user_id) VALUES (?, ?)", (alert_id, me["user_id"]))
         return {"status": "ok", "alert_id": alert_id}
+
+    def rag_eval_add(self, *, query_text: str, positive_source_ids: list[str], predicted_source_ids: list[str]) -> None:
+        self.store.execute(
+            "INSERT INTO rag_eval_case (query_text, positive_source_ids, predicted_source_ids) VALUES (?, ?, ?)",
+            (
+                query_text,
+                json.dumps(positive_source_ids, ensure_ascii=False),
+                json.dumps(predicted_source_ids, ensure_ascii=False),
+            ),
+        )
+
+    def rag_eval_recent(self, limit: int = 200) -> list[dict[str, Any]]:
+        rows = self.store.query_all(
+            """
+            SELECT id, query_text, positive_source_ids, predicted_source_ids, created_at
+            FROM rag_eval_case
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        for row in rows:
+            try:
+                row["positive_source_ids"] = json.loads(row.get("positive_source_ids", "[]"))
+            except Exception:
+                row["positive_source_ids"] = []
+            try:
+                row["predicted_source_ids"] = json.loads(row.get("predicted_source_ids", "[]"))
+            except Exception:
+                row["predicted_source_ids"] = []
+        return rows
 
     def close(self) -> None:
         self.store.close()

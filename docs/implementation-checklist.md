@@ -222,3 +222,19 @@
   - key output: `build passed`
   - command: `cd frontend && npx tsc --noEmit`
   - key output: `typecheck passed`
+
+### 2026-02-15 (Round-D)
+- Completed:
+  - [PRM-REAL-001] Prompt 多版本链路落地：`fact_qa@1.0.0` 与 `fact_qa@1.1.0`，支持真实版本对比。
+  - [AGT-REAL-001] 多 Agent 辩论支持 `llm_parallel`（启用外部模型时）与规则回退双模式。
+  - [RAG-ONLINE-001] 增加线上 RAG 持续评测样本落库与 `offline+online` 聚合指标输出。
+  - [OPS-FRONT-002] `ops/evals` 页面接入版本选择式 prompt compare。
+- Evidence:
+  - command: `.\.venv\Scripts\python -m pytest -q tests/test_http_api.py tests/test_prompt_engineering.py tests/test_service.py`
+  - key output: `25 passed`
+  - command: `.\.venv\Scripts\python -m pytest -q`
+  - key output: `58 passed`
+  - command: `cd frontend && npm run build`
+  - key output: `build passed`
+  - command: `cd frontend && npx tsc --noEmit`
+  - key output: `typecheck passed`

@@ -312,12 +312,16 @@ def create_app() -> FastAPI:
         return svc.ops_prompt_compare(
             prompt_id=payload.get("prompt_id", "fact_qa"),
             base_version=payload.get("base_version", "1.0.0"),
-            candidate_version=payload.get("candidate_version", "1.0.0"),
+            candidate_version=payload.get("candidate_version", "1.1.0"),
             variables=payload.get(
                 "variables",
                 {"question": "请分析SH600000", "stock_codes": ["SH600000"], "evidence": "source:cninfo"},
             ),
         )
+
+    @app.get("/v1/ops/prompts/{prompt_id}/versions")
+    def ops_prompt_versions(prompt_id: str):
+        return svc.ops_prompt_versions(prompt_id)
 
     @app.post("/v1/scheduler/pause")
     def scheduler_pause(payload: dict, authorization: str | None = Header(default=None)):

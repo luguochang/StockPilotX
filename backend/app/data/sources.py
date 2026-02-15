@@ -41,7 +41,7 @@ class BaseHttpQuoteAdapter:
 
     source_id = "http"
     reliability_score = 0.8
-    timeout_sec = 1.5
+    timeout_sec = 0.5
 
     def _fetch_text(self, url: str, headers: dict[str, str] | None = None) -> str:
         req = Request(url=url, headers=headers or {"User-Agent": "StockPilotX/1.0"})
@@ -253,7 +253,7 @@ class QuoteService:
 class HistoryService:
     source_id = "eastmoney_history"
     reliability_score = 0.9
-    timeout_sec = 2.0
+    timeout_sec = 0.8
 
     def fetch_daily_bars(self, stock_code: str, beg: str = "20240101", end: str = "20500101", limit: int = 240) -> list[dict]:
         secid = _to_eastmoney_secid(stock_code)
@@ -309,7 +309,7 @@ class BaseLiveAnnouncementAdapter:
     source_id = "announcement"
     source_url = ""
     reliability_score = 0.95
-    timeout_sec = 1.2
+    timeout_sec = 0.4
 
     def _fetch_text(self, url: str) -> str:
         req = Request(url=url, headers={"User-Agent": "StockPilotX/1.0"})

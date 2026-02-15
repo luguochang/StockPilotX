@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
+import json
 import difflib
+from concurrent.futures import ThreadPoolExecutor
 import uuid
 from datetime import datetime, timezone
 from statistics import mean
@@ -178,6 +180,7 @@ class AShareAgentService:
                 "mode": state.mode,
             },
         )
+        self._record_rag_eval_case(req.question, state.evidence_pack, state.citations)
 
         resp = QueryResponse(
             trace_id=trace_id,
@@ -338,6 +341,41 @@ class AShareAgentService:
             "stocks": by_code,
             "citation_count": citation_coverage,
             "citation_avg_reliability": avg_score,
+        }
+
+    def _record_rag_eval_case(
+        self,
+        query_text: str,
+        evidence_pack: list[dict[str, Any]],
+        citations: list[dict[str, Any]],
+    ) -> None:
+        """记录线上查询样本，供 RAG 持续评测使用。"""
+        predicted = [str(x.get("source_id", "")) for x in evidence_pack[:5] if x.get("source_id")]
+        positive = [str(x.get("source_id", "")) for x in citations if x.get("source_id")]
+        # 保序去重
+        pred_u = list(dict.fromkeys(predicted))
+        pos_u = list(dict.fromkeys(positive))
+        if not query_text.strip() or not pred_u:
+            return
+        self.web.rag_eval_add(query_text=query_text, positive_source_ids=pos_u, predicted_source_ids=pred_u)
+
+    def _calc_retrieval_metrics_from_cases(self, cases: list[dict[str, Any]], k: int = 5) -> dict[str, float]:
+        if not cases:
+            return {"recall_at_k": 0.0, "mrr": 0.0, "ndcg_at_k": 0.0}
+        recalls: list[float] = []
+        mrrs: list[float] = []
+        ndcgs: list[float] = []
+        for case in cases:
+            positives = set(case.get("positive_source_ids", []))
+            pred = list(case.get("predicted_source_ids", []))[:k]
+            recalls.append(RetrievalEvaluator._recall_at_k(pred, positives))
+            mrrs.append(RetrievalEvaluator._mrr(pred, positives))
+            ndcgs.append(RetrievalEvaluator._ndcg_at_k(pred, positives, k))
+        n = max(1, len(cases))
+        return {
+            "recall_at_k": round(sum(recalls) / n, 4),
+            "mrr": round(sum(mrrs) / n, 4),
+            "ndcg_at_k": round(sum(ndcgs) / n, 4),
         }
 
     def _build_runtime_corpus(self, stock_codes: list[str]) -> list[RetrievalItem]:
@@ -771,6 +809,9 @@ class AShareAgentService:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def ops_prompt_versions(self, prompt_id: str) -> list[dict[str, Any]]:
+        return self.prompts.list_prompt_versions(prompt_id)
+
     def ops_capabilities(self) -> dict[str, Any]:
         return build_capability_snapshot(
             self.settings,
@@ -779,7 +820,7 @@ class AShareAgentService:
         )
 
     def ops_agent_debate(self, stock_code: str, question: str = "") -> dict[str, Any]:
-        """多 Agent 分歧分析：产品、量化、风控三方观点。"""
+        """多 Agent 分歧分析：优先使用真实大模型并行辩论，失败回退规则引擎。"""
         code = stock_code.upper().replace(".", "")
         if self._needs_quote_refresh(code):
             self.ingest_market_daily([code])
@@ -792,44 +833,15 @@ class AShareAgentService:
         pred = self.predict_run({"stock_codes": [code], "horizons": ["5d", "20d"]})
         horizon_map = {h["horizon"]: h for h in pred["results"][0]["horizons"]} if pred.get("results") else {}
 
-        pm_signal = "hold"
-        if trend.get("ma20_slope", 0.0) > 0 and float(quote.get("pct_change", 0.0)) > 0:
-            pm_signal = "buy"
-        elif trend.get("ma20_slope", 0.0) < 0:
-            pm_signal = "reduce"
-
         quant_20 = horizon_map.get("20d", {})
-        quant_signal = str(quant_20.get("signal", "hold")).replace("strong_", "")
-
-        risk_signal = "hold"
-        if trend.get("max_drawdown_60", 0.0) > 0.2 or trend.get("volatility_20", 0.0) > 0.025:
-            risk_signal = "reduce"
-        elif trend.get("volatility_20", 0.0) < 0.012 and trend.get("momentum_20", 0.0) > 0:
-            risk_signal = "buy"
-
-        opinions = [
-            {
-                "agent": "pm_agent",
-                "signal": pm_signal,
-                "confidence": 0.66,
-                "reason": f"基于趋势斜率与当日涨跌构建产品侧可解释观点，question={question or 'default'}",
-            },
-            {
-                "agent": "quant_agent",
-                "signal": quant_signal,
-                "confidence": float(quant_20.get("up_probability", 0.5)),
-                "reason": f"来自20日预测：{quant_20.get('rationale', '')}",
-            },
-            {
-                "agent": "risk_agent",
-                "signal": risk_signal,
-                "confidence": 0.72,
-                "reason": (
-                    f"回撤={trend.get('max_drawdown_60', 0.0):.4f}, 波动={trend.get('volatility_20', 0.0):.4f}, "
-                    f"动量={trend.get('momentum_20', 0.0):.4f}"
-                ),
-            },
-        ]
+        rule_opinions = self._build_rule_based_debate_opinions(question, trend, quote, quant_20)
+        opinions = rule_opinions
+        model_debate_mode = "rule_fallback"
+        if self.settings.llm_external_enabled and self.llm_gateway.providers:
+            llm_opinions = self._build_llm_debate_opinions(question, code, trend, quote, quant_20, rule_opinions)
+            if llm_opinions:
+                opinions = llm_opinions
+                model_debate_mode = "llm_parallel"
 
         bucket = {"buy": 0, "hold": 0, "reduce": 0}
         for x in opinions:
@@ -841,6 +853,7 @@ class AShareAgentService:
             "stock_code": code,
             "consensus_signal": consensus_signal,
             "disagreement_score": disagreement_score,
+            "debate_mode": model_debate_mode,
             "opinions": opinions,
             "market_snapshot": {
                 "price": quote.get("price"),
@@ -854,7 +867,7 @@ class AShareAgentService:
         dataset = default_retrieval_dataset()
         retriever = HybridRetriever(corpus=self._build_runtime_corpus([]))
         evaluator = RetrievalEvaluator(retriever)
-        metrics = evaluator.run(dataset, k=5)
+        offline_metrics = evaluator.run(dataset, k=5)
         cases: list[dict[str, Any]] = []
         for case in dataset:
             query = case["query"]
@@ -873,10 +886,17 @@ class AShareAgentService:
                     "ndcg_at_k": round(RetrievalEvaluator._ndcg_at_k(pred, positives, 5), 4),
                 }
             )
+        online_cases = self.web.rag_eval_recent(limit=200)
+        online_metrics = self._calc_retrieval_metrics_from_cases(online_cases, k=5)
+        merged_metrics = {
+            "recall_at_k": round((offline_metrics["recall_at_k"] + online_metrics["recall_at_k"]) / 2, 4),
+            "mrr": round((offline_metrics["mrr"] + online_metrics["mrr"]) / 2, 4),
+            "ndcg_at_k": round((offline_metrics["ndcg_at_k"] + online_metrics["ndcg_at_k"]) / 2, 4),
+        }
         return {
-            "metrics": metrics,
-            "dataset_size": len(dataset),
-            "cases": cases,
+            "metrics": merged_metrics,
+            "offline": {"dataset_size": len(dataset), "metrics": offline_metrics, "cases": cases},
+            "online": {"dataset_size": len(online_cases), "metrics": online_metrics, "cases": online_cases[:50]},
         }
 
     def ops_prompt_compare(
@@ -911,6 +931,129 @@ class AShareAgentService:
             },
             "diff_preview": diff_rows[:120],
         }
+
+    def _build_rule_based_debate_opinions(
+        self,
+        question: str,
+        trend: dict[str, Any],
+        quote: dict[str, Any],
+        quant_20: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        pm_signal = "hold"
+        if trend.get("ma20_slope", 0.0) > 0 and float(quote.get("pct_change", 0.0)) > 0:
+            pm_signal = "buy"
+        elif trend.get("ma20_slope", 0.0) < 0:
+            pm_signal = "reduce"
+
+        quant_signal = str(quant_20.get("signal", "hold")).replace("strong_", "")
+        risk_signal = "hold"
+        if trend.get("max_drawdown_60", 0.0) > 0.2 or trend.get("volatility_20", 0.0) > 0.025:
+            risk_signal = "reduce"
+        elif trend.get("volatility_20", 0.0) < 0.012 and trend.get("momentum_20", 0.0) > 0:
+            risk_signal = "buy"
+
+        return [
+            {
+                "agent": "pm_agent",
+                "signal": pm_signal,
+                "confidence": 0.66,
+                "reason": f"基于趋势斜率与当日涨跌构建产品侧可解释观点，question={question or 'default'}",
+            },
+            {
+                "agent": "quant_agent",
+                "signal": quant_signal,
+                "confidence": float(quant_20.get("up_probability", 0.5)),
+                "reason": f"来自20日预测：{quant_20.get('rationale', '')}",
+            },
+            {
+                "agent": "risk_agent",
+                "signal": risk_signal,
+                "confidence": 0.72,
+                "reason": (
+                    f"回撤={trend.get('max_drawdown_60', 0.0):.4f}, 波动={trend.get('volatility_20', 0.0):.4f}, "
+                    f"动量={trend.get('momentum_20', 0.0):.4f}"
+                ),
+            },
+        ]
+
+    def _build_llm_debate_opinions(
+        self,
+        question: str,
+        stock_code: str,
+        trend: dict[str, Any],
+        quote: dict[str, Any],
+        quant_20: dict[str, Any],
+        rule_defaults: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """并行调用真实模型生成多角色观点。"""
+        context = {
+            "question": question or "请给出短中期观点",
+            "stock_code": stock_code,
+            "quote": {"price": quote.get("price"), "pct_change": quote.get("pct_change")},
+            "trend": trend,
+            "quant_20": quant_20,
+        }
+        prompts = [
+            (
+                "pm_agent",
+                (
+                    "你是资深产品经理。请根据输入给出一个交易信号。"
+                    "严格返回 JSON: {\"signal\":\"buy|hold|reduce\",\"confidence\":0-1,\"reason\":\"...\"}\n"
+                    f"context={json.dumps(context, ensure_ascii=False)}"
+                ),
+            ),
+            (
+                "quant_agent",
+                (
+                    "你是量化研究负责人。请根据输入给出一个交易信号。"
+                    "严格返回 JSON: {\"signal\":\"buy|hold|reduce\",\"confidence\":0-1,\"reason\":\"...\"}\n"
+                    f"context={json.dumps(context, ensure_ascii=False)}"
+                ),
+            ),
+            (
+                "risk_agent",
+                (
+                    "你是风控负责人。请根据输入给出一个交易信号。"
+                    "严格返回 JSON: {\"signal\":\"buy|hold|reduce\",\"confidence\":0-1,\"reason\":\"...\"}\n"
+                    f"context={json.dumps(context, ensure_ascii=False)}"
+                ),
+            ),
+        ]
+
+        rule_map = {x["agent"]: x for x in rule_defaults}
+        outputs: list[dict[str, Any]] = []
+
+        def run_one(agent_name: str, prompt_text: str) -> dict[str, Any]:
+            fallback = rule_map.get(agent_name, {"signal": "hold", "confidence": 0.5, "reason": "rule default"})
+            state = AgentState(user_id="ops", question=question or "ops debate", stock_codes=[stock_code], trace_id=self.traces.new_trace())
+            try:
+                raw = self.llm_gateway.generate(state, prompt_text)
+                cleaned = raw.strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.strip("`")
+                    if cleaned.lower().startswith("json"):
+                        cleaned = cleaned[4:].strip()
+                obj = json.loads(cleaned)
+                signal = str(obj.get("signal", fallback["signal"])).lower()
+                if signal not in {"buy", "hold", "reduce"}:
+                    signal = str(fallback["signal"])
+                conf = float(obj.get("confidence", fallback["confidence"]))
+                conf = max(0.0, min(1.0, conf))
+                reason = str(obj.get("reason", fallback["reason"]))[:320]
+                return {"agent": agent_name, "signal": signal, "confidence": conf, "reason": reason}
+            except Exception:
+                return {
+                    "agent": agent_name,
+                    "signal": str(fallback["signal"]),
+                    "confidence": float(fallback["confidence"]),
+                    "reason": str(fallback["reason"]) + " | llm_fallback",
+                }
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(run_one, n, p) for n, p in prompts]
+            for f in futures:
+                outputs.append(f.result())
+        return outputs
 
     def alerts_list(self, token: str) -> list[dict[str, Any]]:
         return self.web.alerts_list(token)
@@ -950,4 +1093,6 @@ class AShareAgentService:
         self.memory.close()
         self.prompts.close()
         self.web.close()
+
+
 

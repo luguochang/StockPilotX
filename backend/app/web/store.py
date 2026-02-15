@@ -141,6 +141,14 @@ class WebStore:
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS rag_eval_case (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query_text TEXT NOT NULL,
+                positive_source_ids TEXT NOT NULL,
+                predicted_source_ids TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE INDEX IF NOT EXISTS idx_stock_universe_name ON stock_universe(stock_name);
             CREATE INDEX IF NOT EXISTS idx_stock_universe_exchange ON stock_universe(exchange);
             CREATE INDEX IF NOT EXISTS idx_stock_universe_tier ON stock_universe(market_tier);

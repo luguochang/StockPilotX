@@ -254,23 +254,30 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c1, 200)
         self.assertIn("opinions", debate)
         self.assertIn("disagreement_score", debate)
+        self.assertIn("debate_mode", debate)
 
         c2, rag = self._get("/v1/ops/rag/quality")
         self.assertEqual(c2, 200)
         self.assertIn("metrics", rag)
-        self.assertIn("cases", rag)
+        self.assertIn("offline", rag)
+        self.assertIn("online", rag)
 
         c3, comp = self._post(
             "/v1/ops/prompts/compare",
             {
                 "prompt_id": "fact_qa",
                 "base_version": "1.0.0",
-                "candidate_version": "1.0.0",
+                "candidate_version": "1.1.0",
                 "variables": {"question": "test", "stock_codes": ["SH600000"], "evidence": "source:cninfo"},
             },
         )
         self.assertEqual(c3, 200)
         self.assertIn("diff_summary", comp)
+
+        c4, versions = self._get("/v1/ops/prompts/fact_qa/versions")
+        self.assertEqual(c4, 200)
+        self.assertTrue(any(v.get("version") == "1.0.0" for v in versions))
+        self.assertTrue(any(v.get("version") == "1.1.0" for v in versions))
 
 
 if __name__ == "__main__":
