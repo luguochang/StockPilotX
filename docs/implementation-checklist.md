@@ -63,6 +63,7 @@
 | FRONT-001 | S4 | Next.js 前端最小闭环 | [x] | 支持 query/report/citations 展示 | 新建 `frontend/` Next.js 最小项目（query + answer + citations）；`tests/test_project_assets.py` 资产检查通过（2026-02-13） |
 | FRONT-003 | S4,S12 | 首页导航化与 DeepThink 独立页面拆分 | [x] | 首页仅展示系统介绍与模块跳转，深度分析迁移到 `/deep-think` | 新增 `frontend/app/deep-think/page.tsx`，重构 `frontend/app/page.tsx` 为导航首页；更新 `frontend/app/layout.tsx` 导航；`npm run build` 通过（2026-02-15） |
 | FRONT-004 | S14,S15 | 前端构建与类型检查稳定化（Round-G） | [x] | 本轮改造后 `build` 与 `tsc` 均通过 | 更新 `frontend/tsconfig.json` 并完成 `npm run build`、`npx tsc --noEmit`（2026-02-15） |
+| FRONT-005 | S4,S12,S15,S17.7 | DeepThink 轮次可视化与治理看板（Round-H） | [x] | `/deep-think` 可展示 round timeline、conflict_sources 可视化、budget usage、replan/stop reason 与 SSE 回放 | 增强 `frontend/app/deep-think/page.tsx` 并接入 `/v1/deep-think/*` + `/v1/a2a/tasks`；`pytest` 63/63、`npm run build`、`npx tsc --noEmit` 通过（2026-02-15） |
 | OPS-001 | S14,S15 | 上线前工程化检查（SLO/Runbook/回滚） | [x] | 检查项完成并可审计 | 新增 `docs/ops-runbook.md`（SLO、告警、回滚、发布前检查）；`tests/test_project_assets.py` 校验存在（2026-02-13） |
 
 ## 4.1 完整 Web 应用扩展清单（新增）
@@ -271,6 +272,7 @@
   - key output: `27 passed`
   - command: `.\.venv\Scripts\python -m pytest -q`
   - key output: `63 passed`
+
   - command: `cd frontend && npm run build`
   - key output: `build passed`
   - command: `cd frontend && npx tsc --noEmit`
@@ -288,3 +290,14 @@
   - key output: `typecheck passed`
   - command: `.\.venv\Scripts\python -m pytest -q`
   - key output: `63 passed`
+### 2026-02-15 (Round-H)
+- Completed:
+  - [FRONT-005] DeepThink 治理看板落地：`/deep-think` 新增 round timeline、conflict_sources 可视化、budget usage、replan/stop reason、SSE 回放。
+  - [GOV-004] 本轮交付文档化：新增 `docs/rounds/2026-02-15/round-H-deepthink-round-visualization.md` 与专栏记录 `docs/agent-column/12-Round-H-DeepThink轮次可视化与治理看板实现记录.md`。
+- Evidence:
+  - command: `.\.venv\Scripts\python -m pytest -q`
+  - key output: `63 passed in 28.77s`
+  - command: `cd frontend && npm run build`
+  - key output: `build passed (route /deep-think generated)`
+  - command: `cd frontend && npx tsc --noEmit`
+  - key output: `typecheck passed`

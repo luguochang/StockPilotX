@@ -79,3 +79,10 @@
 - Added dedicated route `frontend/app/deep-think/page.tsx` and updated top nav in `frontend/app/layout.tsx`.
 - Kept existing analysis capability intact by migrating previous workspace page to the new route.
 - Validation: frontend build passed; frontend typecheck passed; backend regression remained green (63 passed).
+
+## Round-H Update (2026-02-15)
+- Added DeepThink governance panel in `/deep-think` for round-level execution and inspection.
+- Visualized core governance signals: `task_graph`, `conflict_sources`, `budget_usage`, `replan_triggered`, `stop_reason`.
+- Added frontend A2A dispatch action (`/v1/a2a/tasks`) to trigger supervisor-led next round from UI.
+- Added DeepThink stream replay panel for SSE event review and latest round trace visibility.
+- Validation kept green: backend `63 passed`; frontend build passed; frontend typecheck passed.

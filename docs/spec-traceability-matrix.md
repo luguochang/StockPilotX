@@ -83,6 +83,15 @@
 | S15 | 交付可验证（build + tsc + regression） | FRONT-004 | [x] |
 | S16 | 实施治理与交付记录完整 | GOV-004 | [x] |
 
+## 3.5 DeepThink 治理看板可视化映射（2026-02-15 Round-H）
+| Spec Ref | 要求摘要 | Task ID | 状态 |
+|---|---|---|---|
+| S4 | 前端分层与深度分析视图职责明确 | FRONT-005 | [x] |
+| S12 | 已有 DeepThink/A2A 接口在前端可观测、可操作 | FRONT-005 | [x] |
+| S15 | 可验证交付（build + tsc + backend regression） | FRONT-005 | [x] |
+| S17.7 | Deep Agents 多轮治理信号（conflict/budget/replan）可视化 | FRONT-005 | [x] |
+| S16 | 实施治理文档与轮次记录完整可追溯 | GOV-004 | [x] |
+
 ## 4. Prompt 文档映射
 | Spec Ref | 要求摘要 | Task ID | 状态 |
 |---|---|---|---|

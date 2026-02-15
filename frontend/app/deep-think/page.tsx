@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import ReactECharts from "echarts-for-react";
-import { Alert, Button, Card, Col, Input, List, Row, Space, Statistic, Table, Tag, Timeline, Typography } from "antd";
+import { Alert, Button, Card, Col, Input, List, Progress, Row, Space, Statistic, Table, Tag, Timeline, Typography } from "antd";
 import MediaCarousel from "../components/MediaCarousel";
 import StockSelectorModal from "../components/StockSelectorModal";
 
@@ -50,6 +50,56 @@ type MarketOverview = {
   trend: { ma20?: number; ma60?: number; momentum_20?: number; volatility_20?: number; max_drawdown_60?: number };
 };
 type FactorSnapshot = Record<string, number>;
+type DeepThinkTask = { task_id: string; agent: string; title: string; priority: string };
+type DeepThinkOpinion = {
+  agent_id: string;
+  signal: "buy" | "hold" | "reduce";
+  confidence: number;
+  reason: string;
+  evidence_ids: string[];
+  risk_tags: string[];
+  created_at: string;
+};
+type DeepThinkBudgetUsage = {
+  limit: { token_budget: number; time_budget_ms: number; tool_call_budget: number };
+  used: { token_used: number; time_used_ms: number; tool_calls_used: number };
+  remaining: { token_budget: number; time_budget_ms: number; tool_call_budget: number };
+  warn: boolean;
+  exceeded: boolean;
+};
+type DeepThinkRound = {
+  round_id: string;
+  session_id: string;
+  round_no: number;
+  status: string;
+  consensus_signal: string;
+  disagreement_score: number;
+  conflict_sources: string[];
+  counter_view: string;
+  task_graph: DeepThinkTask[];
+  replan_triggered: boolean;
+  stop_reason: string;
+  budget_usage: DeepThinkBudgetUsage;
+  created_at: string;
+  opinions: DeepThinkOpinion[];
+};
+type DeepThinkSession = {
+  session_id: string;
+  user_id: string;
+  question: string;
+  stock_codes: string[];
+  agent_profile: string[];
+  max_rounds: number;
+  current_round: number;
+  mode: string;
+  status: string;
+  trace_id: string;
+  created_at: string;
+  updated_at: string;
+  budget: { token_budget: number; time_budget_ms: number; tool_call_budget: number };
+  rounds: DeepThinkRound[];
+};
+type DeepThinkStreamEvent = { event: string; data: Record<string, any>; emitted_at: string };
 
 function CountUp({ value, suffix = "" }: { value: number; suffix?: string }) {
   const [display, setDisplay] = useState(0);
@@ -97,6 +147,57 @@ export default function DeepThinkPage() {
   const [activeModel, setActiveModel] = useState("");
   const [activeApiStyle, setActiveApiStyle] = useState("");
   const [analysisBrief, setAnalysisBrief] = useState<AnalysisBrief | null>(null);
+  const [deepSession, setDeepSession] = useState<DeepThinkSession | null>(null);
+  const [deepLoading, setDeepLoading] = useState(false);
+  const [deepStreaming, setDeepStreaming] = useState(false);
+  const [deepError, setDeepError] = useState("");
+  const [deepStreamEvents, setDeepStreamEvents] = useState<DeepThinkStreamEvent[]>([]);
+  const [deepLastA2ATask, setDeepLastA2ATask] = useState<{ task_id: string; status: string; agent_id: string } | null>(null);
+
+  function formatDeepPercent(used: number, limit: number): number {
+    const safeLimit = Number(limit) <= 0 ? 1 : Number(limit);
+    const value = (Number(used) / safeLimit) * 100;
+    return Math.max(0, Math.min(100, Number(value.toFixed(1))));
+  }
+
+  function appendDeepEvent(event: string, data: Record<string, any>) {
+    setDeepStreamEvents((prev) => {
+      const next = [...prev, { event, data, emitted_at: new Date().toISOString() }];
+      return next.slice(-80);
+    });
+  }
+
+  async function readSSEAndConsume(resp: Response, onEvent: (event: string, payload: Record<string, any>) => void) {
+    if (!resp.body) throw new Error("浏览器不支持流式响应读取");
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      while (true) {
+        const splitAt = buffer.indexOf("\n\n");
+        if (splitAt < 0) break;
+        const rawEvent = buffer.slice(0, splitAt);
+        buffer = buffer.slice(splitAt + 2);
+        const lines = rawEvent.split("\n");
+        let eventName = "message";
+        const dataLines: string[] = [];
+        for (const line of lines) {
+          if (line.startsWith("event:")) eventName = line.slice(6).trim();
+          if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+        }
+        if (!dataLines.length) continue;
+        try {
+          const payload = JSON.parse(dataLines.join("\n"));
+          onEvent(eventName, payload as Record<string, any>);
+        } catch {
+          // ignore malformed event payload
+        }
+      }
+    }
+  }
 
   async function ensureStockInUniverse(codes: string[]) {
     for (const code of codes) {
@@ -266,6 +367,129 @@ export default function DeepThinkPage() {
     }
   }
 
+  async function createDeepThinkSessionRequest(): Promise<DeepThinkSession> {
+    const resp = await fetch(`${API_BASE}/v1/deep-think/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: "frontend-deepthink-user",
+        question,
+        stock_codes: [stockCode],
+        max_rounds: 3
+      })
+    });
+    const body = await resp.json();
+    if (!resp.ok) {
+      const detail = typeof body?.detail === "string" ? body.detail : body?.error ?? `HTTP ${resp.status}`;
+      throw new Error(String(detail));
+    }
+    return body as DeepThinkSession;
+  }
+
+  async function startDeepThinkSession() {
+    setDeepLoading(true);
+    setDeepError("");
+    try {
+      await ensureStockInUniverse([stockCode]);
+      const created = await createDeepThinkSessionRequest();
+      setDeepSession(created);
+      setDeepLastA2ATask(null);
+      setDeepStreamEvents([]);
+    } catch (e) {
+      setDeepError(e instanceof Error ? e.message : "创建 DeepThink 会话失败");
+    } finally {
+      setDeepLoading(false);
+    }
+  }
+
+  async function refreshDeepThinkSession() {
+    if (!deepSession?.session_id) return;
+    setDeepLoading(true);
+    setDeepError("");
+    try {
+      const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${deepSession.session_id}`);
+      const body = await resp.json();
+      if (!resp.ok) throw new Error(body?.detail ?? `HTTP ${resp.status}`);
+      setDeepSession(body as DeepThinkSession);
+    } catch (e) {
+      setDeepError(e instanceof Error ? e.message : "刷新 DeepThink 会话失败");
+    } finally {
+      setDeepLoading(false);
+    }
+  }
+
+  async function replayDeepThinkStream(sessionId: string) {
+    setDeepStreaming(true);
+    setDeepError("");
+    try {
+      const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${sessionId}/stream`);
+      if (!resp.ok) {
+        const detail = await resp.text();
+        throw new Error(detail || `HTTP ${resp.status}`);
+      }
+      await readSSEAndConsume(resp, (eventName, payload) => appendDeepEvent(eventName, payload));
+    } catch (e) {
+      setDeepError(e instanceof Error ? e.message : "回放 DeepThink 事件流失败");
+    } finally {
+      setDeepStreaming(false);
+    }
+  }
+
+  async function runDeepThinkRound() {
+    setDeepLoading(true);
+    setDeepError("");
+    try {
+      await ensureStockInUniverse([stockCode]);
+      const session = deepSession ?? (await createDeepThinkSessionRequest());
+      const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${session.session_id}/rounds`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, stock_codes: [stockCode] })
+      });
+      const body = await resp.json();
+      if (!resp.ok) throw new Error(body?.detail ?? `HTTP ${resp.status}`);
+      setDeepSession(body as DeepThinkSession);
+      await replayDeepThinkStream(session.session_id);
+    } catch (e) {
+      setDeepError(e instanceof Error ? e.message : "执行 DeepThink 下一轮失败");
+    } finally {
+      setDeepLoading(false);
+    }
+  }
+
+  async function runDeepThinkRoundViaA2A() {
+    setDeepLoading(true);
+    setDeepError("");
+    try {
+      await ensureStockInUniverse([stockCode]);
+      const session = deepSession ?? (await createDeepThinkSessionRequest());
+      const resp = await fetch(`${API_BASE}/v1/a2a/tasks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agent_id: "supervisor_agent",
+          session_id: session.session_id,
+          task_type: "deep_round",
+          question
+        })
+      });
+      const body = await resp.json();
+      if (!resp.ok) throw new Error(body?.detail ?? body?.error ?? `HTTP ${resp.status}`);
+      const snapshot = body?.result?.payload_result?.deep_think_snapshot;
+      if (snapshot?.session_id) setDeepSession(snapshot as DeepThinkSession);
+      setDeepLastA2ATask({
+        task_id: String(body?.task_id ?? ""),
+        status: String(body?.status ?? "unknown"),
+        agent_id: String(body?.agent_id ?? "supervisor_agent")
+      });
+      await replayDeepThinkStream(session.session_id);
+    } catch (e) {
+      setDeepError(e instanceof Error ? e.message : "通过 A2A 执行 DeepThink 轮次失败");
+    } finally {
+      setDeepLoading(false);
+    }
+  }
+
   const trendOption = useMemo(() => {
     const bars = overview?.history ?? [];
     return {
@@ -339,6 +563,95 @@ export default function DeepThinkPage() {
   const factorRows = Object.entries(factorData ?? {})
     .slice(0, 16)
     .map(([k, v]) => ({ key: k, factor: k, value: Number(v).toFixed(6) }));
+  const deepRounds = deepSession?.rounds ?? [];
+  const latestDeepRound = deepRounds.length ? deepRounds[deepRounds.length - 1] : null;
+  const latestBudget = latestDeepRound?.budget_usage;
+  const deepTimelineItems = deepRounds.map((round) => ({
+    color: round.replan_triggered ? "orange" : round.stop_reason ? "red" : "blue",
+    children: (
+      <Space direction="vertical" size={2}>
+        <Text style={{ color: "#0f172a" }}>
+          第 {round.round_no} 轮 | 共识={round.consensus_signal} | 分歧={Number(round.disagreement_score).toFixed(3)}
+        </Text>
+        <Space size={6} wrap>
+          {round.replan_triggered ? <Tag color="orange">replan_triggered</Tag> : null}
+          {round.stop_reason ? <Tag color="red">{round.stop_reason}</Tag> : null}
+          {(round.conflict_sources ?? []).map((src) => (
+            <Tag key={`${round.round_id}-${src}`} color="gold">
+              {src}
+            </Tag>
+          ))}
+        </Space>
+      </Space>
+    )
+  }));
+  const deepConflictOption = useMemo(() => {
+    const rounds = deepSession?.rounds ?? [];
+    return {
+      grid: { top: 24, left: 44, right: 16, bottom: 30 },
+      tooltip: { trigger: "axis" },
+      legend: { data: ["分歧得分", "冲突源数量"], top: 0, textStyle: { color: "#475569", fontSize: 12 } },
+      xAxis: {
+        type: "category",
+        data: rounds.map((x) => `R${x.round_no}`),
+        axisLabel: { color: "#475569" },
+        axisLine: { lineStyle: { color: "rgba(100,116,139,0.28)" } }
+      },
+      yAxis: [
+        {
+          type: "value",
+          min: 0,
+          max: 1,
+          axisLabel: { color: "#475569" },
+          splitLine: { lineStyle: { color: "rgba(100,116,139,0.16)" } }
+        },
+        {
+          type: "value",
+          min: 0,
+          axisLabel: { color: "#64748b" },
+          splitLine: { show: false }
+        }
+      ],
+      series: [
+        {
+          name: "分歧得分",
+          type: "line",
+          smooth: true,
+          yAxisIndex: 0,
+          data: rounds.map((x) => Number(x.disagreement_score ?? 0)),
+          lineStyle: { width: 2, color: "#2563eb" },
+          showSymbol: true,
+          symbolSize: 8
+        },
+        {
+          name: "冲突源数量",
+          type: "bar",
+          yAxisIndex: 1,
+          data: rounds.map((x) => Number((x.conflict_sources ?? []).length)),
+          itemStyle: { color: "rgba(249, 115, 22, 0.7)" },
+          barMaxWidth: 28
+        }
+      ]
+    };
+  }, [deepSession]);
+  const deepTaskRows = (latestDeepRound?.task_graph ?? []).map((task) => ({
+    key: task.task_id,
+    task_id: task.task_id,
+    agent: task.agent,
+    title: task.title,
+    priority: task.priority
+  }));
+  const deepOpinionRows = (latestDeepRound?.opinions ?? []).map((opinion) => ({
+    key: `${opinion.agent_id}-${opinion.created_at}-${opinion.signal}`,
+    agent_id: opinion.agent_id,
+    signal: opinion.signal,
+    confidence: Number(opinion.confidence ?? 0),
+    risk_tags: (opinion.risk_tags ?? []).join(", "),
+    reason: opinion.reason
+  }));
+  const deepTokenPercent = latestBudget ? formatDeepPercent(latestBudget.used.token_used, latestBudget.limit.token_budget) : 0;
+  const deepTimePercent = latestBudget ? formatDeepPercent(latestBudget.used.time_used_ms, latestBudget.limit.time_budget_ms) : 0;
+  const deepToolPercent = latestBudget ? formatDeepPercent(latestBudget.used.tool_calls_used, latestBudget.limit.tool_call_budget) : 0;
 
   return (
     <main className="container">
@@ -564,6 +877,171 @@ export default function DeepThinkPage() {
                 </Space>
               </Card>
             ) : null}
+          </Col>
+        </Row>
+      </motion.section>
+
+      <motion.section
+        initial={{ opacity: 0, y: 18 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true, amount: 0.2 }}
+        transition={{ duration: 0.45 }}
+        style={{ marginTop: 8 }}
+      >
+        <Row gutter={[14, 14]}>
+          <Col xs={24} xl={14}>
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>DeepThink 轮次控制台</span>}>
+              <Space direction="vertical" style={{ width: "100%" }}>
+                <Text style={{ color: "#475569" }}>
+                  基于后端 `/v1/deep-think/*` 接口按轮执行，展示 task graph、冲突源、预算消耗和重规划信号。
+                </Text>
+                <Space wrap>
+                  <Button onClick={startDeepThinkSession} loading={deepLoading}>
+                    新建会话
+                  </Button>
+                  <Button type="primary" onClick={runDeepThinkRound} loading={deepLoading}>
+                    执行下一轮
+                  </Button>
+                  <Button onClick={runDeepThinkRoundViaA2A} loading={deepLoading}>
+                    A2A派发下一轮
+                  </Button>
+                  <Button onClick={refreshDeepThinkSession} disabled={!deepSession?.session_id || deepLoading}>
+                    刷新会话
+                  </Button>
+                  <Button onClick={() => replayDeepThinkStream(deepSession?.session_id ?? "")} disabled={!deepSession?.session_id} loading={deepStreaming}>
+                    回放最新轮次流
+                  </Button>
+                </Space>
+                <Space wrap>
+                  <Tag color={deepSession ? "blue" : "default"}>session: {deepSession?.session_id ?? "未创建"}</Tag>
+                  <Tag color={deepSession?.status === "completed" ? "green" : "processing"}>status: {deepSession?.status ?? "idle"}</Tag>
+                  <Tag>round: {deepSession?.current_round ?? 0}/{deepSession?.max_rounds ?? 0}</Tag>
+                  {latestDeepRound?.replan_triggered ? <Tag color="orange">replan_triggered</Tag> : null}
+                  {latestDeepRound?.stop_reason ? <Tag color="red">{latestDeepRound.stop_reason}</Tag> : null}
+                </Space>
+                {deepLastA2ATask ? (
+                  <Space wrap>
+                    <Tag color="cyan">A2A Task: {deepLastA2ATask.task_id}</Tag>
+                    <Tag color={deepLastA2ATask.status === "completed" ? "green" : "gold"}>A2A Status: {deepLastA2ATask.status}</Tag>
+                    <Tag>A2A Agent: {deepLastA2ATask.agent_id}</Tag>
+                  </Space>
+                ) : null}
+                {deepError ? <Alert message={deepError} type="error" showIcon /> : null}
+              </Space>
+            </Card>
+
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>Round Timeline</span>} style={{ marginTop: 12 }}>
+              {deepTimelineItems.length ? (
+                <Timeline items={deepTimelineItems} />
+              ) : (
+                <Text style={{ color: "#64748b" }}>尚未执行 DeepThink 轮次。可先点击「新建会话」再执行。</Text>
+              )}
+            </Card>
+
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>最新轮次 Task Graph</span>} style={{ marginTop: 12 }}>
+              <Table
+                size="small"
+                pagination={false}
+                locale={{ emptyText: "无任务图数据" }}
+                dataSource={deepTaskRows}
+                columns={[
+                  { title: "Task ID", dataIndex: "task_id", key: "task_id", width: 110 },
+                  { title: "Agent", dataIndex: "agent", key: "agent", width: 130 },
+                  { title: "Title", dataIndex: "title", key: "title" },
+                  {
+                    title: "Priority",
+                    dataIndex: "priority",
+                    key: "priority",
+                    width: 100,
+                    render: (v: string) => <Tag color={v === "high" ? "red" : v === "medium" ? "gold" : "blue"}>{v}</Tag>
+                  }
+                ]}
+              />
+            </Card>
+          </Col>
+
+          <Col xs={24} xl={10}>
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>预算使用与剩余</span>}>
+              {latestBudget ? (
+                <Space direction="vertical" style={{ width: "100%" }} size={10}>
+                  <div>
+                    <Text style={{ color: "#334155" }}>Token: {latestBudget.used.token_used} / {latestBudget.limit.token_budget}</Text>
+                    <Progress percent={deepTokenPercent} status={latestBudget.exceeded ? "exception" : latestBudget.warn ? "active" : "normal"} />
+                  </div>
+                  <div>
+                    <Text style={{ color: "#334155" }}>Time(ms): {latestBudget.used.time_used_ms} / {latestBudget.limit.time_budget_ms}</Text>
+                    <Progress percent={deepTimePercent} status={latestBudget.exceeded ? "exception" : latestBudget.warn ? "active" : "normal"} />
+                  </div>
+                  <div>
+                    <Text style={{ color: "#334155" }}>Tool Calls: {latestBudget.used.tool_calls_used} / {latestBudget.limit.tool_call_budget}</Text>
+                    <Progress percent={deepToolPercent} status={latestBudget.exceeded ? "exception" : latestBudget.warn ? "active" : "normal"} />
+                  </div>
+                  <Space wrap>
+                    <Tag color={latestBudget.warn ? "gold" : "green"}>warn: {String(latestBudget.warn)}</Tag>
+                    <Tag color={latestBudget.exceeded ? "red" : "green"}>exceeded: {String(latestBudget.exceeded)}</Tag>
+                  </Space>
+                </Space>
+              ) : (
+                <Text style={{ color: "#64748b" }}>执行轮次后展示预算治理指标。</Text>
+              )}
+            </Card>
+
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>冲突源可视化</span>} style={{ marginTop: 12 }}>
+              <ReactECharts option={deepConflictOption} style={{ height: 240 }} />
+              <Space wrap>
+                {(latestDeepRound?.conflict_sources ?? []).map((src) => (
+                  <Tag key={src} color="orange">{src}</Tag>
+                ))}
+                {!(latestDeepRound?.conflict_sources ?? []).length ? <Tag>暂无冲突源</Tag> : null}
+              </Space>
+            </Card>
+
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>最新轮次 Agent 观点</span>} style={{ marginTop: 12 }}>
+              <Table
+                size="small"
+                pagination={false}
+                locale={{ emptyText: "暂无观点数据" }}
+                dataSource={deepOpinionRows}
+                columns={[
+                  { title: "Agent", dataIndex: "agent_id", key: "agent_id", width: 126 },
+                  {
+                    title: "Signal",
+                    dataIndex: "signal",
+                    key: "signal",
+                    width: 92,
+                    render: (v: string) => <Tag color={v === "buy" ? "green" : v === "reduce" ? "red" : "blue"}>{v}</Tag>
+                  },
+                  {
+                    title: "Confidence",
+                    dataIndex: "confidence",
+                    key: "confidence",
+                    width: 104,
+                    render: (v: number) => v.toFixed(3)
+                  }
+                ]}
+              />
+            </Card>
+
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>SSE 回放事件</span>} style={{ marginTop: 12 }}>
+              <List
+                size="small"
+                locale={{ emptyText: "暂无流事件记录" }}
+                dataSource={[...deepStreamEvents].reverse().slice(0, 16)}
+                renderItem={(item) => (
+                  <List.Item>
+                    <Space direction="vertical" size={1}>
+                      <Space>
+                        <Tag color="processing">{item.event}</Tag>
+                        <Text style={{ color: "#64748b" }}>{item.emitted_at}</Text>
+                      </Space>
+                      <Text style={{ color: "#475569" }}>
+                        {JSON.stringify(item.data).slice(0, 180)}
+                      </Text>
+                    </Space>
+                  </List.Item>
+                )}
+              />
+            </Card>
           </Col>
         </Row>
       </motion.section>

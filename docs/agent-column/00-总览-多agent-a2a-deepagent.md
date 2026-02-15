@@ -1,45 +1,46 @@
-# 总览：多 Agent、A2A、DeepAgent 的分层方法
+# 总览：多 Agent、A2A 与 DeepAgent 分层方法
 
 日期：2026-02-15  
 适用项目：`StockPilotX`
 
-## 1. 这套专栏要解决什么
-- 把“多 Agent”“A2A”“DeepAgent”从概念口号变成可落地工程分层。
-- 解释当前系统已经做到什么、还缺什么、下一步怎么升级。
-- 给后续编码提供决策完备规范，减少“边做边猜”。
+## 1. 专栏目标
+- 把“多 Agent / A2A / DeepAgent”从概念说明转成可执行工程方案。
+- 明确当前系统已经做到什么、还缺什么、下一步怎么演进。
+- 为后续研发提供一致术语和决策框架，减少重复讨论。
 
-## 2. 三层架构（建议作为专栏主线）
-- 编排层（Orchestration）：LangGraph 负责节点状态机、分支、并行、恢复。
-- 协议层（Interoperability）：A2A 负责 agent 与 agent 之间跨系统通信标准。
-- 认知层（DeepAgent）：Planner + Subagent + Memory + Tool Budget 的深度任务求解。
+## 2. 三层方法
+- 编排层（Orchestration）：以 LangGraph/Workflow 组织状态、节点和控制流。
+- 协议层（Interoperability）：以 A2A 统一 agent 间任务派发、状态回传和可观测结构。
+- 认知层（DeepAgent）：以 planner/subagent/memory/budget 进行多轮深度求解与治理。
 
 ## 3. 当前项目结论（简版）
-- 已实现“单服务多角色编排”：`backend/app/agents/workflow.py`
-- 已实现“并行辩论（可选 LLM）”：`backend/app/service.py`
-- 已实现“LangGraph 运行时可切换”：`backend/app/agents/langgraph_runtime.py`
-- 尚未实现“严格 A2A 协议互联”（当前没有独立 A2A 网关与 agent card）
+- 已实现同进程多角色编排：`backend/app/agents/workflow.py`
+- 已实现可选 LLM 并行辩论与回退：`backend/app/service.py`
+- 已实现运行时切换（langgraph/direct）：`backend/app/agents/langgraph_runtime.py`
+- 尚未实现跨进程或跨服务的标准 A2A 互联网关（当前为内部 A2A 适配层）
 
-## 4. 读者最容易混淆的点
-- 多 Agent 编排 != A2A。
-- 并行检索 != DeepAgent 全流程。
-- LLM 多角色回答 != 多代理协作协议。
+## 4. 常见误区
+- 多 Agent 编排 ≠ A2A 协议互联
+- 并行观点生成 ≠ DeepAgent 全流程治理
+- 多角色回复 ≠ 多智能体自治协作
 
-## 5. 本专栏目录
-1. 现状审计：StockPilotX 的多 Agent 与 Deep 实现证据
-2. A2A 协议：定义、状态机、在本项目的接入边界
-3. 多 Agent 架构模式：监督者、网络、分层团队
-4. DeepAgent 工程设计：planner/subagent/memory/tool budget
-5. Deep Think 接口规范：会话、轮次、流式事件、仲裁
-6. 评测体系：轨迹质量 + 结果质量 + RAG 质量
-7. 中间件与治理：hook、权限、预算、合规、观测
-8. 实施路线图：从当前系统升级到专业版本
-9. Round-E 实现记录：DeepThink + Internal A2A MVP 落地证据
-10. Round-F 实现记录：DeepThink Planner + Budget + Replan 落地证据
-11. Round-G 实现记录：首页导航化与 DeepThink 独立页面落地证据
+## 5. 专栏目录
+1. 现状审计：StockPilotX 多 Agent 与 Deep 实现证据  
+2. A2A 协议：定义、状态机与项目接入边界  
+3. 多 Agent 架构模式：监督者网络与分层团队  
+4. DeepAgent 设计：planner/subagent/memory/tool budget  
+5. DeepThink 接口规范：会话、轮次、流式事件与裁决  
+6. 评测体系：轨迹质量 + 结果质量 + RAG 质量  
+7. 中间件治理：权限、预算、合规、观测  
+8. 演进路线图：从当前实现到专业版  
+9. Round-E：DeepThink + Internal A2A MVP 实现记录  
+10. Round-F：DeepThink Planner + Budget + Replan 实现记录  
+11. Round-G：首页导航化与 DeepThink 独立页面实现记录  
+12. Round-H：DeepThink 轮次可视化与治理看板实现记录
 
-## 6. 关键参考
-- A2A 规范：https://a2aproject.github.io/A2A/specification/
-- A2A 开发文档：https://a2aproject.github.io/A2A/dev/
-- LangChain Deep Agents：https://docs.langchain.com/oss/python/deepagents/overview
-- LangGraph 多 Agent（网络）：https://langchain-ai.github.io/langgraph/tutorials/multi_agent/multi-agent-collaboration/
-- LangGraph 多 Agent（分层团队）：https://langchain-ai.github.io/langgraph/tutorials/multi_agent/hierarchical_agent_teams/
+## 6. 参考资料
+- A2A Specification: https://a2aproject.github.io/A2A/specification/
+- A2A Developer Docs: https://a2aproject.github.io/A2A/dev/
+- LangChain Deep Agents: https://docs.langchain.com/oss/python/deepagents/overview
+- LangGraph Multi-Agent Collaboration: https://langchain-ai.github.io/langgraph/tutorials/multi_agent/multi-agent-collaboration/
+- LangGraph Hierarchical Agent Teams: https://langchain-ai.github.io/langgraph/tutorials/multi_agent/hierarchical_agent_teams/
