@@ -1,6 +1,8 @@
 # Summaries Index
 
 ## DeepAgent
+- `docs/summaries/deepagent/README.md`
+- `docs/summaries/deepagent/2026-02-15/README.md`
 - `docs/summaries/deepagent/2026-02-15/deepagent-implementation-summary-2026-02-15.md`
 - `docs/summaries/deepagent/2026-02-15/deepagent-summary-business-2026-02-15.md`
 - `docs/summaries/deepagent/2026-02-15/deepagent-summary-tech-2026-02-15.md`

@@ -5,6 +5,7 @@ Store optimization iteration notes grouped by date.
 
 ## Current Date Buckets
 - `docs/optimization/2026-02-15/`
+- `docs/optimization/2026-02-15/README.md`
 
 ## Add New Optimization Note
 - Path format: `docs/optimization/YYYY-MM-DD/optimization-iteration-YYYY-MM-DD-<topic>.md`.

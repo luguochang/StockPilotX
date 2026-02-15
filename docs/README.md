@@ -45,7 +45,12 @@ This directory keeps project documentation organized by **artifact type** and **
   - `docs/rounds/2026-02-15/`
 - Summaries:
   - `docs/summaries/README.md`
+  - `docs/summaries/deepagent/README.md`
   - `docs/summaries/deepagent/2026-02-15/`
+- Agent column:
+  - `docs/agent-column/README.md`
+- Java backend guide:
+  - `docs/java-backend-guide/README.md`
 - References:
   - `docs/references/README.md`
   - `docs/references/`
@@ -54,3 +59,4 @@ This directory keeps project documentation organized by **artifact type** and **
 - Report files: `<topic>-report-YYYY-MM-DD.md` or existing project-specific names.
 - Date folders: always `YYYY-MM-DD`.
 - Topic folders: lowercase kebab-case, for example `deepagent`.
+- Each date folder should include a local `README.md` index.
