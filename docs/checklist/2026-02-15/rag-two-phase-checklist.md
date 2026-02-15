@@ -50,3 +50,15 @@
   - [x] End-to-end chain self-test (`/v1/query/stream`, `/v1/rag/*`, `/v1/ops/rag/*`).
   - [x] Update report docs and date README indexes.
   - [x] Final commit and delivery summary.
+
+- [x] Batch-7: Frontend RAG operations console delivery
+  - [x] Build and wire `/rag-center` page with 4 tabs (source policy, chunk governance, QA memory, retrieval trace).
+  - [x] Add homepage navigation and feature card entry for RAG operations.
+  - [x] Add code comments for key data-fetch and governance actions.
+  - [x] Run frontend build self-test and capture evidence.
+
+- [x] Batch-8: DeepThink business UX + streaming knowledge feedback
+  - [x] Handle `knowledge_persisted` in `/v1/query/stream` consumer and expose persistence feedback.
+  - [x] Add “Shared Knowledge Hits” business card to show doc/QA memory reuse in analysis output.
+  - [x] Add engineering-card usage descriptions (timeline/task graph/conflict/opinion/budget).
+  - [x] Run backend tests + API smoke test (`/v1/query/stream`, `/v2/deep-think/*/rounds/stream`).

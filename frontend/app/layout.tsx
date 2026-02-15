@@ -15,6 +15,7 @@ const navItems = [
   { href: "/watchlist", label: "关注池" },
   { href: "/reports", label: "报告" },
   { href: "/docs-center", label: "文档" },
+  { href: "/rag-center", label: "RAG运营" },
   { href: "/ui-demos", label: "UI Lab" }
 ];
 

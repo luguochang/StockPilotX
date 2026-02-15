@@ -286,6 +286,8 @@ export default function DeepThinkPage() {
   const [activeApiStyle, setActiveApiStyle] = useState("");
   const [queryProgressText, setQueryProgressText] = useState("");
   const [analysisBrief, setAnalysisBrief] = useState<AnalysisBrief | null>(null);
+  // query/stream 在后端落库后会发 knowledge_persisted，前端据此显示“已沉淀共享语料”反馈。
+  const [knowledgePersistedTraceId, setKnowledgePersistedTraceId] = useState("");
   const [deepSession, setDeepSession] = useState<DeepThinkSession | null>(null);
   // 默认给业务用户分析视角；工程筛选项收纳到 engineering 模式减少认知负担。
   const [deepConsoleMode, setDeepConsoleMode] = useState<DeepConsoleMode>("analysis");
@@ -444,6 +446,7 @@ export default function DeepThinkPage() {
     setActiveApiStyle("");
     setQueryProgressText("");
     setAnalysisBrief(null);
+    setKnowledgePersistedTraceId("");
     setError("");
     try {
       await ensureStockInUniverse([stockCode]);
@@ -523,6 +526,12 @@ export default function DeepThinkPage() {
         }
         if (eventName === "analysis_brief") {
           setAnalysisBrief(payload as AnalysisBrief);
+          return;
+        }
+        if (eventName === "knowledge_persisted") {
+          const trace = String(payload?.trace_id ?? "").trim();
+          if (trace) setKnowledgePersistedTraceId(trace);
+          setQueryProgressText("回答已沉淀到共享语料，可用于后续检索复用");
         }
       };
       // 复用统一 SSE 读取器，避免 query/deep-think 两套解析逻辑分叉。
@@ -541,6 +550,7 @@ export default function DeepThinkPage() {
       setResult(null);
       setOverview(null);
       setQueryProgressText("");
+      setKnowledgePersistedTraceId("");
     } finally {
       setStreaming(false);
       setLoading(false);
@@ -1134,6 +1144,20 @@ export default function DeepThinkPage() {
       pctChange,
     };
   }, [overview]);
+  // 业务语义：共享语料命中表示本次回答引用了“文档库/RAG问答记忆”，而不只依赖即时上下文。
+  const sharedKnowledgeHits = useMemo(() => {
+    const rows = result?.citations ?? [];
+    const filtered = rows.filter((x) => {
+      const sourceId = String(x?.source_id ?? "");
+      return sourceId.startsWith("doc::") || sourceId === "qa_memory_summary";
+    });
+    const dedup = new Map<string, Citation>();
+    for (const item of filtered) {
+      const key = `${String(item.source_id ?? "")}|${String(item.source_url ?? "")}`;
+      if (!dedup.has(key)) dedup.set(key, item);
+    }
+    return Array.from(dedup.values()).slice(0, 6);
+  }, [result]);
   const bannerItems = [
     "实时行情聚合",
     "历史K线趋势",
@@ -1684,6 +1708,47 @@ export default function DeepThinkPage() {
               </Card>
             ) : null}
 
+            {result ? (
+              <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>共享知识命中</span>} style={{ marginTop: 12 }}>
+                <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                  <Text style={{ color: "#64748b" }}>
+                    作用：显示本次回答是否命中共享 RAG 语料（文档库/历史问答记忆），帮助判断结论是否可复用。
+                  </Text>
+                  <Space wrap>
+                    <Tag color={sharedKnowledgeHits.length ? "green" : "default"}>命中数：{sharedKnowledgeHits.length}</Tag>
+                    {knowledgePersistedTraceId ? (
+                      <Tag color="blue">已沉淀共享语料：{knowledgePersistedTraceId.slice(0, 12)}</Tag>
+                    ) : null}
+                  </Space>
+                  {sharedKnowledgeHits.length ? (
+                    <List
+                      size="small"
+                      dataSource={sharedKnowledgeHits}
+                      renderItem={(item) => {
+                        const sourceId = String(item.source_id ?? "");
+                        const hitType = sourceId === "qa_memory_summary" ? "历史问答摘要" : "文档语料";
+                        return (
+                          <List.Item>
+                            <Space direction="vertical" size={1}>
+                              <Space wrap>
+                                <Tag color={hitType === "历史问答摘要" ? "purple" : "cyan"}>{hitType}</Tag>
+                                <Text style={{ color: "#0f172a" }}>{sourceId}</Text>
+                              </Space>
+                              <Text style={{ color: "#64748b" }}>{String(item.excerpt ?? "").slice(0, 120)}</Text>
+                            </Space>
+                          </List.Item>
+                        );
+                      }}
+                    />
+                  ) : (
+                    <Text style={{ color: "#64748b" }}>
+                      本轮回答暂未命中共享语料，仅基于实时拉取数据与当前上下文生成。可通过上传资料或历史问答沉淀提升复用率。
+                    </Text>
+                  )}
+                </Space>
+              </Card>
+            ) : null}
+
             {analysisBrief ? (
               <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>分析置信度</span>} style={{ marginTop: 12 }}>
                 <Space direction="vertical" style={{ width: "100%" }}>
@@ -1886,7 +1951,7 @@ export default function DeepThinkPage() {
                           )}
                         >
                           <Button size="small" type="text" style={{ color: "#475569", paddingInline: 6 }}>
-                            ? 角色说明（{deepAgentRoleRows.length}）
+                            查看角色说明（{deepAgentRoleRows.length}）
                           </Button>
                         </Popover>
                       </div>
@@ -2196,6 +2261,9 @@ export default function DeepThinkPage() {
             ) : (
               <>
                 <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>Round Timeline</span>} style={{ marginTop: 12 }}>
+                  <Text style={{ color: "#64748b" }}>
+                    作用：按时间查看每轮是否触发重规划、在哪一轮停止，以及分歧是否在收敛。
+                  </Text>
                   {deepTimelineItems.length ? (
                     <Timeline items={deepTimelineItems} />
                   ) : (
@@ -2204,6 +2272,9 @@ export default function DeepThinkPage() {
                 </Card>
 
                 <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>最新轮次 Task Graph</span>} style={{ marginTop: 12 }}>
+                  <Text style={{ color: "#64748b" }}>
+                    作用：展示本轮各 Agent 的任务分工与优先级，判断当前轮次在解决什么问题。
+                  </Text>
                   <Table
                     size="small"
                     pagination={false}
@@ -2296,6 +2367,9 @@ export default function DeepThinkPage() {
             ) : (
               <>
                 <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>预算使用与剩余</span>}>
+                  <Text style={{ color: "#64748b" }}>
+                    作用：监控 token/时间/工具调用预算，防止单轮过度消耗导致降级或中断。
+                  </Text>
                   {latestBudget ? (
                     <Space direction="vertical" style={{ width: "100%" }} size={10}>
                       <div>
@@ -2321,6 +2395,9 @@ export default function DeepThinkPage() {
                 </Card>
 
                 <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>冲突源可视化</span>} style={{ marginTop: 12 }}>
+                  <Text style={{ color: "#64748b" }}>
+                    作用：识别“信号分歧、证据冲突、风险否决”等冲突来源，辅助决定是否继续补证。
+                  </Text>
                   <ReactECharts option={deepConflictOption} style={{ height: 240 }} />
                   <Space wrap>
                     {(latestDeepRound?.conflict_sources ?? []).map((src) => (
@@ -2331,6 +2408,9 @@ export default function DeepThinkPage() {
                 </Card>
 
                 <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>最新轮次 Agent 观点</span>} style={{ marginTop: 12 }}>
+                  <Text style={{ color: "#64748b" }}>
+                    作用：查看各角色对同一标的的动作建议与置信度，快速定位谁在拉高/拉低共识。
+                  </Text>
                   <Table
                     size="small"
                     pagination={false}

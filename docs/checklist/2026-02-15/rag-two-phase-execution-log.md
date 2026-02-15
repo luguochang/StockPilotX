@@ -61,3 +61,46 @@
 
 ### Commit
 - `c81f12c` - `docs(rag): finalize two-phase checklist and architecture business report`
+
+---
+
+## Batch-7 (Completed)
+
+### Scope
+- Deliver RAG operations frontend page `/rag-center`:
+  - source policy governance,
+  - doc chunk status operations,
+  - QA memory enable/disable operations,
+  - retrieval trace viewing + reindex trigger.
+- Add homepage entry card and global nav link for `RAG运营台`.
+- Fix previous frontend text/encoding issues and keep key logic annotated.
+
+### Self-test Evidence
+- Command:
+  - `cd frontend && npm run -s build`
+- Result:
+  - `Compiled successfully`
+  - `Route (app) ... /rag-center ...`
+
+---
+
+## Batch-8 (Completed)
+
+### Scope
+- DeepThink advanced analysis UX improvements:
+  - consume `knowledge_persisted` from `/v1/query/stream`,
+  - add shared-knowledge hits card for business users,
+  - add engineering card purpose texts for timeline/task/conflict/opinion/budget.
+- Keep engineering mode intact while improving business explanation path.
+
+### Self-test Evidence
+- Backend test command:
+  - `.\\.venv\\Scripts\\python.exe -m pytest tests/test_service.py tests/test_http_api.py -q`
+- Backend test result:
+  - `42 passed in 45.30s`
+- API smoke command:
+  - local `TestClient` script invoking:
+    - `/v1/query/stream` (verified `answer_delta`, `knowledge_persisted`, `analysis_brief`)
+    - `/v1/deep-think/sessions` + `/v2/deep-think/sessions/{id}/rounds/stream` (verified `round_started` -> `done`)
+- API smoke result:
+  - `SMOKE_OK`
