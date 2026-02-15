@@ -269,21 +269,30 @@ export default function DeepThinkPage() {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder("utf-8");
     let buffer = "";
+    // 兼容不同网关/代理下的分隔符：\n\n 或 \r\n\r\n。
+    const nextEventSplitAt = (text: string): { at: number; len: number } => {
+      const lf = text.indexOf("\n\n");
+      const crlf = text.indexOf("\r\n\r\n");
+      if (lf < 0 && crlf < 0) return { at: -1, len: 0 };
+      if (lf >= 0 && (crlf < 0 || lf <= crlf)) return { at: lf, len: 2 };
+      return { at: crlf, len: 4 };
+    };
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       while (true) {
-        const splitAt = buffer.indexOf("\n\n");
-        if (splitAt < 0) break;
-        const rawEvent = buffer.slice(0, splitAt);
-        buffer = buffer.slice(splitAt + 2);
+        const split = nextEventSplitAt(buffer);
+        if (split.at < 0) break;
+        const rawEvent = buffer.slice(0, split.at);
+        buffer = buffer.slice(split.at + split.len);
         const lines = rawEvent.split("\n");
         let eventName = "message";
         const dataLines: string[] = [];
         for (const line of lines) {
-          if (line.startsWith("event:")) eventName = line.slice(6).trim();
-          if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+          const normalized = line.replace(/\r$/, "");
+          if (normalized.startsWith("event:")) eventName = normalized.slice(6).trim();
+          if (normalized.startsWith("data:")) dataLines.push(normalized.slice(5).trim());
         }
         if (!dataLines.length) continue;
         try {
@@ -291,6 +300,26 @@ export default function DeepThinkPage() {
           onEvent(eventName, payload as Record<string, any>);
         } catch {
           // ignore malformed event payload
+        }
+      }
+    }
+    // 连接结束时尝试消费尾包（某些实现不会在末尾补全空行分隔）。
+    const tail = buffer.trim();
+    if (tail) {
+      const lines = tail.split("\n");
+      let eventName = "message";
+      const dataLines: string[] = [];
+      for (const line of lines) {
+        const normalized = line.replace(/\r$/, "");
+        if (normalized.startsWith("event:")) eventName = normalized.slice(6).trim();
+        if (normalized.startsWith("data:")) dataLines.push(normalized.slice(5).trim());
+      }
+      if (dataLines.length) {
+        try {
+          const payload = JSON.parse(dataLines.join("\n"));
+          onEvent(eventName, payload as Record<string, any>);
+        } catch {
+          // ignore malformed tail payload
         }
       }
     }
@@ -717,6 +746,7 @@ export default function DeepThinkPage() {
     setDeepStreaming(true);
     setDeepError("");
     let streamFailure = "";
+    let gotEvent = false;
     try {
       const resp = await fetch(`${API_BASE}/v2/deep-think/sessions/${sessionId}/rounds/stream`, {
         method: "POST",
@@ -729,16 +759,34 @@ export default function DeepThinkPage() {
       }
       await readSSEAndConsume(resp, (eventName, payload) => {
         // 所有流事件都写入回放面板，便于在线排障与复盘。
+        gotEvent = true;
         appendDeepEvent(eventName, payload);
         // done(ok=false) 统一视作本轮失败，外层再抛错中断流程。
         if (eventName === "done" && payload && payload.ok === false) {
           streamFailure = String(payload.error ?? payload.message ?? "DeepThink round failed");
         }
       });
+      // 保护性兜底：HTTP成功但没有任何事件时，按异常处理并触发回退。
+      if (!gotEvent) {
+        throw new Error("v2 stream connected but no events received");
+      }
       if (streamFailure) throw new Error(streamFailure);
     } finally {
       setDeepStreaming(false);
     }
+  }
+
+  async function runDeepThinkRoundV1Fallback(sessionId: string, roundPayload: Record<string, any>) {
+    // 回退路径：保持旧行为，先执行 round 再通过 stream 回放事件。
+    const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${sessionId}/rounds`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(roundPayload)
+    });
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body?.detail ?? `HTTP ${resp.status}`);
+    setDeepSession(body as DeepThinkSession);
+    await replayDeepThinkStream(sessionId);
   }
 
   async function runDeepThinkRound() {
@@ -749,6 +797,8 @@ export default function DeepThinkPage() {
       const session = deepSession ?? (await createDeepThinkSessionRequest());
       setDeepSession(session);
       setDeepStreamEvents([]);
+      // 每次执行前清空事件过滤，避免“过滤条件隐藏实时事件”的误判。
+      setDeepArchiveEventName("");
 
       const roundPayload = {
         question,
@@ -757,18 +807,16 @@ export default function DeepThinkPage() {
       };
       if (ENABLE_DEEPTHINK_V2_STREAM) {
         // 默认走 V2 真流式：用户可在执行过程中持续看到事件。
-        await runDeepThinkRoundStreamV2(session.session_id, roundPayload);
+        try {
+          await runDeepThinkRoundStreamV2(session.session_id, roundPayload);
+        } catch (streamErr) {
+          // 若 v2 失败，自动回退 v1，保证本轮任务仍能执行完成。
+          const reason = streamErr instanceof Error ? streamErr.message : "unknown stream error";
+          appendDeepEvent("progress", { stage: "fallback", message: `v2流式失败，回退v1：${reason}` });
+          await runDeepThinkRoundV1Fallback(session.session_id, roundPayload);
+        }
       } else {
-        // 回退路径：沿用 V1，同步执行后再读取回放。
-        const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${session.session_id}/rounds`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(roundPayload)
-        });
-        const body = await resp.json();
-        if (!resp.ok) throw new Error(body?.detail ?? `HTTP ${resp.status}`);
-        setDeepSession(body as DeepThinkSession);
-        await replayDeepThinkStream(session.session_id);
+        await runDeepThinkRoundV1Fallback(session.session_id, roundPayload);
       }
 
       // 无论 V1/V2，最后都刷新一次会话快照并重载归档，确保前端状态与后端一致。
