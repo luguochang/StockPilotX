@@ -53,6 +53,8 @@
 | AGT-007 | S17.10,S12 | 细粒度 Tool Schema + 请求级 runtime 覆盖 | [x] | Tool binding 支持按工具参数 schema；`query/query_stream` 可按请求指定 `workflow_runtime` | `tools.py` 增加 `Quote/Retrieve/Graph` schema；`workflow` 注册 schema；`service` 增加 `_select_runtime`；`tests/test_http_api.py` 与 `tests/test_agents_deep_acl.py` 增强；`pytest` 57/57 通过（2026-02-15） |
 | AGT-009 | S8,S12,S17.7 | DeepThink 会话接口与轮次流式裁决 MVP | [x] | `/v1/deep-think/*` 可创建会话、执行轮次、查询会话、SSE 回放轮次事件 | 新增 deep_think session/round/opinion 存储与服务编排；新增 `tests/test_service.py::test_deep_think_session_and_round` 与 `tests/test_http_api.py::test_deep_think_and_a2a`；`pytest` 61/61 通过（2026-02-15） |
 | AGT-010 | S8,S12,S17.11 | 内部 A2A 适配层（agent card + task lifecycle） | [x] | `/v1/a2a/agent-cards` 与 `/v1/a2a/tasks` 可完成卡片发现与任务状态流转 | 新增 `agent_card_registry/a2a_task` 表与应用服务流程；`tests/test_service.py::test_a2a_task_lifecycle` 与 `tests/test_http_api.py::test_deep_think_and_a2a` 覆盖；`pytest` 61/61 通过（2026-02-15） |
+| AGT-011 | S8,S17.7,S17.11 | DeepThink 任务规划（task graph）与重规划触发 | [x] | 每轮输出 `task_graph`，分歧超阈值可触发 `replan_triggered` | 新增 `_deep_plan_tasks` 与 `replan_triggered` 事件流；新增 `tests/test_service.py::test_deep_think_session_and_round` 与 `tests/test_http_api.py::test_deep_think_and_a2a` 增强；`pytest` 63/63 通过（2026-02-15） |
+| AGT-012 | S8,S15,S17.6 | DeepThink 预算治理（budget usage + stop reason） | [x] | 每轮输出 `budget_usage`，超预算时 `stop_reason=DEEP_BUDGET_EXCEEDED` | 新增 `_deep_budget_snapshot` 与 round 字段 `budget_usage/stop_reason`；新增 `tests/test_service.py::test_deep_think_budget_exceeded_stop` 与 `tests/test_http_api.py::test_deep_think_budget_exceeded`；`pytest` 63/63 通过（2026-02-15） |
 | GOV-004 | S1,S16 | 每轮交付文档化与可追溯规范 | [x] | 每轮必须有独立 md 记录设计、改动、验证、风险与后续建议 | 新增 `docs/rounds/README.md` 与 `docs/rounds/2026-02-15/round-E-deepthink-a2a-mvp.md`（2026-02-15） |
 | PROMPT-001 | S7 | Prompt 三层模板运行时装配 | [x] | system/policy/task 全链路启用 | 新增 `backend/app/prompt/runtime.py` 并在 `service/workflow` 接入；`tests/test_prompt_engineering.py` 通过（2026-02-13） |
 | PROMPT-002 | S7,S10 | `prompt_eval_result` 回写与发布门禁 | [x] | 不达阈值禁止进入 stable | `prompt_registry` 增加 `prompt_eval_result` 表、release gate；`evals_run` 自动回写；`tests/test_prompt_persistence.py` 通过（2026-02-13） |
@@ -256,3 +258,18 @@
   - key output: `build passed`
   - command: `cd frontend && npx tsc --noEmit`
   - key output: `typecheck passed`
+
+### 2026-02-15 (Round-F)
+- Completed:
+  - [AGT-011] DeepThink 任务规划与重规划触发：每轮新增 `task_graph`，分歧超阈值触发 `replan_triggered`。
+  - [AGT-012] DeepThink 预算治理：每轮新增 `budget_usage`，超预算时输出 `stop_reason=DEEP_BUDGET_EXCEEDED`。
+  - [GOV-004] 本轮交付记录：新增 `docs/rounds/2026-02-15/round-F-deepthink-planner-budget-replan.md` 与专栏记录 `docs/agent-column/10-Round-F-DeepThink-Planner-Budget-Replan实现记录.md`。
+- Evidence:
+  - command: `.\.venv\Scripts\python -m pytest -q tests/test_service.py tests/test_http_api.py`
+  - key output: `27 passed`
+  - command: `.\.venv\Scripts\python -m pytest -q`
+  - key output: `63 passed`
+  - command: `cd frontend && npm run build`
+  - key output: `build passed`
+  - command: `cd frontend && npx tsc --noEmit`
+  - key output: `failed: tsconfig include '.next/types/**/*.ts' matched missing files (pre-existing config issue)`

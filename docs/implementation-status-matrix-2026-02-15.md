@@ -67,3 +67,9 @@
 - Added internal A2A adapter APIs: `/v1/a2a/agent-cards`, `/v1/a2a/tasks`, `/v1/a2a/tasks/{task_id}`.
 - Added persistence tables for deep-think sessions/rounds/opinions, agent cards, a2a tasks, and shared knowledge cards.
 - Validation kept green: backend 61 passed; frontend build + typecheck passed.
+
+## Round-F Update (2026-02-15)
+- DeepThink round payload upgraded with planner and governance fields: `task_graph`, `budget_usage`, `replan_triggered`, `stop_reason`.
+- Added planner/replan control path: disagreement threshold can trigger replan task insertion.
+- Added budget guard path: exceeded budget yields deterministic stop reason `DEEP_BUDGET_EXCEEDED`.
+- Validation: backend 63 passed; frontend build passed; frontend typecheck currently blocked by existing `tsconfig` include mismatch.

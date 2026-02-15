@@ -228,6 +228,60 @@ class AShareAgentService:
     ) -> float:
         return round((1.0 - disagreement_score) * 0.6 + min(1.0, evidence_count / 4.0) * 0.2 + avg_confidence * 0.2, 4)
 
+    def _deep_plan_tasks(self, question: str, round_no: int) -> list[dict[str, Any]]:
+        q = question.lower()
+        tasks: list[dict[str, Any]] = [
+            {"task_id": f"r{round_no}-t1", "agent": "quant_agent", "title": "估值与收益风险比评估", "priority": "high"},
+            {"task_id": f"r{round_no}-t2", "agent": "risk_agent", "title": "回撤与波动风险评估", "priority": "high"},
+            {"task_id": f"r{round_no}-t3", "agent": "pm_agent", "title": "主题与叙事一致性评估", "priority": "medium"},
+            {"task_id": f"r{round_no}-t4", "agent": "compliance_agent", "title": "合规边界审查", "priority": "high"},
+        ]
+        if any(k in q for k in ("宏观", "政策", "利率", "财政")):
+            tasks.append({"task_id": f"r{round_no}-t5", "agent": "macro_agent", "title": "宏观与政策冲击评估", "priority": "high"})
+        if any(k in q for k in ("执行", "仓位", "节奏", "交易")):
+            tasks.append({"task_id": f"r{round_no}-t6", "agent": "execution_agent", "title": "执行节奏与仓位约束评估", "priority": "medium"})
+        return tasks
+
+    def _deep_budget_snapshot(self, budget: dict[str, Any], round_no: int, task_count: int) -> dict[str, Any]:
+        token_budget = max(1, int(budget.get("token_budget", 8000)))
+        time_budget_ms = max(1, int(budget.get("time_budget_ms", 25000)))
+        tool_call_budget = max(1, int(budget.get("tool_call_budget", 24)))
+
+        token_used = min(token_budget, 1500 + task_count * 220 + round_no * 180)
+        time_used_ms = min(time_budget_ms, 5500 + task_count * 380 + round_no * 650)
+        tool_calls_used = min(tool_call_budget, task_count + 2)
+
+        remaining = {
+            "token_budget": token_budget - token_used,
+            "time_budget_ms": time_budget_ms - time_used_ms,
+            "tool_call_budget": tool_call_budget - tool_calls_used,
+        }
+        warn = (
+            remaining["token_budget"] <= int(token_budget * 0.2)
+            or remaining["time_budget_ms"] <= int(time_budget_ms * 0.2)
+            or remaining["tool_call_budget"] <= max(1, int(tool_call_budget * 0.2))
+        )
+        exceeded = (
+            remaining["token_budget"] <= 0
+            or remaining["time_budget_ms"] <= 0
+            or remaining["tool_call_budget"] <= 0
+        )
+        return {
+            "limit": {
+                "token_budget": token_budget,
+                "time_budget_ms": time_budget_ms,
+                "tool_call_budget": tool_call_budget,
+            },
+            "used": {
+                "token_used": token_used,
+                "time_used_ms": time_used_ms,
+                "tool_calls_used": tool_calls_used,
+            },
+            "remaining": remaining,
+            "warn": warn,
+            "exceeded": exceeded,
+        }
+
     def query(self, payload: dict[str, Any]) -> dict[str, Any]:
         """执行问答主链路并返回标准化响应。"""
         req = QueryRequest(**payload)
@@ -918,93 +972,135 @@ class AShareAgentService:
         question = str(payload.get("question", session.get("question", "")))
         stock_codes = [str(x).upper() for x in payload.get("stock_codes", session.get("stock_codes", []))]
         code = stock_codes[0] if stock_codes else "SH600000"
+        task_graph = self._deep_plan_tasks(question, round_no)
+        budget = session.get("budget", {}) if isinstance(session.get("budget", {}), dict) else {}
+        budget_usage = self._deep_budget_snapshot(budget, round_no, len(task_graph))
+        replan_triggered = False
+        stop_reason = ""
 
-        if self._needs_quote_refresh(code):
-            self.ingest_market_daily([code])
-        if self._needs_history_refresh(code):
-            self.ingestion.ingest_history_daily([code], limit=260)
+        evidence_ids: list[str] = []
+        opinions: list[dict[str, Any]] = []
+        arbitration = {
+            "consensus_signal": "hold",
+            "disagreement_score": 0.0,
+            "conflict_sources": [],
+            "counter_view": "无显著反方观点",
+        }
 
-        quote = self._latest_quote(code) or {}
-        bars = self._history_bars(code, limit=180)
-        trend = self._trend_metrics(bars) if len(bars) >= 30 else {}
-        pred = self.predict_run({"stock_codes": [code], "horizons": ["20d"]})
-        horizon_map = {h["horizon"]: h for h in pred["results"][0]["horizons"]} if pred.get("results") else {}
-        quant_20 = horizon_map.get("20d", {})
-
-        rule_core = self._build_rule_based_debate_opinions(question, trend, quote, quant_20)
-        core_opinions = rule_core
-        if self.settings.llm_external_enabled and self.llm_gateway.providers:
-            llm_core = self._build_llm_debate_opinions(question, code, trend, quote, quant_20, rule_core)
-            if llm_core:
-                core_opinions = llm_core
-
-        evidence_ids = [x for x in {str(quote.get("source_id", "")), str((bars[-1] if bars else {}).get("source_id", ""))} if x]
-        extra_opinions = [
-            self._normalize_deep_opinion(
-                agent="macro_agent",
-                signal="buy" if trend.get("ma60_slope", 0.0) > 0 and trend.get("momentum_20", 0.0) > 0 else "hold",
-                confidence=0.63,
-                reason=f"宏观侧评估：ma60_slope={trend.get('ma60_slope', 0.0):.4f}, momentum_20={trend.get('momentum_20', 0.0):.4f}",
-                evidence_ids=evidence_ids,
-                risk_tags=["macro_regime_check"],
-            ),
-            self._normalize_deep_opinion(
-                agent="execution_agent",
-                signal="reduce"
-                if abs(float(quote.get("pct_change", 0.0))) > 4.0 and trend.get("volatility_20", 0.0) > 0.02
-                else "hold",
-                confidence=0.61,
-                reason=(
-                    f"执行层建议：pct_change={float(quote.get('pct_change', 0.0)):.2f}, "
-                    f"volatility_20={trend.get('volatility_20', 0.0):.4f}"
-                ),
-                evidence_ids=evidence_ids,
-                risk_tags=["execution_timing"],
-            ),
-            self._normalize_deep_opinion(
-                agent="compliance_agent",
-                signal="reduce" if trend.get("max_drawdown_60", 0.0) > 0.2 else "hold",
-                confidence=0.78,
-                reason=f"合规与风控底线：max_drawdown_60={trend.get('max_drawdown_60', 0.0):.4f}",
-                evidence_ids=evidence_ids,
-                risk_tags=["compliance_guardrail"],
-            ),
-            self._normalize_deep_opinion(
-                agent="critic_agent",
-                signal="hold",
-                confidence=0.7,
-                reason="质检视角：已检查证据数量、信号冲突与风险标签完整性。",
-                evidence_ids=evidence_ids,
-                risk_tags=["critic_review"],
-            ),
-        ]
-
-        normalized_core = [
-            self._normalize_deep_opinion(
-                agent=str(opinion.get("agent", "")),
-                signal=str(opinion.get("signal", "hold")),
-                confidence=float(opinion.get("confidence", 0.5)),
-                reason=str(opinion.get("reason", "")),
-                evidence_ids=evidence_ids,
-                risk_tags=["core_role"],
+        if budget_usage["exceeded"]:
+            stop_reason = "DEEP_BUDGET_EXCEEDED"
+            opinions.append(
+                self._normalize_deep_opinion(
+                    agent="supervisor_agent",
+                    signal="hold",
+                    confidence=0.92,
+                    reason="预算已触顶，停止继续推理并输出保守结论。",
+                    evidence_ids=[],
+                    risk_tags=["budget_exceeded"],
+                )
             )
-            for opinion in core_opinions
-        ]
-        opinions = normalized_core + extra_opinions
+            arbitration = self._arbitrate_opinions(opinions)
+        else:
+            if self._needs_quote_refresh(code):
+                self.ingest_market_daily([code])
+            if self._needs_history_refresh(code):
+                self.ingestion.ingest_history_daily([code], limit=260)
 
-        pre_arb = self._arbitrate_opinions(opinions)
-        supervisor = self._normalize_deep_opinion(
-            agent="supervisor_agent",
-            signal=str(pre_arb["consensus_signal"]),
-            confidence=round(1.0 - float(pre_arb["disagreement_score"]), 4),
-            reason=f"监督者仲裁：冲突源={','.join(pre_arb['conflict_sources']) or 'none'}",
-            evidence_ids=evidence_ids,
-            risk_tags=["supervisor_arbitration"],
-        )
-        opinions.append(supervisor)
-        arbitration = self._arbitrate_opinions(opinions)
+            quote = self._latest_quote(code) or {}
+            bars = self._history_bars(code, limit=180)
+            trend = self._trend_metrics(bars) if len(bars) >= 30 else {}
+            pred = self.predict_run({"stock_codes": [code], "horizons": ["20d"]})
+            horizon_map = {h["horizon"]: h for h in pred["results"][0]["horizons"]} if pred.get("results") else {}
+            quant_20 = horizon_map.get("20d", {})
 
-        session_status = "completed" if round_no >= max_rounds else "in_progress"
+            rule_core = self._build_rule_based_debate_opinions(question, trend, quote, quant_20)
+            core_opinions = rule_core
+            if self.settings.llm_external_enabled and self.llm_gateway.providers:
+                llm_core = self._build_llm_debate_opinions(question, code, trend, quote, quant_20, rule_core)
+                if llm_core:
+                    core_opinions = llm_core
+
+            evidence_ids = [x for x in {str(quote.get("source_id", "")), str((bars[-1] if bars else {}).get("source_id", ""))} if x]
+            extra_opinions = [
+                self._normalize_deep_opinion(
+                    agent="macro_agent",
+                    signal="buy" if trend.get("ma60_slope", 0.0) > 0 and trend.get("momentum_20", 0.0) > 0 else "hold",
+                    confidence=0.63,
+                    reason=f"宏观侧评估：ma60_slope={trend.get('ma60_slope', 0.0):.4f}, momentum_20={trend.get('momentum_20', 0.0):.4f}",
+                    evidence_ids=evidence_ids,
+                    risk_tags=["macro_regime_check"],
+                ),
+                self._normalize_deep_opinion(
+                    agent="execution_agent",
+                    signal="reduce"
+                    if abs(float(quote.get("pct_change", 0.0))) > 4.0 and trend.get("volatility_20", 0.0) > 0.02
+                    else "hold",
+                    confidence=0.61,
+                    reason=(
+                        f"执行层建议：pct_change={float(quote.get('pct_change', 0.0)):.2f}, "
+                        f"volatility_20={trend.get('volatility_20', 0.0):.4f}"
+                    ),
+                    evidence_ids=evidence_ids,
+                    risk_tags=["execution_timing"],
+                ),
+                self._normalize_deep_opinion(
+                    agent="compliance_agent",
+                    signal="reduce" if trend.get("max_drawdown_60", 0.0) > 0.2 else "hold",
+                    confidence=0.78,
+                    reason=f"合规与风控底线：max_drawdown_60={trend.get('max_drawdown_60', 0.0):.4f}",
+                    evidence_ids=evidence_ids,
+                    risk_tags=["compliance_guardrail"],
+                ),
+                self._normalize_deep_opinion(
+                    agent="critic_agent",
+                    signal="hold",
+                    confidence=0.7,
+                    reason="质检视角：已检查证据数量、信号冲突与风险标签完整性。",
+                    evidence_ids=evidence_ids,
+                    risk_tags=["critic_review"],
+                ),
+            ]
+
+            normalized_core = [
+                self._normalize_deep_opinion(
+                    agent=str(opinion.get("agent", "")),
+                    signal=str(opinion.get("signal", "hold")),
+                    confidence=float(opinion.get("confidence", 0.5)),
+                    reason=str(opinion.get("reason", "")),
+                    evidence_ids=evidence_ids,
+                    risk_tags=["core_role"],
+                )
+                for opinion in core_opinions
+            ]
+            opinions = normalized_core + extra_opinions
+
+            pre_arb = self._arbitrate_opinions(opinions)
+            if float(pre_arb["disagreement_score"]) >= 0.45 and round_no < max_rounds:
+                replan_triggered = True
+                task_graph.append(
+                    {
+                        "task_id": f"r{round_no}-replan-1",
+                        "agent": "critic_agent",
+                        "title": "触发补证重规划：查找冲突证据并解释分歧",
+                        "priority": "high",
+                    }
+                )
+                pre_arb["conflict_sources"] = list(dict.fromkeys(list(pre_arb["conflict_sources"]) + ["replan_triggered"]))
+
+            supervisor = self._normalize_deep_opinion(
+                agent="supervisor_agent",
+                signal=str(pre_arb["consensus_signal"]),
+                confidence=round(1.0 - float(pre_arb["disagreement_score"]), 4),
+                reason=f"监督者仲裁：冲突源={','.join(pre_arb['conflict_sources']) or 'none'}",
+                evidence_ids=evidence_ids,
+                risk_tags=["supervisor_arbitration"],
+            )
+            opinions.append(supervisor)
+            arbitration = self._arbitrate_opinions(opinions)
+            if budget_usage["warn"]:
+                arbitration["conflict_sources"] = list(dict.fromkeys(list(arbitration["conflict_sources"]) + ["budget_warning"]))
+
+        session_status = "completed" if round_no >= max_rounds or stop_reason else "in_progress"
         round_id = f"dtr-{uuid.uuid4().hex[:12]}"
         snapshot = self.web.deep_think_append_round(
             session_id=session_id,
@@ -1015,6 +1111,10 @@ class AShareAgentService:
             disagreement_score=float(arbitration["disagreement_score"]),
             conflict_sources=list(arbitration["conflict_sources"]),
             counter_view=str(arbitration["counter_view"]),
+            task_graph=task_graph,
+            replan_triggered=replan_triggered,
+            stop_reason=stop_reason,
+            budget_usage=budget_usage,
             opinions=opinions,
             session_status=session_status,
         )
@@ -1025,7 +1125,7 @@ class AShareAgentService:
             avg_confidence=avg_confidence,
             evidence_count=len(evidence_ids),
         )
-        if quality_score >= 0.8 and len(evidence_ids) >= 2:
+        if quality_score >= 0.8 and len(evidence_ids) >= 2 and not stop_reason:
             self.web.add_group_knowledge_card(
                 card_id=f"gkc-{uuid.uuid4().hex[:12]}",
                 topic=code,
@@ -1046,6 +1146,8 @@ class AShareAgentService:
                     "round_no": round_no,
                     "consensus_signal": arbitration["consensus_signal"],
                     "disagreement_score": arbitration["disagreement_score"],
+                    "replan_triggered": replan_triggered,
+                    "stop_reason": stop_reason,
                 },
             )
         return snapshot
@@ -1072,8 +1174,12 @@ class AShareAgentService:
                 "session_id": session_id,
                 "round_id": latest.get("round_id"),
                 "round_no": latest.get("round_no"),
+                "task_graph": latest.get("task_graph", []),
             },
         }
+        budget_usage = latest.get("budget_usage", {})
+        if bool(budget_usage.get("warn")):
+            yield {"event": "budget_warning", "data": budget_usage}
         for opinion in latest.get("opinions", []):
             reason = str(opinion.get("reason", ""))
             pivot = max(1, min(len(reason), len(reason) // 2))
@@ -1093,7 +1199,16 @@ class AShareAgentService:
                 "conflict_sources": latest.get("conflict_sources", []),
                 "counter_view": latest.get("counter_view", ""),
             },
-        }
+            }
+        if bool(latest.get("replan_triggered", False)):
+            yield {
+                "event": "replan_triggered",
+                "data": {
+                    "round_id": latest.get("round_id"),
+                    "task_graph": latest.get("task_graph", []),
+                    "reason": "disagreement_above_threshold",
+                },
+            }
         yield {"event": "done", "data": {"ok": True, "session_id": session_id}}
 
     def a2a_agent_cards(self) -> list[dict[str, Any]]:

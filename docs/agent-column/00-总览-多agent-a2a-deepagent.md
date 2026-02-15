@@ -34,6 +34,7 @@
 7. 中间件与治理：hook、权限、预算、合规、观测
 8. 实施路线图：从当前系统升级到专业版本
 9. Round-E 实现记录：DeepThink + Internal A2A MVP 落地证据
+10. Round-F 实现记录：DeepThink Planner + Budget + Replan 落地证据
 
 ## 6. 关键参考
 - A2A 规范：https://a2aproject.github.io/A2A/specification/

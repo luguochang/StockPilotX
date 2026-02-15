@@ -174,6 +174,10 @@ class WebStore:
                 disagreement_score REAL NOT NULL,
                 conflict_sources TEXT NOT NULL,
                 counter_view TEXT NOT NULL DEFAULT '',
+                task_graph TEXT NOT NULL DEFAULT '[]',
+                replan_triggered INTEGER NOT NULL DEFAULT 0,
+                stop_reason TEXT NOT NULL DEFAULT '',
+                budget_usage TEXT NOT NULL DEFAULT '{}',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(session_id, round_no)
             );
@@ -237,6 +241,10 @@ class WebStore:
         )
         # 兼容历史库：补齐新增列
         self._ensure_column("stock_universe", "market_tier", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("deep_think_round", "task_graph", "TEXT NOT NULL DEFAULT '[]'")
+        self._ensure_column("deep_think_round", "replan_triggered", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("deep_think_round", "stop_reason", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("deep_think_round", "budget_usage", "TEXT NOT NULL DEFAULT '{}'")
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, sql_type: str) -> None:

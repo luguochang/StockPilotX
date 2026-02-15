@@ -65,6 +65,15 @@
 | S17.7 | Deep Agents 会话化与轮次化 | AGT-009 | [x] |
 | S17.11 | 多阶段技术映射（多 Agent 协议化） | AGT-010 | [x] |
 
+## 3.3 DeepThink Planner/Budget/Replan 映射（2026-02-15 Round-F）
+| Spec Ref | 要求摘要 | Task ID | 状态 |
+|---|---|---|---|
+| S8 | 多 Agent 深度协商的任务化执行 | AGT-011 | [x] |
+| S15 | 超预算可降级并可解释 | AGT-012 | [x] |
+| S17.6 | 治理链路预算控制与事件观测 | AGT-012 | [x] |
+| S17.7 | Deep Agents 的计划-执行-重规划闭环 | AGT-011 | [x] |
+| S17.11 | 阶段化工程映射持续迭代 | AGT-011, AGT-012 | [x] |
+
 ## 4. Prompt 文档映射
 | Spec Ref | 要求摘要 | Task ID | 状态 |
 |---|---|---|---|

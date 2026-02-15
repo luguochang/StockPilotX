@@ -352,7 +352,7 @@ class WebAppService:
         rounds = self.store.query_all(
             """
             SELECT round_id, session_id, round_no, status, consensus_signal, disagreement_score,
-                   conflict_sources, counter_view, created_at
+                   conflict_sources, counter_view, task_graph, replan_triggered, stop_reason, budget_usage, created_at
             FROM deep_think_round
             WHERE session_id = ?
             ORDER BY round_no ASC
@@ -361,6 +361,9 @@ class WebAppService:
         )
         for rnd in rounds:
             rnd["conflict_sources"] = self._json_loads_or(rnd.get("conflict_sources"), [])
+            rnd["task_graph"] = self._json_loads_or(rnd.get("task_graph"), [])
+            rnd["replan_triggered"] = bool(int(rnd.get("replan_triggered", 0)))
+            rnd["budget_usage"] = self._json_loads_or(rnd.get("budget_usage"), {})
             opinions = self.store.query_all(
                 """
                 SELECT agent_id, signal, confidence, reason, evidence_ids, risk_tags, created_at
@@ -388,14 +391,18 @@ class WebAppService:
         disagreement_score: float,
         conflict_sources: list[str],
         counter_view: str,
+        task_graph: list[dict[str, Any]],
+        replan_triggered: bool,
+        stop_reason: str,
+        budget_usage: dict[str, Any],
         opinions: list[dict[str, Any]],
         session_status: str,
     ) -> dict[str, Any]:
         self.store.execute(
             """
             INSERT INTO deep_think_round
-            (round_id, session_id, round_no, status, consensus_signal, disagreement_score, conflict_sources, counter_view)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (round_id, session_id, round_no, status, consensus_signal, disagreement_score, conflict_sources, counter_view, task_graph, replan_triggered, stop_reason, budget_usage)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 round_id,
@@ -406,6 +413,10 @@ class WebAppService:
                 disagreement_score,
                 json.dumps(conflict_sources, ensure_ascii=False),
                 counter_view,
+                json.dumps(task_graph, ensure_ascii=False),
+                int(replan_triggered),
+                stop_reason,
+                json.dumps(budget_usage, ensure_ascii=False),
             ),
         )
         for opinion in opinions:

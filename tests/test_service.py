@@ -110,6 +110,9 @@ class ServiceTestCase(unittest.TestCase):
         latest = updated["rounds"][-1]
         self.assertIn("consensus_signal", latest)
         self.assertGreaterEqual(len(latest["opinions"]), 8)
+        self.assertIn("task_graph", latest)
+        self.assertTrue(latest["task_graph"])
+        self.assertIn("budget_usage", latest)
 
         stream_events = list(self.svc.deep_think_stream_events(session_id))
         names = [x["event"] for x in stream_events]
@@ -117,6 +120,25 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("agent_opinion_final", names)
         self.assertIn("arbitration_final", names)
         self.assertEqual(names[-1], "done")
+        latest_round = updated["rounds"][-1]
+        has_optional_event = any(name in names for name in ("budget_warning", "replan_triggered"))
+        if latest_round.get("replan_triggered") or latest_round.get("budget_usage", {}).get("warn"):
+            self.assertTrue(has_optional_event)
+
+    def test_deep_think_budget_exceeded_stop(self) -> None:
+        created = self.svc.deep_think_create_session(
+            {
+                "user_id": "deep-u3",
+                "question": "请做深度多角色分析",
+                "stock_codes": ["SH600000"],
+                "budget": {"token_budget": 10, "time_budget_ms": 10, "tool_call_budget": 1},
+                "max_rounds": 3,
+            }
+        )
+        snapshot = self.svc.deep_think_run_round(created["session_id"], {})
+        latest = snapshot["rounds"][-1]
+        self.assertEqual(latest["stop_reason"], "DEEP_BUDGET_EXCEEDED")
+        self.assertEqual(snapshot["status"], "completed")
 
     def test_a2a_task_lifecycle(self) -> None:
         created = self.svc.deep_think_create_session(

@@ -297,6 +297,8 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(round_snapshot["current_round"], 1)
         self.assertTrue(round_snapshot["rounds"])
         self.assertIn("consensus_signal", round_snapshot["rounds"][-1])
+        self.assertIn("task_graph", round_snapshot["rounds"][-1])
+        self.assertIn("budget_usage", round_snapshot["rounds"][-1])
 
         c3, loaded = self._get(f"/v1/deep-think/sessions/{session_id}")
         self.assertEqual(c3, 200)
@@ -308,6 +310,9 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("event: round_started", stream_text)
         self.assertIn("event: agent_opinion_final", stream_text)
         self.assertIn("event: arbitration_final", stream_text)
+        latest = round_snapshot["rounds"][-1]
+        if latest.get("replan_triggered") or latest.get("budget_usage", {}).get("warn"):
+            self.assertTrue("event: budget_warning" in stream_text or "event: replan_triggered" in stream_text)
         self.assertIn("event: done", stream_text)
 
         c4, cards = self._get("/v1/a2a/agent-cards")
@@ -330,6 +335,24 @@ class HttpApiTestCase(unittest.TestCase):
         c6, loaded_task = self._get(f"/v1/a2a/tasks/{task_id}")
         self.assertEqual(c6, 200)
         self.assertEqual(loaded_task["task_id"], task_id)
+
+    def test_deep_think_budget_exceeded(self) -> None:
+        c1, session = self._post(
+            "/v1/deep-think/sessions",
+            {
+                "user_id": "api-deep-budget",
+                "question": "请深度分析SH600000",
+                "stock_codes": ["SH600000"],
+                "max_rounds": 3,
+                "budget": {"token_budget": 10, "time_budget_ms": 10, "tool_call_budget": 1},
+            },
+        )
+        self.assertEqual(c1, 200)
+        session_id = session["session_id"]
+        c2, snapshot = self._post(f"/v1/deep-think/sessions/{session_id}/rounds", {})
+        self.assertEqual(c2, 200)
+        latest = snapshot["rounds"][-1]
+        self.assertEqual(latest["stop_reason"], "DEEP_BUDGET_EXCEEDED")
 
 
 if __name__ == "__main__":
