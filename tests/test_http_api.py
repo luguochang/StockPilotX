@@ -319,6 +319,11 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c3b, 200)
         self.assertGreater(events_snapshot["count"], 0)
         self.assertTrue(any(str(x.get("event")) == "round_started" for x in events_snapshot["events"]))
+        c3c, done_events = self._get(f"/v1/deep-think/sessions/{session_id}/events?limit=120&event_name=done")
+        self.assertEqual(c3c, 200)
+        self.assertEqual(done_events["event_name"], "done")
+        self.assertGreater(done_events["count"], 0)
+        self.assertTrue(all(str(x.get("event")) == "done" for x in done_events["events"]))
 
         c4, cards = self._get("/v1/a2a/agent-cards")
         self.assertEqual(c4, 200)

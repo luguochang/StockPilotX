@@ -113,8 +113,13 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/v1/deep-think/sessions/{session_id}/events")
-    def deep_think_events(session_id: str, round_id: str = "", limit: int = 200):
-        result = svc.deep_think_list_events(session_id, round_id=round_id.strip() or None, limit=limit)
+    def deep_think_events(session_id: str, round_id: str = "", limit: int = 200, event_name: str = ""):
+        result = svc.deep_think_list_events(
+            session_id,
+            round_id=round_id.strip() or None,
+            limit=limit,
+            event_name=event_name.strip() or None,
+        )
         if "error" in result:
             raise HTTPException(status_code=404, detail=result)
         return result

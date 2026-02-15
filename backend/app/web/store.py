@@ -248,6 +248,7 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_deep_think_round_session ON deep_think_round(session_id, round_no);
             CREATE INDEX IF NOT EXISTS idx_deep_think_opinion_round ON deep_think_opinion(round_id);
             CREATE INDEX IF NOT EXISTS idx_deep_think_event_session ON deep_think_event(session_id, round_no, event_seq);
+            CREATE INDEX IF NOT EXISTS idx_deep_think_event_name ON deep_think_event(session_id, event_name, round_no, event_seq);
             CREATE INDEX IF NOT EXISTS idx_a2a_task_agent_status ON a2a_task(agent_id, status);
             CREATE INDEX IF NOT EXISTS idx_group_knowledge_topic ON group_knowledge_card(topic, quality_score);
             """

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import ReactECharts from "echarts-for-react";
-import { Alert, Button, Card, Col, Input, List, Progress, Row, Space, Statistic, Table, Tag, Timeline, Typography } from "antd";
+import { Alert, Button, Card, Col, Input, InputNumber, List, Progress, Row, Select, Space, Statistic, Table, Tag, Timeline, Typography } from "antd";
 import MediaCarousel from "../components/MediaCarousel";
 import StockSelectorModal from "../components/StockSelectorModal";
 
@@ -169,6 +169,9 @@ export default function DeepThinkPage() {
   const [deepLastA2ATask, setDeepLastA2ATask] = useState<{ task_id: string; status: string; agent_id: string } | null>(null);
   const [deepArchiveLoading, setDeepArchiveLoading] = useState(false);
   const [deepArchiveCount, setDeepArchiveCount] = useState(0);
+  const [deepArchiveRoundId, setDeepArchiveRoundId] = useState("");
+  const [deepArchiveEventName, setDeepArchiveEventName] = useState("");
+  const [deepArchiveLimit, setDeepArchiveLimit] = useState(220);
 
   function formatDeepPercent(used: number, limit: number): number {
     const safeLimit = Number(limit) <= 0 ? 1 : Number(limit);
@@ -402,12 +405,20 @@ export default function DeepThinkPage() {
     return body as DeepThinkSession;
   }
 
-  async function loadDeepThinkEventArchive(sessionId: string, roundId = "", limit = 220) {
+  async function loadDeepThinkEventArchive(
+    sessionId: string,
+    options?: { roundId?: string; eventName?: string; limit?: number }
+  ) {
     if (!sessionId) return;
     setDeepArchiveLoading(true);
     try {
+      const roundId = String(options?.roundId ?? deepArchiveRoundId).trim();
+      const eventName = String(options?.eventName ?? deepArchiveEventName).trim();
+      const limitRaw = Number(options?.limit ?? deepArchiveLimit);
+      const limit = Number.isFinite(limitRaw) ? Math.max(20, Math.min(2000, Math.floor(limitRaw))) : 220;
       const params = new URLSearchParams();
       if (roundId) params.set("round_id", roundId);
+      if (eventName) params.set("event_name", eventName);
       params.set("limit", String(limit));
       const qs = params.toString();
       const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${sessionId}/events${qs ? `?${qs}` : ""}`);
@@ -459,7 +470,7 @@ export default function DeepThinkPage() {
       const loaded = body as DeepThinkSession;
       setDeepSession(loaded);
       const latest = loaded.rounds?.length ? loaded.rounds[loaded.rounds.length - 1] : null;
-      await loadDeepThinkEventArchive(loaded.session_id, String(latest?.round_id ?? ""));
+      await loadDeepThinkEventArchive(loaded.session_id, { roundId: String(latest?.round_id ?? "") });
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "刷新 DeepThink 会话失败");
     } finally {
@@ -540,6 +551,19 @@ export default function DeepThinkPage() {
     }
   }
 
+  useEffect(() => {
+    if (!deepSession) {
+      setDeepArchiveRoundId("");
+      return;
+    }
+    const roundIds = new Set((deepSession.rounds ?? []).map((x) => String(x.round_id)));
+    setDeepArchiveRoundId((prev) => {
+      if (prev && roundIds.has(prev)) return prev;
+      const latestId = deepSession.rounds?.length ? String(deepSession.rounds[deepSession.rounds.length - 1].round_id) : "";
+      return latestId;
+    });
+  }, [deepSession]);
+
   const trendOption = useMemo(() => {
     const bars = overview?.history ?? [];
     return {
@@ -615,6 +639,39 @@ export default function DeepThinkPage() {
     .map(([k, v]) => ({ key: k, factor: k, value: Number(v).toFixed(6) }));
   const deepRounds = deepSession?.rounds ?? [];
   const latestDeepRound = deepRounds.length ? deepRounds[deepRounds.length - 1] : null;
+  const deepArchiveRoundOptions = useMemo(
+    () => [
+      { label: "全部轮次", value: "" },
+      ...deepRounds.map((round) => ({
+        label: `R${round.round_no} · ${String(round.round_id).slice(-6)}`,
+        value: String(round.round_id),
+      })),
+    ],
+    [deepRounds]
+  );
+  const deepArchiveEventOptions = useMemo(() => {
+    const known = [
+      "round_started",
+      "budget_warning",
+      "agent_opinion_delta",
+      "agent_opinion_final",
+      "critic_feedback",
+      "arbitration_final",
+      "replan_triggered",
+      "done",
+    ];
+    const dynamic = deepStreamEvents
+      .map((x) => String(x.event ?? "").trim())
+      .filter((x) => x.length > 0);
+    const unique = Array.from(new Set([...known, ...dynamic]));
+    return unique.map((eventName) => ({ label: eventName, value: eventName }));
+  }, [deepStreamEvents]);
+  const deepReplayRows = useMemo(() => {
+    const filtered = deepArchiveEventName
+      ? deepStreamEvents.filter((x) => String(x.event ?? "") === deepArchiveEventName)
+      : deepStreamEvents;
+    return [...filtered].reverse().slice(0, 16);
+  }, [deepArchiveEventName, deepStreamEvents]);
   const latestBudget = latestDeepRound?.budget_usage;
   const deepTimelineItems = deepRounds.map((round) => ({
     color: round.replan_triggered ? "orange" : round.stop_reason ? "red" : "blue",
@@ -999,6 +1056,27 @@ export default function DeepThinkPage() {
                   基于后端 `/v1/deep-think/*` 接口按轮执行，展示 task graph、冲突源、预算消耗和重规划信号。
                 </Text>
                 <Space wrap>
+                  <Select
+                    style={{ minWidth: 140 }}
+                    value={deepArchiveRoundId}
+                    onChange={(v) => setDeepArchiveRoundId(String(v ?? ""))}
+                    options={deepArchiveRoundOptions}
+                  />
+                  <Select
+                    style={{ minWidth: 190 }}
+                    value={deepArchiveEventName}
+                    onChange={(v) => setDeepArchiveEventName(String(v ?? ""))}
+                    options={[{ label: "全部事件", value: "" }, ...deepArchiveEventOptions]}
+                  />
+                  <InputNumber
+                    min={20}
+                    max={2000}
+                    step={20}
+                    value={deepArchiveLimit}
+                    onChange={(v) => setDeepArchiveLimit(Number(v ?? 220))}
+                  />
+                </Space>
+                <Space wrap>
                   <Button onClick={startDeepThinkSession} loading={deepLoading}>
                     新建会话
                   </Button>
@@ -1012,7 +1090,13 @@ export default function DeepThinkPage() {
                     刷新会话
                   </Button>
                   <Button
-                    onClick={() => loadDeepThinkEventArchive(deepSession?.session_id ?? "", String(latestDeepRound?.round_id ?? ""))}
+                    onClick={() =>
+                      loadDeepThinkEventArchive(deepSession?.session_id ?? "", {
+                        roundId: deepArchiveRoundId,
+                        eventName: deepArchiveEventName,
+                        limit: deepArchiveLimit
+                      })
+                    }
                     disabled={!deepSession?.session_id}
                     loading={deepArchiveLoading}
                   >
@@ -1199,10 +1283,13 @@ export default function DeepThinkPage() {
             </Card>
 
             <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>SSE 回放事件</span>} style={{ marginTop: 12 }}>
+              <Text style={{ color: "#64748b" }}>
+                当前筛选：round={deepArchiveRoundId ? deepArchiveRoundId : "all"} | event={deepArchiveEventName || "all"} | limit={deepArchiveLimit}
+              </Text>
               <List
                 size="small"
                 locale={{ emptyText: "暂无流事件记录" }}
-                dataSource={[...deepStreamEvents].reverse().slice(0, 16)}
+                dataSource={deepReplayRows}
                 renderItem={(item) => (
                   <List.Item>
                     <Space direction="vertical" size={1}>

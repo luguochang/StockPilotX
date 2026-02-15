@@ -454,6 +454,7 @@ class WebAppService:
         round_id: str,
         round_no: int,
         events: list[dict[str, Any]],
+        max_events: int = 1200,
     ) -> None:
         self.store.execute(
             """
@@ -480,6 +481,24 @@ class WebAppService:
                     json.dumps(data, ensure_ascii=False),
                 ),
             )
+        self.deep_think_trim_events(session_id=session_id, max_events=max_events)
+
+    def deep_think_trim_events(self, *, session_id: str, max_events: int = 1200) -> None:
+        safe_max = max(1, min(5000, int(max_events)))
+        self.store.execute(
+            """
+            DELETE FROM deep_think_event
+            WHERE session_id = ?
+            AND id NOT IN (
+                SELECT id
+                FROM deep_think_event
+                WHERE session_id = ?
+                ORDER BY round_no DESC, event_seq DESC, id DESC
+                LIMIT ?
+            )
+            """,
+            (session_id, session_id, safe_max),
+        )
 
     def deep_think_list_events(
         self,
@@ -487,30 +506,26 @@ class WebAppService:
         session_id: str,
         round_id: str | None = None,
         limit: int = 200,
+        event_name: str | None = None,
     ) -> list[dict[str, Any]]:
         safe_limit = max(1, min(2000, int(limit)))
+        conditions = ["session_id = ?"]
+        params: list[Any] = [session_id]
         if round_id:
-            rows = self.store.query_all(
-                """
-                SELECT session_id, round_id, round_no, event_seq, event_name, data_json, created_at
-                FROM deep_think_event
-                WHERE session_id = ? AND round_id = ?
-                ORDER BY round_no ASC, event_seq ASC, id ASC
-                LIMIT ?
-                """,
-                (session_id, round_id, safe_limit),
-            )
-        else:
-            rows = self.store.query_all(
-                """
-                SELECT session_id, round_id, round_no, event_seq, event_name, data_json, created_at
-                FROM deep_think_event
-                WHERE session_id = ?
-                ORDER BY round_no ASC, event_seq ASC, id ASC
-                LIMIT ?
-                """,
-                (session_id, safe_limit),
-            )
+            conditions.append("round_id = ?")
+            params.append(round_id)
+        if event_name:
+            conditions.append("event_name = ?")
+            params.append(event_name)
+        params.append(safe_limit)
+        sql = f"""
+            SELECT session_id, round_id, round_no, event_seq, event_name, data_json, created_at
+            FROM deep_think_event
+            WHERE {' AND '.join(conditions)}
+            ORDER BY round_no ASC, event_seq ASC, id ASC
+            LIMIT ?
+            """
+        rows = self.store.query_all(sql, tuple(params))
         for row in rows:
             row["data"] = self._json_loads_or(row.get("data_json"), {})
             row.pop("data_json", None)

@@ -971,6 +971,12 @@ class AShareAgentService:
         max_rounds = int(session.get("max_rounds", 1))
         question = str(payload.get("question", session.get("question", "")))
         stock_codes = [str(x).upper() for x in payload.get("stock_codes", session.get("stock_codes", []))]
+        archive_max_raw = payload.get("archive_max_events", 1200)
+        try:
+            archive_max_events = int(archive_max_raw)
+        except Exception:  # noqa: BLE001
+            archive_max_events = 1200
+        archive_max_events = max(1, min(5000, archive_max_events))
         code = stock_codes[0] if stock_codes else "SH600000"
         task_graph = self._deep_plan_tasks(question, round_no)
         budget = session.get("budget", {}) if isinstance(session.get("budget", {}), dict) else {}
@@ -1157,6 +1163,7 @@ class AShareAgentService:
                 round_id=str(latest_round.get("round_id", round_id)),
                 round_no=int(latest_round.get("round_no", round_no)),
                 events=self._build_deep_think_round_events(session_id, latest_round),
+                max_events=archive_max_events,
             )
         return snapshot
 
@@ -1256,18 +1263,22 @@ class AShareAgentService:
         *,
         round_id: str | None = None,
         limit: int = 200,
+        event_name: str | None = None,
     ) -> dict[str, Any]:
         session = self.web.deep_think_get_session(session_id)
         if not session:
             return {"error": "not_found", "session_id": session_id}
+        event_name_clean = str(event_name or "").strip() or None
         events = self.web.deep_think_list_events(
             session_id=session_id,
             round_id=(round_id or None),
             limit=max(1, min(2000, int(limit))),
+            event_name=event_name_clean,
         )
         return {
             "session_id": session_id,
             "round_id": (round_id or ""),
+            "event_name": (event_name_clean or ""),
             "count": len(events),
             "events": events,
         }

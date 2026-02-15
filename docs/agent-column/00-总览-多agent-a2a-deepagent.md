@@ -37,7 +37,8 @@
 10. Round-F：DeepThink Planner + Budget + Replan 实现记录  
 11. Round-G：首页导航化与 DeepThink 独立页面实现记录  
 12. Round-H：DeepThink 轮次可视化与治理看板实现记录  
-13. Round-I：DeepThink 跨轮差分、冲突下钻与事件存档实现记录
+13. Round-I：DeepThink 跨轮差分、冲突下钻与事件存档实现记录  
+14. Round-J：DeepThink 事件过滤与归档保留治理实现记录
 
 ## 6. 参考资料
 - A2A Specification: https://a2aproject.github.io/A2A/specification/

@@ -125,6 +125,13 @@ class ServiceTestCase(unittest.TestCase):
         stored_names = [str(x.get("event", "")) for x in events_snapshot["events"]]
         self.assertIn("round_started", stored_names)
         self.assertIn("done", stored_names)
+        done_only = self.svc.deep_think_list_events(session_id, event_name="done")
+        self.assertGreater(done_only["count"], 0)
+        self.assertTrue(all(str(x.get("event", "")) == "done" for x in done_only["events"]))
+        updated2 = self.svc.deep_think_run_round(session_id, {"archive_max_events": 4})
+        self.assertEqual(updated2["current_round"], 2)
+        trimmed = self.svc.deep_think_list_events(session_id, limit=2000)
+        self.assertLessEqual(trimmed["count"], 4)
         latest_round = updated["rounds"][-1]
         has_optional_event = any(name in names for name in ("budget_warning", "replan_triggered"))
         if latest_round.get("replan_triggered") or latest_round.get("budget_usage", {}).get("warn"):

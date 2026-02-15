@@ -93,3 +93,10 @@
 - Added frontend archive controls (`加载会话存档` + `archive_events` counter) for audit-friendly replay.
 - Added frontend round-to-round opinion diff panel and conflict drill-down table (including `evidence_ids`).
 - Validation kept green: targeted backend tests `27 passed`; full backend regression `63 passed`; frontend build + typecheck passed.
+
+## Round-J Update (2026-02-15)
+- Extended DeepThink archive API with event-level filter: `/v1/deep-think/sessions/{session_id}/events?event_name=...`.
+- Added session-scoped archive retention trimming to control event growth after each round snapshot write.
+- Added frontend archive filter console (`round/event/limit`) and filtered replay rendering in `/deep-think`.
+- Added regression assertions for event filter contract and retention cap behavior.
+- Validation kept green: targeted backend tests `27 passed`; full backend regression `63 passed`; frontend build + typecheck passed.
