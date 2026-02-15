@@ -5,6 +5,7 @@ import subprocess
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -324,6 +325,39 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(done_events["event_name"], "done")
         self.assertGreater(done_events["count"], 0)
         self.assertTrue(all(str(x.get("event")) == "done" for x in done_events["events"]))
+        first_event = events_snapshot["events"][0]
+        first_event_id = int(first_event.get("event_id", 0))
+        c3d, cursor_page = self._get(f"/v1/deep-think/sessions/{session_id}/events?limit=120&cursor={first_event_id}")
+        self.assertEqual(c3d, 200)
+        self.assertIn("has_more", cursor_page)
+        self.assertIn("next_cursor", cursor_page)
+        self.assertTrue(all(int(x.get("event_id", 0)) > first_event_id for x in cursor_page["events"]))
+        created_from = urllib.parse.quote(str(first_event.get("created_at", "")))
+        c3e, created_page = self._get(
+            f"/v1/deep-think/sessions/{session_id}/events?limit=120&created_from={created_from}"
+        )
+        self.assertEqual(c3e, 200)
+        self.assertGreater(created_page["count"], 0)
+        with urllib.request.urlopen(
+            self.base_url + f"/v1/deep-think/sessions/{session_id}/events/export?format=jsonl&limit=120&event_name=done",
+            timeout=8,
+        ) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIn("application/x-ndjson", resp.headers.get("Content-Type", ""))
+            self.assertIn(".jsonl", resp.headers.get("Content-Disposition", ""))
+            exported_jsonl = resp.read().decode("utf-8")
+        jsonl_lines = [line for line in exported_jsonl.splitlines() if line.strip()]
+        self.assertGreater(len(jsonl_lines), 0)
+        self.assertTrue(all(str(json.loads(line).get("event")) == "done" for line in jsonl_lines))
+        with urllib.request.urlopen(
+            self.base_url + f"/v1/deep-think/sessions/{session_id}/events/export?format=csv&limit=120",
+            timeout=8,
+        ) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIn("text/csv", resp.headers.get("Content-Type", ""))
+            self.assertIn(".csv", resp.headers.get("Content-Disposition", ""))
+            exported_csv = resp.read().decode("utf-8")
+        self.assertIn("event_id,session_id,round_id,round_no,event_seq,event,created_at,data_json", exported_csv.splitlines()[0])
 
         c4, cards = self._get("/v1/a2a/agent-cards")
         self.assertEqual(c4, 200)

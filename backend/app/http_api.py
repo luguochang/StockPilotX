@@ -7,7 +7,7 @@ from backend.app.service import AShareAgentService
 try:
     from fastapi import FastAPI, Header, HTTPException
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import StreamingResponse
+    from fastapi.responses import Response, StreamingResponse
 except Exception as ex:  # pragma: no cover
     raise RuntimeError("FastAPI is not installed. Please install fastapi and uvicorn.") from ex
 
@@ -113,16 +113,62 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/v1/deep-think/sessions/{session_id}/events")
-    def deep_think_events(session_id: str, round_id: str = "", limit: int = 200, event_name: str = ""):
+    def deep_think_events(
+        session_id: str,
+        round_id: str = "",
+        limit: int = 200,
+        event_name: str = "",
+        cursor: int = 0,
+        created_from: str = "",
+        created_to: str = "",
+    ):
         result = svc.deep_think_list_events(
             session_id,
             round_id=round_id.strip() or None,
             limit=limit,
             event_name=event_name.strip() or None,
+            cursor=(cursor if cursor > 0 else None),
+            created_from=created_from.strip() or None,
+            created_to=created_to.strip() or None,
         )
         if "error" in result:
             raise HTTPException(status_code=404, detail=result)
         return result
+
+    @app.get("/v1/deep-think/sessions/{session_id}/events/export")
+    def deep_think_events_export(
+        session_id: str,
+        format: str = "jsonl",
+        round_id: str = "",
+        limit: int = 200,
+        event_name: str = "",
+        cursor: int = 0,
+        created_from: str = "",
+        created_to: str = "",
+    ):
+        try:
+            result = svc.deep_think_export_events(
+                session_id,
+                round_id=round_id.strip() or None,
+                limit=limit,
+                event_name=event_name.strip() or None,
+                cursor=(cursor if cursor > 0 else None),
+                created_from=created_from.strip() or None,
+                created_to=created_to.strip() or None,
+                format=format,
+            )
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result)
+        filename = str(result.get("filename", "deepthink-events.txt"))
+        media_type = str(result.get("media_type", "text/plain; charset=utf-8"))
+        content = str(result.get("content", ""))
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.post("/v1/report/generate")
     def report_generate(payload: dict):

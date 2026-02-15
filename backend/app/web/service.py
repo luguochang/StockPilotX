@@ -500,15 +500,24 @@ class WebAppService:
             (session_id, session_id, safe_max),
         )
 
-    def deep_think_list_events(
+    def deep_think_list_events_page(
         self,
         *,
         session_id: str,
         round_id: str | None = None,
         limit: int = 200,
         event_name: str | None = None,
-    ) -> list[dict[str, Any]]:
+        cursor: int | None = None,
+        created_from: str | None = None,
+        created_to: str | None = None,
+    ) -> dict[str, Any]:
         safe_limit = max(1, min(2000, int(limit)))
+        safe_cursor = None
+        if cursor is not None:
+            try:
+                safe_cursor = max(0, int(cursor))
+            except Exception:  # noqa: BLE001
+                safe_cursor = None
         conditions = ["session_id = ?"]
         params: list[Any] = [session_id]
         if round_id:
@@ -517,20 +526,55 @@ class WebAppService:
         if event_name:
             conditions.append("event_name = ?")
             params.append(event_name)
-        params.append(safe_limit)
+        if created_from:
+            conditions.append("created_at >= ?")
+            params.append(created_from)
+        if created_to:
+            conditions.append("created_at <= ?")
+            params.append(created_to)
+        if safe_cursor is not None and safe_cursor > 0:
+            conditions.append("id > ?")
+            params.append(safe_cursor)
+        params.append(safe_limit + 1)
         sql = f"""
-            SELECT session_id, round_id, round_no, event_seq, event_name, data_json, created_at
+            SELECT id, session_id, round_id, round_no, event_seq, event_name, data_json, created_at
             FROM deep_think_event
             WHERE {' AND '.join(conditions)}
-            ORDER BY round_no ASC, event_seq ASC, id ASC
+            ORDER BY id ASC
             LIMIT ?
             """
         rows = self.store.query_all(sql, tuple(params))
-        for row in rows:
+        has_more = len(rows) > safe_limit
+        page_rows = rows[:safe_limit]
+        for row in page_rows:
+            row["event_id"] = int(row.pop("id"))
             row["data"] = self._json_loads_or(row.get("data_json"), {})
             row.pop("data_json", None)
             row["event"] = row.pop("event_name", "message")
-        return rows
+        next_cursor = int(page_rows[-1]["event_id"]) if has_more and page_rows else None
+        return {"events": page_rows, "has_more": has_more, "next_cursor": next_cursor}
+
+    def deep_think_list_events(
+        self,
+        *,
+        session_id: str,
+        round_id: str | None = None,
+        limit: int = 200,
+        event_name: str | None = None,
+        cursor: int | None = None,
+        created_from: str | None = None,
+        created_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        page = self.deep_think_list_events_page(
+            session_id=session_id,
+            round_id=round_id,
+            limit=limit,
+            event_name=event_name,
+            cursor=cursor,
+            created_from=created_from,
+            created_to=created_to,
+        )
+        return list(page.get("events", []))
 
     def register_agent_card(
         self,

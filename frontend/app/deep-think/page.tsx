@@ -103,8 +103,16 @@ type DeepThinkStreamEvent = { event: string; data: Record<string, any>; emitted_
 type DeepThinkEventArchiveSnapshot = {
   session_id: string;
   round_id: string;
+  event_name: string;
+  cursor: number;
+  limit: number;
+  created_from: string;
+  created_to: string;
+  has_more: boolean;
+  next_cursor: number | null;
   count: number;
   events: Array<{
+    event_id?: number;
     session_id: string;
     round_id: string;
     round_no: number;
@@ -113,6 +121,15 @@ type DeepThinkEventArchiveSnapshot = {
     data: Record<string, any>;
     created_at: string;
   }>;
+};
+type DeepThinkArchiveLoadOptions = {
+  roundId?: string;
+  eventName?: string;
+  limit?: number;
+  cursor?: number;
+  createdFrom?: string;
+  createdTo?: string;
+  append?: boolean;
 };
 
 function CountUp({ value, suffix = "" }: { value: number; suffix?: string }) {
@@ -172,6 +189,12 @@ export default function DeepThinkPage() {
   const [deepArchiveRoundId, setDeepArchiveRoundId] = useState("");
   const [deepArchiveEventName, setDeepArchiveEventName] = useState("");
   const [deepArchiveLimit, setDeepArchiveLimit] = useState(220);
+  const [deepArchiveCursor, setDeepArchiveCursor] = useState(0);
+  const [deepArchiveHasMore, setDeepArchiveHasMore] = useState(false);
+  const [deepArchiveNextCursor, setDeepArchiveNextCursor] = useState<number | null>(null);
+  const [deepArchiveCreatedFrom, setDeepArchiveCreatedFrom] = useState("");
+  const [deepArchiveCreatedTo, setDeepArchiveCreatedTo] = useState("");
+  const [deepArchiveExporting, setDeepArchiveExporting] = useState(false);
 
   function formatDeepPercent(used: number, limit: number): number {
     const safeLimit = Number(limit) <= 0 ? 1 : Number(limit);
@@ -407,7 +430,7 @@ export default function DeepThinkPage() {
 
   async function loadDeepThinkEventArchive(
     sessionId: string,
-    options?: { roundId?: string; eventName?: string; limit?: number }
+    options?: DeepThinkArchiveLoadOptions
   ) {
     if (!sessionId) return;
     setDeepArchiveLoading(true);
@@ -416,9 +439,17 @@ export default function DeepThinkPage() {
       const eventName = String(options?.eventName ?? deepArchiveEventName).trim();
       const limitRaw = Number(options?.limit ?? deepArchiveLimit);
       const limit = Number.isFinite(limitRaw) ? Math.max(20, Math.min(2000, Math.floor(limitRaw))) : 220;
+      const cursorRaw = Number(options?.cursor ?? 0);
+      const cursor = Number.isFinite(cursorRaw) ? Math.max(0, Math.floor(cursorRaw)) : 0;
+      const createdFrom = String(options?.createdFrom ?? deepArchiveCreatedFrom).trim();
+      const createdTo = String(options?.createdTo ?? deepArchiveCreatedTo).trim();
+      const append = Boolean(options?.append);
       const params = new URLSearchParams();
       if (roundId) params.set("round_id", roundId);
       if (eventName) params.set("event_name", eventName);
+      if (cursor > 0) params.set("cursor", String(cursor));
+      if (createdFrom) params.set("created_from", createdFrom);
+      if (createdTo) params.set("created_to", createdTo);
       params.set("limit", String(limit));
       const qs = params.toString();
       const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${sessionId}/events${qs ? `?${qs}` : ""}`);
@@ -426,18 +457,75 @@ export default function DeepThinkPage() {
       if (!resp.ok) throw new Error(body?.detail ?? `HTTP ${resp.status}`);
       const payload = body as DeepThinkEventArchiveSnapshot;
       const rows = Array.isArray(payload.events) ? payload.events : [];
+      const mappedRows = rows.map((row) => ({
+        event: String(row.event ?? "message"),
+        data: (row.data ?? {}) as Record<string, any>,
+        emitted_at: String(row.created_at ?? "")
+      }));
       setDeepArchiveCount(Number(payload.count ?? rows.length));
-      setDeepStreamEvents(
-        rows.map((row) => ({
-          event: String(row.event ?? "message"),
-          data: (row.data ?? {}) as Record<string, any>,
-          emitted_at: String(row.created_at ?? "")
-        }))
-      );
+      setDeepArchiveRoundId(roundId);
+      setDeepArchiveEventName(eventName);
+      setDeepArchiveLimit(limit);
+      setDeepArchiveCreatedFrom(createdFrom);
+      setDeepArchiveCreatedTo(createdTo);
+      setDeepArchiveCursor(Number(payload.cursor ?? cursor));
+      setDeepArchiveHasMore(Boolean(payload.has_more));
+      setDeepArchiveNextCursor(payload.next_cursor == null ? null : Number(payload.next_cursor));
+      setDeepStreamEvents((prev) => (append ? [...prev, ...mappedRows] : mappedRows));
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "加载 DeepThink 事件存档失败");
     } finally {
       setDeepArchiveLoading(false);
+    }
+  }
+
+  async function loadNextDeepThinkArchivePage() {
+    if (!deepSession?.session_id) return;
+    if (!deepArchiveHasMore || !deepArchiveNextCursor) return;
+    await loadDeepThinkEventArchive(deepSession.session_id, {
+      roundId: deepArchiveRoundId,
+      eventName: deepArchiveEventName,
+      limit: deepArchiveLimit,
+      cursor: deepArchiveNextCursor,
+      createdFrom: deepArchiveCreatedFrom,
+      createdTo: deepArchiveCreatedTo,
+      append: true
+    });
+  }
+
+  async function exportDeepThinkEventArchive(format: "jsonl" | "csv") {
+    if (!deepSession?.session_id) return;
+    setDeepArchiveExporting(true);
+    try {
+      const params = new URLSearchParams();
+      if (deepArchiveRoundId) params.set("round_id", deepArchiveRoundId);
+      if (deepArchiveEventName) params.set("event_name", deepArchiveEventName);
+      if (deepArchiveCreatedFrom) params.set("created_from", deepArchiveCreatedFrom);
+      if (deepArchiveCreatedTo) params.set("created_to", deepArchiveCreatedTo);
+      params.set("limit", String(Math.max(20, Math.min(2000, Math.floor(deepArchiveLimit)))));
+      params.set("format", format);
+      const qs = params.toString();
+      const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${deepSession.session_id}/events/export${qs ? `?${qs}` : ""}`);
+      if (!resp.ok) {
+        const detail = await resp.text();
+        throw new Error(detail || `HTTP ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      const disposition = resp.headers.get("Content-Disposition") ?? "";
+      const match = disposition.match(/filename=\"?([^\";]+)\"?/i);
+      const filename = (match?.[1] || `deepthink-events-${deepSession.session_id}.${format}`).trim();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setDeepError(e instanceof Error ? e.message : "导出 DeepThink 事件存档失败");
+    } finally {
+      setDeepArchiveExporting(false);
     }
   }
 
@@ -451,7 +539,10 @@ export default function DeepThinkPage() {
       setDeepLastA2ATask(null);
       setDeepStreamEvents([]);
       setDeepArchiveCount(0);
-      await loadDeepThinkEventArchive(created.session_id);
+      setDeepArchiveCursor(0);
+      setDeepArchiveHasMore(false);
+      setDeepArchiveNextCursor(null);
+      await loadDeepThinkEventArchive(created.session_id, { cursor: 0 });
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "创建 DeepThink 会话失败");
     } finally {
@@ -470,7 +561,7 @@ export default function DeepThinkPage() {
       const loaded = body as DeepThinkSession;
       setDeepSession(loaded);
       const latest = loaded.rounds?.length ? loaded.rounds[loaded.rounds.length - 1] : null;
-      await loadDeepThinkEventArchive(loaded.session_id, { roundId: String(latest?.round_id ?? "") });
+      await loadDeepThinkEventArchive(loaded.session_id, { roundId: String(latest?.round_id ?? ""), cursor: 0 });
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "刷新 DeepThink 会话失败");
     } finally {
@@ -488,7 +579,7 @@ export default function DeepThinkPage() {
         throw new Error(detail || `HTTP ${resp.status}`);
       }
       await readSSEAndConsume(resp, (eventName, payload) => appendDeepEvent(eventName, payload));
-      await loadDeepThinkEventArchive(sessionId);
+      await loadDeepThinkEventArchive(sessionId, { cursor: 0 });
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "回放 DeepThink 事件流失败");
     } finally {
@@ -554,6 +645,9 @@ export default function DeepThinkPage() {
   useEffect(() => {
     if (!deepSession) {
       setDeepArchiveRoundId("");
+      setDeepArchiveCursor(0);
+      setDeepArchiveHasMore(false);
+      setDeepArchiveNextCursor(null);
       return;
     }
     const roundIds = new Set((deepSession.rounds ?? []).map((x) => String(x.round_id)));
@@ -1075,6 +1169,18 @@ export default function DeepThinkPage() {
                     value={deepArchiveLimit}
                     onChange={(v) => setDeepArchiveLimit(Number(v ?? 220))}
                   />
+                  <Input
+                    style={{ minWidth: 200 }}
+                    value={deepArchiveCreatedFrom}
+                    onChange={(e) => setDeepArchiveCreatedFrom(e.target.value)}
+                    placeholder="created_from (YYYY-MM-DD HH:mm:ss)"
+                  />
+                  <Input
+                    style={{ minWidth: 200 }}
+                    value={deepArchiveCreatedTo}
+                    onChange={(e) => setDeepArchiveCreatedTo(e.target.value)}
+                    placeholder="created_to (YYYY-MM-DD HH:mm:ss)"
+                  />
                 </Space>
                 <Space wrap>
                   <Button onClick={startDeepThinkSession} loading={deepLoading}>
@@ -1094,13 +1200,37 @@ export default function DeepThinkPage() {
                       loadDeepThinkEventArchive(deepSession?.session_id ?? "", {
                         roundId: deepArchiveRoundId,
                         eventName: deepArchiveEventName,
-                        limit: deepArchiveLimit
+                        limit: deepArchiveLimit,
+                        cursor: 0,
+                        createdFrom: deepArchiveCreatedFrom,
+                        createdTo: deepArchiveCreatedTo
                       })
                     }
                     disabled={!deepSession?.session_id}
                     loading={deepArchiveLoading}
                   >
                     加载会话存档
+                  </Button>
+                  <Button
+                    onClick={loadNextDeepThinkArchivePage}
+                    disabled={!deepSession?.session_id || !deepArchiveHasMore || deepArchiveLoading}
+                    loading={deepArchiveLoading}
+                  >
+                    下一页存档
+                  </Button>
+                  <Button
+                    onClick={() => exportDeepThinkEventArchive("jsonl")}
+                    disabled={!deepSession?.session_id}
+                    loading={deepArchiveExporting}
+                  >
+                    导出JSONL
+                  </Button>
+                  <Button
+                    onClick={() => exportDeepThinkEventArchive("csv")}
+                    disabled={!deepSession?.session_id}
+                    loading={deepArchiveExporting}
+                  >
+                    导出CSV
                   </Button>
                   <Button onClick={() => replayDeepThinkStream(deepSession?.session_id ?? "")} disabled={!deepSession?.session_id} loading={deepStreaming}>
                     回放最新轮次流
@@ -1111,6 +1241,8 @@ export default function DeepThinkPage() {
                   <Tag color={deepSession?.status === "completed" ? "green" : "processing"}>status: {deepSession?.status ?? "idle"}</Tag>
                   <Tag>round: {deepSession?.current_round ?? 0}/{deepSession?.max_rounds ?? 0}</Tag>
                   <Tag color={deepArchiveCount > 0 ? "cyan" : "default"}>archive_events: {deepArchiveCount}</Tag>
+                  <Tag color={deepArchiveHasMore ? "gold" : "default"}>has_more: {String(deepArchiveHasMore)}</Tag>
+                  <Tag>next_cursor: {deepArchiveNextCursor ?? "-"}</Tag>
                   {latestDeepRound?.replan_triggered ? <Tag color="orange">replan_triggered</Tag> : null}
                   {latestDeepRound?.stop_reason ? <Tag color="red">{latestDeepRound.stop_reason}</Tag> : null}
                 </Space>
@@ -1284,7 +1416,7 @@ export default function DeepThinkPage() {
 
             <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>SSE 回放事件</span>} style={{ marginTop: 12 }}>
               <Text style={{ color: "#64748b" }}>
-                当前筛选：round={deepArchiveRoundId ? deepArchiveRoundId : "all"} | event={deepArchiveEventName || "all"} | limit={deepArchiveLimit}
+                当前筛选：round={deepArchiveRoundId ? deepArchiveRoundId : "all"} | event={deepArchiveEventName || "all"} | limit={deepArchiveLimit} | cursor={deepArchiveCursor} | from={deepArchiveCreatedFrom || "-"} | to={deepArchiveCreatedTo || "-"}
               </Text>
               <List
                 size="small"

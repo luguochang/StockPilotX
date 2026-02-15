@@ -1,7 +1,9 @@
 ﻿from __future__ import annotations
 
-import json
+import csv
 import difflib
+import io
+import json
 from concurrent.futures import ThreadPoolExecutor
 import uuid
 from datetime import datetime, timezone
@@ -1264,23 +1266,122 @@ class AShareAgentService:
         round_id: str | None = None,
         limit: int = 200,
         event_name: str | None = None,
+        cursor: int | None = None,
+        created_from: str | None = None,
+        created_to: str | None = None,
     ) -> dict[str, Any]:
         session = self.web.deep_think_get_session(session_id)
         if not session:
             return {"error": "not_found", "session_id": session_id}
+        try:
+            safe_limit = max(1, min(2000, int(limit)))
+        except Exception:  # noqa: BLE001
+            safe_limit = 200
+        safe_cursor = None
+        if cursor is not None:
+            try:
+                safe_cursor = max(0, int(cursor))
+            except Exception:  # noqa: BLE001
+                safe_cursor = None
         event_name_clean = str(event_name or "").strip() or None
-        events = self.web.deep_think_list_events(
+        created_from_clean = str(created_from or "").strip() or None
+        created_to_clean = str(created_to or "").strip() or None
+        page = self.web.deep_think_list_events_page(
             session_id=session_id,
             round_id=(round_id or None),
-            limit=max(1, min(2000, int(limit))),
+            limit=safe_limit,
             event_name=event_name_clean,
+            cursor=safe_cursor,
+            created_from=created_from_clean,
+            created_to=created_to_clean,
         )
+        events = list(page.get("events", []))
         return {
             "session_id": session_id,
             "round_id": (round_id or ""),
             "event_name": (event_name_clean or ""),
+            "cursor": int(safe_cursor or 0),
+            "limit": safe_limit,
+            "created_from": (created_from_clean or ""),
+            "created_to": (created_to_clean or ""),
+            "has_more": bool(page.get("has_more", False)),
+            "next_cursor": page.get("next_cursor"),
             "count": len(events),
             "events": events,
+        }
+
+    def deep_think_export_events(
+        self,
+        session_id: str,
+        *,
+        round_id: str | None = None,
+        limit: int = 200,
+        event_name: str | None = None,
+        cursor: int | None = None,
+        created_from: str | None = None,
+        created_to: str | None = None,
+        format: str = "jsonl",
+    ) -> dict[str, Any]:
+        export_format = str(format or "jsonl").strip().lower() or "jsonl"
+        if export_format not in {"jsonl", "csv"}:
+            raise ValueError("format must be one of: jsonl, csv")
+        snapshot = self.deep_think_list_events(
+            session_id,
+            round_id=round_id,
+            limit=limit,
+            event_name=event_name,
+            cursor=cursor,
+            created_from=created_from,
+            created_to=created_to,
+        )
+        if "error" in snapshot:
+            return snapshot
+        events = list(snapshot.get("events", []))
+        round_value = str(snapshot.get("round_id", "")).strip() or "all"
+        if export_format == "jsonl":
+            lines = [json.dumps(item, ensure_ascii=False) for item in events]
+            content = "\n".join(lines)
+            if content:
+                content += "\n"
+            return {
+                "format": "jsonl",
+                "media_type": "application/x-ndjson; charset=utf-8",
+                "filename": f"deepthink-events-{session_id}-{round_value}.jsonl",
+                "content": content,
+                "count": len(events),
+            }
+        output = io.StringIO()
+        fieldnames = [
+            "event_id",
+            "session_id",
+            "round_id",
+            "round_no",
+            "event_seq",
+            "event",
+            "created_at",
+            "data_json",
+        ]
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for item in events:
+            writer.writerow(
+                {
+                    "event_id": item.get("event_id"),
+                    "session_id": item.get("session_id"),
+                    "round_id": item.get("round_id"),
+                    "round_no": item.get("round_no"),
+                    "event_seq": item.get("event_seq"),
+                    "event": item.get("event"),
+                    "created_at": item.get("created_at"),
+                    "data_json": json.dumps(item.get("data", {}), ensure_ascii=False),
+                }
+            )
+        return {
+            "format": "csv",
+            "media_type": "text/csv; charset=utf-8",
+            "filename": f"deepthink-events-{session_id}-{round_value}.csv",
+            "content": output.getvalue(),
+            "count": len(events),
         }
 
     def a2a_agent_cards(self) -> list[dict[str, Any]]:

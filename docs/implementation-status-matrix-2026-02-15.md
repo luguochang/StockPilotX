@@ -100,3 +100,10 @@
 - Added frontend archive filter console (`round/event/limit`) and filtered replay rendering in `/deep-think`.
 - Added regression assertions for event filter contract and retention cap behavior.
 - Validation kept green: targeted backend tests `27 passed`; full backend regression `63 passed`; frontend build + typecheck passed.
+
+## Round-K Update (2026-02-15)
+- Extended DeepThink archive API with cursor and time-window filters: `/v1/deep-think/sessions/{session_id}/events?cursor=&created_from=&created_to=`.
+- Added DeepThink archive export endpoint: `/v1/deep-think/sessions/{session_id}/events/export?format=jsonl|csv`.
+- Upgraded frontend DeepThink console with archive time filters, next-page replay loading, and one-click JSONL/CSV export.
+- Added regression assertions for pagination metadata (`has_more`, `next_cursor`) and export content-type/body contracts.
+- Validation kept green: targeted backend tests `27 passed`; full backend regression `63 passed`; frontend build + typecheck passed.

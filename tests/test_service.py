@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from backend.app.data.sources import NeteaseAdapter, QuoteService, SinaAdapter, TencentAdapter
@@ -128,6 +129,30 @@ class ServiceTestCase(unittest.TestCase):
         done_only = self.svc.deep_think_list_events(session_id, event_name="done")
         self.assertGreater(done_only["count"], 0)
         self.assertTrue(all(str(x.get("event", "")) == "done" for x in done_only["events"]))
+        paged = self.svc.deep_think_list_events(session_id, limit=2)
+        self.assertEqual(paged["limit"], 2)
+        self.assertIsInstance(paged["has_more"], bool)
+        self.assertGreater(paged["count"], 0)
+        if paged["has_more"]:
+            self.assertIsNotNone(paged["next_cursor"])
+        first_event_id = int(paged["events"][0]["event_id"])
+        cursor_filtered = self.svc.deep_think_list_events(session_id, limit=200, cursor=first_event_id)
+        self.assertTrue(all(int(x.get("event_id", 0)) > first_event_id for x in cursor_filtered["events"]))
+        first_created_at = str(paged["events"][0].get("created_at", ""))
+        created_filtered = self.svc.deep_think_list_events(session_id, limit=200, created_from=first_created_at)
+        self.assertGreater(created_filtered["count"], 0)
+        self.assertTrue(all(str(x.get("created_at", "")) >= first_created_at for x in created_filtered["events"]))
+        exported_done = self.svc.deep_think_export_events(session_id, event_name="done", format="jsonl", limit=50)
+        self.assertEqual(exported_done["format"], "jsonl")
+        jsonl_lines = [line for line in str(exported_done["content"]).splitlines() if line.strip()]
+        self.assertGreater(len(jsonl_lines), 0)
+        self.assertTrue(all(str(json.loads(line).get("event")) == "done" for line in jsonl_lines))
+        exported_csv = self.svc.deep_think_export_events(session_id, format="csv", limit=50)
+        self.assertEqual(exported_csv["format"], "csv")
+        self.assertIn(
+            "event_id,session_id,round_id,round_no,event_seq,event,created_at,data_json",
+            str(exported_csv["content"]).splitlines()[0],
+        )
         updated2 = self.svc.deep_think_run_round(session_id, {"archive_max_events": 4})
         self.assertEqual(updated2["current_round"], 2)
         trimmed = self.svc.deep_think_list_events(session_id, limit=2000)

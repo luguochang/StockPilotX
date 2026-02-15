@@ -57,6 +57,7 @@
 | AGT-012 | S8,S15,S17.6 | DeepThink 预算治理（budget usage + stop reason） | [x] | 每轮输出 `budget_usage`，超预算时 `stop_reason=DEEP_BUDGET_EXCEEDED` | 新增 `_deep_budget_snapshot` 与 round 字段 `budget_usage/stop_reason`；新增 `tests/test_service.py::test_deep_think_budget_exceeded_stop` 与 `tests/test_http_api.py::test_deep_think_budget_exceeded`；`pytest` 63/63 通过（2026-02-15） |
 | AGT-013 | S8,S12,S17.7 | DeepThink 事件存档与可回放接口（Round-I） | [x] | 轮次事件可持久化并通过 API 查询回放 | 新增 `deep_think_event` 表与 `deep_think_replace_round_events/deep_think_list_events`；新增 `/v1/deep-think/sessions/{session_id}/events`；`tests/test_service.py` 与 `tests/test_http_api.py` 增强；`pytest` 27/27 通过（2026-02-15） |
 | AGT-014 | S8,S12,S17.6 | DeepThink 事件过滤与归档保留治理（Round-J） | [x] | `/events` 支持 `event_name` 过滤，且会话事件归档受上限约束 | 增强 `deep_think_list_events(event_name)` 与 `deep_think_trim_events`；`deep_think_run_round` 支持 `archive_max_events`；`tests/test_service.py` 与 `tests/test_http_api.py` 增强；`pytest` 27/27 通过（2026-02-15） |
+| AGT-015 | S8,S12,S17.6 | DeepThink 归档游标分页、时间过滤与导出接口（Round-K） | [x] | `/events` 支持 `cursor/created_from/created_to`，并提供 `/events/export`（jsonl/csv） | 新增 `deep_think_list_events_page` 与 `deep_think_export_events`，扩展 `/v1/deep-think/sessions/{session_id}/events*` 契约；`tests/test_service.py` 与 `tests/test_http_api.py` 增强；`pytest` 27/27 通过（2026-02-15） |
 | GOV-004 | S1,S16 | 每轮交付文档化与可追溯规范 | [x] | 每轮必须有独立 md 记录设计、改动、验证、风险与后续建议 | 新增 `docs/rounds/README.md` 与 `docs/rounds/2026-02-15/round-E-deepthink-a2a-mvp.md`（2026-02-15） |
 | PROMPT-001 | S7 | Prompt 三层模板运行时装配 | [x] | system/policy/task 全链路启用 | 新增 `backend/app/prompt/runtime.py` 并在 `service/workflow` 接入；`tests/test_prompt_engineering.py` 通过（2026-02-13） |
 | PROMPT-002 | S7,S10 | `prompt_eval_result` 回写与发布门禁 | [x] | 不达阈值禁止进入 stable | `prompt_registry` 增加 `prompt_eval_result` 表、release gate；`evals_run` 自动回写；`tests/test_prompt_persistence.py` 通过（2026-02-13） |
@@ -68,6 +69,7 @@
 | FRONT-005 | S4,S12,S15,S17.7 | DeepThink 轮次可视化与治理看板（Round-H） | [x] | `/deep-think` 可展示 round timeline、conflict_sources 可视化、budget usage、replan/stop reason 与 SSE 回放 | 增强 `frontend/app/deep-think/page.tsx` 并接入 `/v1/deep-think/*` + `/v1/a2a/tasks`；`pytest` 63/63、`npm run build`、`npx tsc --noEmit` 通过（2026-02-15） |
 | FRONT-006 | S4,S12,S15,S17.7 | DeepThink 跨轮差分与冲突下钻（Round-I） | [x] | `/deep-think` 可展示跨轮观点差分、冲突证据下钻与会话事件存档加载 | 增强 `frontend/app/deep-think/page.tsx`，新增 `deepOpinionDiffRows/deepConflictDrillRows/loadDeepThinkEventArchive` 与归档状态；`npm run build`、`npx tsc --noEmit` 通过（2026-02-15） |
 | FRONT-007 | S4,S12,S15,S17.7 | DeepThink 存档筛选控制台（Round-J） | [x] | `/deep-think` 可按 round/event/limit 过滤加载归档并显示过滤回放 | 增强 `frontend/app/deep-think/page.tsx`，新增筛选控件与 `deepReplayRows`；`npm run build`、`npx tsc --noEmit` 通过（2026-02-15） |
+| FRONT-008 | S4,S12,S15,S17.7 | DeepThink 存档分页与导出控制台（Round-K） | [x] | `/deep-think` 支持按时间过滤、游标翻页并导出 JSONL/CSV | 增强 `frontend/app/deep-think/page.tsx`，新增 `created_from/created_to`、`next_cursor` 翻页与导出按钮；`npm run build`、`npx tsc --noEmit` 通过（2026-02-15） |
 | OPS-001 | S14,S15 | 上线前工程化检查（SLO/Runbook/回滚） | [x] | 检查项完成并可审计 | 新增 `docs/ops-runbook.md`（SLO、告警、回滚、发布前检查）；`tests/test_project_assets.py` 校验存在（2026-02-13） |
 
 ## 4.1 完整 Web 应用扩展清单（新增）
@@ -331,6 +333,21 @@
   - key output: `27 passed in 24.51s`
   - command: `.\.venv\Scripts\python -m pytest -q`
   - key output: `63 passed in 40.11s`
+  - command: `cd frontend && npm run build`
+  - key output: `build passed (/deep-think generated)`
+  - command: `cd frontend && npx tsc --noEmit`
+  - key output: `typecheck passed`
+
+### 2026-02-15 (Round-K)
+- Completed:
+  - [AGT-015] DeepThink 存档契约增强：`/events` 支持 `cursor/created_from/created_to`，并新增 `/events/export`（`jsonl/csv`）。
+  - [FRONT-008] `/deep-think` 增加时间过滤、游标翻页与导出按钮，支持分页回放与审计导出。
+  - [GOV-004] 本轮交付文档化：新增 `docs/rounds/2026-02-15/round-K-deepthink-archive-pagination-export.md` 与专栏记录 `docs/agent-column/15-Round-K-DeepThink归档分页时间过滤与导出实现记录.md`。
+- Evidence:
+  - command: `.\.venv\Scripts\python -m pytest -q tests/test_service.py tests/test_http_api.py`
+  - key output: `27 passed in 24.16s`
+  - command: `.\.venv\Scripts\python -m pytest -q`
+  - key output: `63 passed in 31.40s`
   - command: `cd frontend && npm run build`
   - key output: `build passed (/deep-think generated)`
   - command: `cd frontend && npx tsc --noEmit`
