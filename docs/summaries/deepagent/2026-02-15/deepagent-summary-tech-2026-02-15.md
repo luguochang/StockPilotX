@@ -83,6 +83,6 @@
 - 增加任务运维接口（cancel/retry/list）与前端任务管理面板。
 
 ## 8. 关联文档
-- 业务汇报版：`docs/deepagent-summary-business-2026-02-15.md`
-- 技术总览：`docs/deepagent-implementation-summary-2026-02-15.md`
+- 业务汇报版：`docs/summaries/deepagent/2026-02-15/deepagent-summary-business-2026-02-15.md`
+- 技术总览：`docs/summaries/deepagent/2026-02-15/deepagent-implementation-summary-2026-02-15.md`
 - 分轮记录：`docs/rounds/2026-02-15/`

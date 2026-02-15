@@ -60,6 +60,6 @@ DeepAgent 已从“可演示”进入“可运营”阶段：不仅能做多轮�
 - 增加跨租户/跨团队指标看板，支撑规模化运营。
 
 ## 7. 本文与技术文档关系
-- 业务总览：`docs/deepagent-summary-business-2026-02-15.md`
-- 技术复盘：`docs/deepagent-summary-tech-2026-02-15.md`
-- 综合总览：`docs/deepagent-implementation-summary-2026-02-15.md`
+- 业务总览：`docs/summaries/deepagent/2026-02-15/deepagent-summary-business-2026-02-15.md`
+- 技术复盘：`docs/summaries/deepagent/2026-02-15/deepagent-summary-tech-2026-02-15.md`
+- 综合总览：`docs/summaries/deepagent/2026-02-15/deepagent-implementation-summary-2026-02-15.md`
