@@ -36,6 +36,12 @@ def _raise_auth_http_error(ex: Exception) -> None:
     raise HTTPException(status_code=400, detail=str(ex)) from ex
 
 
+def _error_code(result: dict | None) -> str:
+    if not isinstance(result, dict):
+        return ""
+    return str(result.get("error", "") or "").strip()
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="A-Share Agent System API")
     # 允许前端本地开发跨域访问后端接口
@@ -122,15 +128,18 @@ def create_app() -> FastAPI:
         created_from: str = "",
         created_to: str = "",
     ):
-        result = svc.deep_think_list_events(
-            session_id,
-            round_id=round_id.strip() or None,
-            limit=limit,
-            event_name=event_name.strip() or None,
-            cursor=(cursor if cursor > 0 else None),
-            created_from=created_from.strip() or None,
-            created_to=created_to.strip() or None,
-        )
+        try:
+            result = svc.deep_think_list_events(
+                session_id,
+                round_id=round_id.strip() or None,
+                limit=limit,
+                event_name=event_name.strip() or None,
+                cursor=(cursor if cursor > 0 else None),
+                created_from=created_from.strip() or None,
+                created_to=created_to.strip() or None,
+            )
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
         if "error" in result:
             raise HTTPException(status_code=404, detail=result)
         return result
@@ -159,9 +168,56 @@ def create_app() -> FastAPI:
             )
         except ValueError as ex:
             raise HTTPException(status_code=400, detail=str(ex)) from ex
-        if "error" in result:
+        if _error_code(result):
             raise HTTPException(status_code=404, detail=result)
         filename = str(result.get("filename", "deepthink-events.txt"))
+        media_type = str(result.get("media_type", "text/plain; charset=utf-8"))
+        content = str(result.get("content", ""))
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.post("/v1/deep-think/sessions/{session_id}/events/export-tasks")
+    def deep_think_events_export_task_create(session_id: str, payload: dict):
+        try:
+            result = svc.deep_think_create_export_task(
+                session_id,
+                format=str(payload.get("format", "jsonl")),
+                round_id=str(payload.get("round_id", "")).strip() or None,
+                limit=int(payload.get("limit", 200)),
+                event_name=str(payload.get("event_name", "")).strip() or None,
+                cursor=int(payload.get("cursor", 0)) if str(payload.get("cursor", "")).strip() else None,
+                created_from=str(payload.get("created_from", "")).strip() or None,
+                created_to=str(payload.get("created_to", "")).strip() or None,
+            )
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+        if _error_code(result):
+            raise HTTPException(status_code=404, detail=result)
+        return result
+
+    @app.get("/v1/deep-think/sessions/{session_id}/events/export-tasks/{task_id}")
+    def deep_think_events_export_task_get(session_id: str, task_id: str):
+        result = svc.deep_think_get_export_task(session_id, task_id)
+        if _error_code(result):
+            raise HTTPException(status_code=404, detail=result)
+        return result
+
+    @app.get("/v1/deep-think/sessions/{session_id}/events/export-tasks/{task_id}/download")
+    def deep_think_events_export_task_download(session_id: str, task_id: str):
+        result = svc.deep_think_download_export_task(session_id, task_id)
+        error_code = _error_code(result)
+        if error_code:
+            if error_code == "not_found":
+                raise HTTPException(status_code=404, detail=result)
+            if error_code == "not_ready":
+                raise HTTPException(status_code=409, detail=result)
+            if error_code == "failed":
+                raise HTTPException(status_code=500, detail=result)
+            raise HTTPException(status_code=400, detail=result)
+        filename = str(result.get("filename", "deepthink-export.txt"))
         media_type = str(result.get("media_type", "text/plain; charset=utf-8"))
         content = str(result.get("content", ""))
         return Response(
@@ -369,6 +425,14 @@ def create_app() -> FastAPI:
         token = _extract_bearer_token(authorization)
         try:
             return svc.ops_source_health(token)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/ops/deep-think/archive-metrics")
+    def ops_deep_think_archive_metrics(window_hours: int = 24, authorization: str | None = Header(default=None)):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.ops_deep_think_archive_metrics(token, window_hours=window_hours)
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 

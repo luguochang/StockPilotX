@@ -358,6 +358,42 @@ class HttpApiTestCase(unittest.TestCase):
             self.assertIn(".csv", resp.headers.get("Content-Disposition", ""))
             exported_csv = resp.read().decode("utf-8")
         self.assertIn("event_id,session_id,round_id,round_no,event_seq,event,created_at,data_json", exported_csv.splitlines()[0])
+        with self.assertRaises(urllib.error.HTTPError) as bad_time:
+            urllib.request.urlopen(  # noqa: S310 - local endpoint
+                self.base_url + f"/v1/deep-think/sessions/{session_id}/events?created_from=2026-02-15T00:00:00",
+                timeout=8,
+            )
+        self.assertEqual(bad_time.exception.code, 400)
+
+        c3f, export_task = self._post(
+            f"/v1/deep-think/sessions/{session_id}/events/export-tasks",
+            {"format": "jsonl", "limit": 120, "event_name": "done"},
+        )
+        self.assertEqual(c3f, 200)
+        task_id = export_task["task_id"]
+        task_snapshot = export_task
+        for _ in range(50):
+            c3g, task_snapshot = self._get(f"/v1/deep-think/sessions/{session_id}/events/export-tasks/{task_id}")
+            self.assertEqual(c3g, 200)
+            if task_snapshot["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.05)
+        self.assertEqual(task_snapshot["status"], "completed")
+        with urllib.request.urlopen(
+            self.base_url + f"/v1/deep-think/sessions/{session_id}/events/export-tasks/{task_id}/download",
+            timeout=8,
+        ) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIn("application/x-ndjson", resp.headers.get("Content-Type", ""))
+            task_jsonl = resp.read().decode("utf-8")
+        task_lines = [line for line in task_jsonl.splitlines() if line.strip()]
+        self.assertGreater(len(task_lines), 0)
+        self.assertTrue(all(str(json.loads(line).get("event")) == "done" for line in task_lines))
+
+        c3h, archive_metrics = self._get("/v1/ops/deep-think/archive-metrics?window_hours=24")
+        self.assertEqual(c3h, 200)
+        self.assertGreaterEqual(int(archive_metrics.get("total_calls", 0)), 1)
+        self.assertIn("by_action", archive_metrics)
 
         c4, cards = self._get("/v1/a2a/agent-cards")
         self.assertEqual(c4, 200)

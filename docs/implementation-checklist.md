@@ -58,6 +58,7 @@
 | AGT-013 | S8,S12,S17.7 | DeepThink 事件存档与可回放接口（Round-I） | [x] | 轮次事件可持久化并通过 API 查询回放 | 新增 `deep_think_event` 表与 `deep_think_replace_round_events/deep_think_list_events`；新增 `/v1/deep-think/sessions/{session_id}/events`；`tests/test_service.py` 与 `tests/test_http_api.py` 增强；`pytest` 27/27 通过（2026-02-15） |
 | AGT-014 | S8,S12,S17.6 | DeepThink 事件过滤与归档保留治理（Round-J） | [x] | `/events` 支持 `event_name` 过滤，且会话事件归档受上限约束 | 增强 `deep_think_list_events(event_name)` 与 `deep_think_trim_events`；`deep_think_run_round` 支持 `archive_max_events`；`tests/test_service.py` 与 `tests/test_http_api.py` 增强；`pytest` 27/27 通过（2026-02-15） |
 | AGT-015 | S8,S12,S17.6 | DeepThink 归档游标分页、时间过滤与导出接口（Round-K） | [x] | `/events` 支持 `cursor/created_from/created_to`，并提供 `/events/export`（jsonl/csv） | 新增 `deep_think_list_events_page` 与 `deep_think_export_events`，扩展 `/v1/deep-think/sessions/{session_id}/events*` 契约；`tests/test_service.py` 与 `tests/test_http_api.py` 增强；`pytest` 27/27 通过（2026-02-15） |
+| AGT-016 | S8,S12,S17.6 | DeepThink 归档异步导出任务、审计日志与指标（Round-L） | [x] | 新增导出任务创建/查询/下载接口，严格时间过滤校验，提供 `/v1/ops/deep-think/archive-metrics` | 新增 `deep_think_export_task/deep_think_archive_audit` 存储与服务；扩展 `deep_think_create_export_task` 等流程；增强 `tests/test_service.py` 与 `tests/test_http_api.py`；`pytest` 28/28 通过（2026-02-15） |
 | GOV-004 | S1,S16 | 每轮交付文档化与可追溯规范 | [x] | 每轮必须有独立 md 记录设计、改动、验证、风险与后续建议 | 新增 `docs/rounds/README.md` 与 `docs/rounds/2026-02-15/round-E-deepthink-a2a-mvp.md`（2026-02-15） |
 | PROMPT-001 | S7 | Prompt 三层模板运行时装配 | [x] | system/policy/task 全链路启用 | 新增 `backend/app/prompt/runtime.py` 并在 `service/workflow` 接入；`tests/test_prompt_engineering.py` 通过（2026-02-13） |
 | PROMPT-002 | S7,S10 | `prompt_eval_result` 回写与发布门禁 | [x] | 不达阈值禁止进入 stable | `prompt_registry` 增加 `prompt_eval_result` 表、release gate；`evals_run` 自动回写；`tests/test_prompt_persistence.py` 通过（2026-02-13） |
@@ -70,6 +71,7 @@
 | FRONT-006 | S4,S12,S15,S17.7 | DeepThink 跨轮差分与冲突下钻（Round-I） | [x] | `/deep-think` 可展示跨轮观点差分、冲突证据下钻与会话事件存档加载 | 增强 `frontend/app/deep-think/page.tsx`，新增 `deepOpinionDiffRows/deepConflictDrillRows/loadDeepThinkEventArchive` 与归档状态；`npm run build`、`npx tsc --noEmit` 通过（2026-02-15） |
 | FRONT-007 | S4,S12,S15,S17.7 | DeepThink 存档筛选控制台（Round-J） | [x] | `/deep-think` 可按 round/event/limit 过滤加载归档并显示过滤回放 | 增强 `frontend/app/deep-think/page.tsx`，新增筛选控件与 `deepReplayRows`；`npm run build`、`npx tsc --noEmit` 通过（2026-02-15） |
 | FRONT-008 | S4,S12,S15,S17.7 | DeepThink 存档分页与导出控制台（Round-K） | [x] | `/deep-think` 支持按时间过滤、游标翻页并导出 JSONL/CSV | 增强 `frontend/app/deep-think/page.tsx`，新增 `created_from/created_to`、`next_cursor` 翻页与导出按钮；`npm run build`、`npx tsc --noEmit` 通过（2026-02-15） |
+| FRONT-009 | S4,S12,S15,S17.7 | DeepThink 存档异步导出任务与回放导航（Round-L） | [x] | `/deep-think` 支持导出任务轮询下载与上一页/回到第一页导航 | 增强 `frontend/app/deep-think/page.tsx`，新增 `deepArchiveCursorHistory` 与导出任务状态流；`npm run build`、`npx tsc --noEmit` 通过（2026-02-15） |
 | OPS-001 | S14,S15 | 上线前工程化检查（SLO/Runbook/回滚） | [x] | 检查项完成并可审计 | 新增 `docs/ops-runbook.md`（SLO、告警、回滚、发布前检查）；`tests/test_project_assets.py` 校验存在（2026-02-13） |
 
 ## 4.1 完整 Web 应用扩展清单（新增）
@@ -350,5 +352,20 @@
   - key output: `63 passed in 31.40s`
   - command: `cd frontend && npm run build`
   - key output: `build passed (/deep-think generated)`
+  - command: `cd frontend && npx tsc --noEmit`
+  - key output: `typecheck passed`
+
+### 2026-02-15 (Round-L)
+- Completed:
+  - [AGT-016] DeepThink 归档新增异步导出任务链路，补齐审计日志与归档指标接口，并收紧时间过滤参数校验。
+  - [FRONT-009] `/deep-think` 增加导出任务轮询下载流与存档回放导航（上一页/回到第一页/下一页）。
+  - [GOV-004] 本轮交付文档化：新增 `docs/rounds/2026-02-15/round-L-deepthink-archive-async-export-audit.md` 与专栏记录 `docs/agent-column/16-Round-L-DeepThink归档异步导出任务与审计指标实现记录.md`。
+- Evidence:
+  - command: `.\.venv\Scripts\python -m pytest -q tests/test_service.py tests/test_http_api.py`
+  - key output: `28 passed in 25.67s`
+  - command: `.\.venv\Scripts\python -m pytest -q`
+  - key output: `64 passed in 35.36s`
+  - command: `cd frontend && npm run build`
+  - key output: `build passed (all routes generated)`
   - command: `cd frontend && npx tsc --noEmit`
   - key output: `typecheck passed`

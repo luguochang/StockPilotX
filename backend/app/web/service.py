@@ -576,6 +576,182 @@ class WebAppService:
         )
         return list(page.get("events", []))
 
+    def deep_think_export_task_create(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        status: str,
+        format: str,
+        filters: dict[str, Any],
+    ) -> None:
+        self.store.execute(
+            """
+            INSERT INTO deep_think_export_task
+            (task_id, session_id, status, format, filters_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                task_id,
+                session_id,
+                status,
+                format,
+                json.dumps(filters, ensure_ascii=False),
+            ),
+        )
+
+    def deep_think_export_task_update(
+        self,
+        *,
+        task_id: str,
+        status: str,
+        filename: str = "",
+        media_type: str = "",
+        content_text: str = "",
+        row_count: int = 0,
+        error: str = "",
+    ) -> None:
+        if status == "completed":
+            self.store.execute(
+                """
+                UPDATE deep_think_export_task
+                SET status = ?, filename = ?, media_type = ?, content_text = ?, row_count = ?, error = ?,
+                    updated_at = CURRENT_TIMESTAMP, completed_at = CURRENT_TIMESTAMP
+                WHERE task_id = ?
+                """,
+                (status, filename, media_type, content_text, row_count, error, task_id),
+            )
+            return
+        self.store.execute(
+            """
+            UPDATE deep_think_export_task
+            SET status = ?, filename = ?, media_type = ?, content_text = ?, row_count = ?, error = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE task_id = ?
+            """,
+            (status, filename, media_type, content_text, row_count, error, task_id),
+        )
+
+    def deep_think_export_task_get(
+        self,
+        task_id: str,
+        *,
+        session_id: str | None = None,
+        include_content: bool = False,
+    ) -> dict[str, Any]:
+        row = self.store.query_one(
+            """
+            SELECT task_id, session_id, status, format, filters_json, filename, media_type, content_text,
+                   row_count, error, created_at, updated_at, completed_at
+            FROM deep_think_export_task
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        )
+        if not row:
+            return {}
+        if session_id and str(row.get("session_id", "")) != str(session_id):
+            return {}
+        row["filters"] = self._json_loads_or(row.get("filters_json"), {})
+        row.pop("filters_json", None)
+        if not include_content:
+            row.pop("content_text", None)
+        return row
+
+    def deep_think_archive_audit_log(
+        self,
+        *,
+        session_id: str,
+        action: str,
+        status: str,
+        duration_ms: int,
+        result_count: int = 0,
+        export_bytes: int = 0,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self.store.execute(
+            """
+            INSERT INTO deep_think_archive_audit
+            (session_id, action, status, duration_ms, result_count, export_bytes, detail_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                action,
+                status,
+                max(0, int(duration_ms)),
+                max(0, int(result_count)),
+                max(0, int(export_bytes)),
+                json.dumps(detail or {}, ensure_ascii=False),
+            ),
+        )
+
+    def deep_think_archive_audit_metrics(self, *, window_hours: int = 24) -> dict[str, Any]:
+        safe_hours = max(1, min(24 * 30, int(window_hours)))
+        window_expr = f"-{safe_hours} hours"
+        summary = self.store.query_one(
+            """
+            SELECT
+                COUNT(1) AS total_calls,
+                AVG(duration_ms) AS avg_latency_ms,
+                MAX(duration_ms) AS max_latency_ms,
+                SUM(result_count) AS total_result_count,
+                SUM(export_bytes) AS total_export_bytes
+            FROM deep_think_archive_audit
+            WHERE created_at >= datetime('now', ?)
+            """,
+            (window_expr,),
+        ) or {}
+        by_action = self.store.query_all(
+            """
+            SELECT
+                action,
+                COUNT(1) AS call_count,
+                AVG(duration_ms) AS avg_latency_ms,
+                MAX(duration_ms) AS max_latency_ms,
+                SUM(export_bytes) AS export_bytes
+            FROM deep_think_archive_audit
+            WHERE created_at >= datetime('now', ?)
+            GROUP BY action
+            ORDER BY action ASC
+            """,
+            (window_expr,),
+        )
+        by_status = self.store.query_all(
+            """
+            SELECT
+                status,
+                COUNT(1) AS call_count
+            FROM deep_think_archive_audit
+            WHERE created_at >= datetime('now', ?)
+            GROUP BY status
+            ORDER BY status ASC
+            """,
+            (window_expr,),
+        )
+        return {
+            "window_hours": safe_hours,
+            "total_calls": int(summary.get("total_calls", 0) or 0),
+            "avg_latency_ms": round(float(summary.get("avg_latency_ms", 0) or 0.0), 2),
+            "max_latency_ms": int(summary.get("max_latency_ms", 0) or 0),
+            "total_result_count": int(summary.get("total_result_count", 0) or 0),
+            "total_export_bytes": int(summary.get("total_export_bytes", 0) or 0),
+            "by_action": [
+                {
+                    "action": str(x.get("action", "")),
+                    "call_count": int(x.get("call_count", 0) or 0),
+                    "avg_latency_ms": round(float(x.get("avg_latency_ms", 0) or 0.0), 2),
+                    "max_latency_ms": int(x.get("max_latency_ms", 0) or 0),
+                    "export_bytes": int(x.get("export_bytes", 0) or 0),
+                }
+                for x in by_action
+            ],
+            "by_status": [
+                {"status": str(x.get("status", "")), "call_count": int(x.get("call_count", 0) or 0)}
+                for x in by_status
+            ],
+        }
+
     def register_agent_card(
         self,
         *,

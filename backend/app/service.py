@@ -5,6 +5,7 @@ import difflib
 import io
 import json
 from concurrent.futures import ThreadPoolExecutor
+import time
 import uuid
 from datetime import datetime, timezone
 from statistics import mean
@@ -92,6 +93,8 @@ class AShareAgentService:
 
         # 报告存储：MVP 先使用内存字典
         self._reports: dict[str, dict[str, Any]] = {}
+        self._deep_archive_ts_format = "%Y-%m-%d %H:%M:%S"
+        self._deep_archive_export_executor = ThreadPoolExecutor(max_workers=2)
         self._register_default_agent_cards()
 
     def _select_runtime(self, preference: str | None = None):
@@ -936,6 +939,134 @@ class AShareAgentService:
     def docs_review_action(self, token: str, doc_id: str, action: str, comment: str = "") -> dict[str, Any]:
         return self.web.docs_review_action(token, doc_id, action, comment)
 
+    def _parse_deep_archive_timestamp(self, value: str | None, field: str) -> str | None:
+        clean = str(value or "").strip() or None
+        if not clean:
+            return None
+        try:
+            parsed = datetime.strptime(clean, self._deep_archive_ts_format)
+        except ValueError as ex:
+            raise ValueError(f"{field} must use format YYYY-MM-DD HH:MM:SS") from ex
+        return parsed.strftime(self._deep_archive_ts_format)
+
+    def _deep_archive_tenant_policy(self) -> dict[str, int]:
+        raw = str(self.settings.deep_archive_tenant_policy_json or "").strip() or "{}"
+        try:
+            parsed = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            parsed = {}
+        if not isinstance(parsed, dict):
+            return {}
+        normalized: dict[str, int] = {}
+        hard_cap = max(100, int(self.settings.deep_archive_max_events_hard_cap))
+        for user_id, max_events in parsed.items():
+            key = str(user_id).strip()
+            if not key:
+                continue
+            try:
+                normalized[key] = max(1, min(hard_cap, int(max_events)))
+            except Exception:  # noqa: BLE001
+                continue
+        return normalized
+
+    def _build_deep_archive_query_options(
+        self,
+        *,
+        round_id: str | None = None,
+        limit: int = 200,
+        event_name: str | None = None,
+        cursor: int | None = None,
+        created_from: str | None = None,
+        created_to: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            safe_limit = max(1, min(2000, int(limit)))
+        except Exception:  # noqa: BLE001
+            safe_limit = 200
+        safe_cursor = None
+        if cursor is not None:
+            try:
+                safe_cursor = max(0, int(cursor))
+            except Exception:  # noqa: BLE001
+                safe_cursor = None
+        round_id_clean = str(round_id or "").strip() or None
+        event_name_clean = str(event_name or "").strip() or None
+        created_from_clean = self._parse_deep_archive_timestamp(created_from, "created_from")
+        created_to_clean = self._parse_deep_archive_timestamp(created_to, "created_to")
+        if created_from_clean and created_to_clean:
+            if created_from_clean > created_to_clean:
+                raise ValueError("created_from must be <= created_to")
+        return {
+            "round_id": round_id_clean,
+            "event_name": event_name_clean,
+            "limit": safe_limit,
+            "cursor": safe_cursor,
+            "created_from": created_from_clean,
+            "created_to": created_to_clean,
+        }
+
+    def _resolve_deep_archive_retention_policy(
+        self,
+        *,
+        session: dict[str, Any],
+        requested_max_events: Any | None = None,
+    ) -> dict[str, Any]:
+        env = str(self.settings.env or "dev").strip().lower() or "dev"
+        env_defaults = {
+            "dev": int(self.settings.deep_archive_max_events_dev),
+            "staging": int(self.settings.deep_archive_max_events_staging),
+            "prod": int(self.settings.deep_archive_max_events_prod),
+        }
+        hard_cap = max(100, int(self.settings.deep_archive_max_events_hard_cap))
+        base = int(env_defaults.get(env, int(self.settings.deep_archive_max_events_default)))
+        policy_source = f"env:{env}"
+        user_id = str(session.get("user_id", "")).strip()
+        tenant_policy = self._deep_archive_tenant_policy()
+        if user_id and user_id in tenant_policy:
+            base = int(tenant_policy[user_id])
+            policy_source = f"user:{user_id}"
+        base = max(1, min(hard_cap, base))
+
+        requested = None
+        if requested_max_events is not None:
+            try:
+                requested = int(requested_max_events)
+            except Exception:  # noqa: BLE001
+                requested = None
+        resolved = base if requested is None else max(1, min(hard_cap, requested))
+        return {
+            "max_events": resolved,
+            "base_max_events": base,
+            "policy_source": policy_source,
+            "hard_cap": hard_cap,
+            "requested_max_events": requested,
+        }
+
+    def _emit_deep_archive_audit(
+        self,
+        *,
+        session_id: str,
+        action: str,
+        status: str,
+        started_at: float,
+        result_count: int = 0,
+        export_bytes: int = 0,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        duration_ms = int(round((time.perf_counter() - started_at) * 1000))
+        try:
+            self.web.deep_think_archive_audit_log(
+                session_id=session_id,
+                action=action,
+                status=status,
+                duration_ms=duration_ms,
+                result_count=result_count,
+                export_bytes=export_bytes,
+                detail=detail or {},
+            )
+        except Exception:  # noqa: BLE001
+            return
+
     def deep_think_create_session(self, payload: dict[str, Any]) -> dict[str, Any]:
         question = str(payload.get("question", "")).strip()
         if not question:
@@ -973,12 +1104,11 @@ class AShareAgentService:
         max_rounds = int(session.get("max_rounds", 1))
         question = str(payload.get("question", session.get("question", "")))
         stock_codes = [str(x).upper() for x in payload.get("stock_codes", session.get("stock_codes", []))]
-        archive_max_raw = payload.get("archive_max_events", 1200)
-        try:
-            archive_max_events = int(archive_max_raw)
-        except Exception:  # noqa: BLE001
-            archive_max_events = 1200
-        archive_max_events = max(1, min(5000, archive_max_events))
+        archive_policy = self._resolve_deep_archive_retention_policy(
+            session=session,
+            requested_max_events=payload.get("archive_max_events"),
+        )
+        archive_max_events = int(archive_policy["max_events"])
         code = stock_codes[0] if stock_codes else "SH600000"
         task_graph = self._deep_plan_tasks(question, round_no)
         budget = session.get("budget", {}) if isinstance(session.get("budget", {}), dict) else {}
@@ -1156,6 +1286,7 @@ class AShareAgentService:
                     "disagreement_score": arbitration["disagreement_score"],
                     "replan_triggered": replan_triggered,
                     "stop_reason": stop_reason,
+                    "archive_policy": archive_policy,
                 },
             )
         latest_round = snapshot.get("rounds", [])[-1] if snapshot.get("rounds") else {}
@@ -1167,6 +1298,7 @@ class AShareAgentService:
                 events=self._build_deep_think_round_events(session_id, latest_round),
                 max_events=archive_max_events,
             )
+        snapshot["archive_policy"] = archive_policy
         return snapshot
 
     def deep_think_get_session(self, session_id: str) -> dict[str, Any]:
@@ -1270,40 +1402,65 @@ class AShareAgentService:
         created_from: str | None = None,
         created_to: str | None = None,
     ) -> dict[str, Any]:
+        started_at = time.perf_counter()
         session = self.web.deep_think_get_session(session_id)
         if not session:
+            self._emit_deep_archive_audit(
+                session_id=session_id,
+                action="archive_query",
+                status="not_found",
+                started_at=started_at,
+            )
             return {"error": "not_found", "session_id": session_id}
         try:
-            safe_limit = max(1, min(2000, int(limit)))
-        except Exception:  # noqa: BLE001
-            safe_limit = 200
-        safe_cursor = None
-        if cursor is not None:
-            try:
-                safe_cursor = max(0, int(cursor))
-            except Exception:  # noqa: BLE001
-                safe_cursor = None
-        event_name_clean = str(event_name or "").strip() or None
-        created_from_clean = str(created_from or "").strip() or None
-        created_to_clean = str(created_to or "").strip() or None
-        page = self.web.deep_think_list_events_page(
-            session_id=session_id,
-            round_id=(round_id or None),
-            limit=safe_limit,
-            event_name=event_name_clean,
-            cursor=safe_cursor,
-            created_from=created_from_clean,
-            created_to=created_to_clean,
-        )
+            filters = self._build_deep_archive_query_options(
+                round_id=round_id,
+                limit=limit,
+                event_name=event_name,
+                cursor=cursor,
+                created_from=created_from,
+                created_to=created_to,
+            )
+            page = self.web.deep_think_list_events_page(
+                session_id=session_id,
+                round_id=filters["round_id"],
+                limit=filters["limit"],
+                event_name=filters["event_name"],
+                cursor=filters["cursor"],
+                created_from=filters["created_from"],
+                created_to=filters["created_to"],
+            )
+        except Exception as ex:  # noqa: BLE001
+            self._emit_deep_archive_audit(
+                session_id=session_id,
+                action="archive_query",
+                status="error",
+                started_at=started_at,
+                detail={"error": str(ex)},
+            )
+            raise
         events = list(page.get("events", []))
+        self._emit_deep_archive_audit(
+            session_id=session_id,
+            action="archive_query",
+            status="ok",
+            started_at=started_at,
+            result_count=len(events),
+            detail={
+                "round_id": filters["round_id"] or "",
+                "event_name": filters["event_name"] or "",
+                "cursor": int(filters["cursor"] or 0),
+                "limit": int(filters["limit"]),
+            },
+        )
         return {
             "session_id": session_id,
-            "round_id": (round_id or ""),
-            "event_name": (event_name_clean or ""),
-            "cursor": int(safe_cursor or 0),
-            "limit": safe_limit,
-            "created_from": (created_from_clean or ""),
-            "created_to": (created_to_clean or ""),
+            "round_id": (filters["round_id"] or ""),
+            "event_name": (filters["event_name"] or ""),
+            "cursor": int(filters["cursor"] or 0),
+            "limit": int(filters["limit"]),
+            "created_from": (filters["created_from"] or ""),
+            "created_to": (filters["created_to"] or ""),
             "has_more": bool(page.get("has_more", False)),
             "next_cursor": page.get("next_cursor"),
             "count": len(events),
@@ -1321,9 +1478,20 @@ class AShareAgentService:
         created_from: str | None = None,
         created_to: str | None = None,
         format: str = "jsonl",
+        audit_action: str = "archive_export_sync",
+        emit_audit: bool = True,
     ) -> dict[str, Any]:
+        started_at = time.perf_counter()
         export_format = str(format or "jsonl").strip().lower() or "jsonl"
         if export_format not in {"jsonl", "csv"}:
+            if emit_audit:
+                self._emit_deep_archive_audit(
+                    session_id=session_id,
+                    action=audit_action,
+                    status="error",
+                    started_at=started_at,
+                    detail={"reason": "invalid_format", "format": export_format},
+                )
             raise ValueError("format must be one of: jsonl, csv")
         snapshot = self.deep_think_list_events(
             session_id,
@@ -1335,6 +1503,14 @@ class AShareAgentService:
             created_to=created_to,
         )
         if "error" in snapshot:
+            if emit_audit:
+                self._emit_deep_archive_audit(
+                    session_id=session_id,
+                    action=audit_action,
+                    status=str(snapshot.get("error", "error")),
+                    started_at=started_at,
+                    detail={"message": snapshot.get("error", "unknown")},
+                )
             return snapshot
         events = list(snapshot.get("events", []))
         round_value = str(snapshot.get("round_id", "")).strip() or "all"
@@ -1343,6 +1519,16 @@ class AShareAgentService:
             content = "\n".join(lines)
             if content:
                 content += "\n"
+            if emit_audit:
+                self._emit_deep_archive_audit(
+                    session_id=session_id,
+                    action=audit_action,
+                    status="ok",
+                    started_at=started_at,
+                    result_count=len(events),
+                    export_bytes=len(content.encode("utf-8")),
+                    detail={"format": "jsonl"},
+                )
             return {
                 "format": "jsonl",
                 "media_type": "application/x-ndjson; charset=utf-8",
@@ -1376,12 +1562,242 @@ class AShareAgentService:
                     "data_json": json.dumps(item.get("data", {}), ensure_ascii=False),
                 }
             )
+        csv_content = output.getvalue()
+        if emit_audit:
+            self._emit_deep_archive_audit(
+                session_id=session_id,
+                action=audit_action,
+                status="ok",
+                started_at=started_at,
+                result_count=len(events),
+                export_bytes=len(csv_content.encode("utf-8")),
+                detail={"format": "csv"},
+            )
         return {
             "format": "csv",
             "media_type": "text/csv; charset=utf-8",
             "filename": f"deepthink-events-{session_id}-{round_value}.csv",
-            "content": output.getvalue(),
+            "content": csv_content,
             "count": len(events),
+        }
+
+    def deep_think_create_export_task(
+        self,
+        session_id: str,
+        *,
+        format: str = "jsonl",
+        round_id: str | None = None,
+        limit: int = 200,
+        event_name: str | None = None,
+        cursor: int | None = None,
+        created_from: str | None = None,
+        created_to: str | None = None,
+    ) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        session = self.web.deep_think_get_session(session_id)
+        if not session:
+            self._emit_deep_archive_audit(
+                session_id=session_id,
+                action="archive_export_task_create",
+                status="not_found",
+                started_at=started_at,
+            )
+            return {"error": "not_found", "session_id": session_id}
+        export_format = str(format or "jsonl").strip().lower() or "jsonl"
+        if export_format not in {"jsonl", "csv"}:
+            self._emit_deep_archive_audit(
+                session_id=session_id,
+                action="archive_export_task_create",
+                status="error",
+                started_at=started_at,
+                detail={"reason": "invalid_format", "format": export_format},
+            )
+            raise ValueError("format must be one of: jsonl, csv")
+        try:
+            filters = self._build_deep_archive_query_options(
+                round_id=round_id,
+                limit=limit,
+                event_name=event_name,
+                cursor=cursor,
+                created_from=created_from,
+                created_to=created_to,
+            )
+        except Exception as ex:  # noqa: BLE001
+            self._emit_deep_archive_audit(
+                session_id=session_id,
+                action="archive_export_task_create",
+                status="error",
+                started_at=started_at,
+                detail={"reason": str(ex)},
+            )
+            raise
+        task_id = f"dtexp-{uuid.uuid4().hex[:12]}"
+        self.web.deep_think_export_task_create(
+            task_id=task_id,
+            session_id=session_id,
+            status="queued",
+            format=export_format,
+            filters=filters,
+        )
+        self._emit_deep_archive_audit(
+            session_id=session_id,
+            action="archive_export_task_create",
+            status="ok",
+            started_at=started_at,
+            detail={"task_id": task_id, "format": export_format},
+        )
+        self._deep_archive_export_executor.submit(
+            self._run_deep_archive_export_task,
+            task_id,
+            session_id,
+            export_format,
+            filters,
+        )
+        return self.deep_think_get_export_task(session_id, task_id)
+
+    def _run_deep_archive_export_task(
+        self,
+        task_id: str,
+        session_id: str,
+        export_format: str,
+        filters: dict[str, Any],
+    ) -> None:
+        started_at = time.perf_counter()
+        self.web.deep_think_export_task_update(task_id=task_id, status="running")
+        try:
+            exported = self.deep_think_export_events(
+                session_id,
+                round_id=filters.get("round_id"),
+                limit=int(filters.get("limit", 200)),
+                event_name=filters.get("event_name"),
+                cursor=filters.get("cursor"),
+                created_from=filters.get("created_from"),
+                created_to=filters.get("created_to"),
+                format=export_format,
+                audit_action="archive_export_task_run",
+                emit_audit=False,
+            )
+            if "error" in exported:
+                message = str(exported.get("error", "failed"))
+                self.web.deep_think_export_task_update(task_id=task_id, status="failed", error=message)
+                self._emit_deep_archive_audit(
+                    session_id=session_id,
+                    action="archive_export_task_complete",
+                    status=message,
+                    started_at=started_at,
+                    detail={"task_id": task_id},
+                )
+                return
+            content = str(exported.get("content", ""))
+            self.web.deep_think_export_task_update(
+                task_id=task_id,
+                status="completed",
+                filename=str(exported.get("filename", "")),
+                media_type=str(exported.get("media_type", "text/plain; charset=utf-8")),
+                content_text=content,
+                row_count=int(exported.get("count", 0) or 0),
+                error="",
+            )
+            self._emit_deep_archive_audit(
+                session_id=session_id,
+                action="archive_export_task_complete",
+                status="ok",
+                started_at=started_at,
+                result_count=int(exported.get("count", 0) or 0),
+                export_bytes=len(content.encode("utf-8")),
+                detail={"task_id": task_id, "format": export_format},
+            )
+        except Exception as ex:  # noqa: BLE001
+            self.web.deep_think_export_task_update(task_id=task_id, status="failed", error=str(ex))
+            self._emit_deep_archive_audit(
+                session_id=session_id,
+                action="archive_export_task_complete",
+                status="error",
+                started_at=started_at,
+                detail={"task_id": task_id, "error": str(ex)},
+            )
+
+    def deep_think_get_export_task(self, session_id: str, task_id: str) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        task = self.web.deep_think_export_task_get(task_id, session_id=session_id, include_content=False)
+        if not task:
+            self._emit_deep_archive_audit(
+                session_id=session_id,
+                action="archive_export_task_get",
+                status="not_found",
+                started_at=started_at,
+                detail={"task_id": task_id},
+            )
+            return {"error": "not_found", "task_id": task_id, "session_id": session_id}
+        task_error = str(task.pop("error", "") or "").strip()
+        if task_error:
+            task["failure_reason"] = task_error
+        task["download_ready"] = str(task.get("status", "")) == "completed"
+        self._emit_deep_archive_audit(
+            session_id=session_id,
+            action="archive_export_task_get",
+            status="ok",
+            started_at=started_at,
+            detail={"task_id": task_id, "status": task.get("status", "")},
+        )
+        return task
+
+    def deep_think_download_export_task(self, session_id: str, task_id: str) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        task = self.web.deep_think_export_task_get(task_id, session_id=session_id, include_content=True)
+        if not task:
+            self._emit_deep_archive_audit(
+                session_id=session_id,
+                action="archive_export_task_download",
+                status="not_found",
+                started_at=started_at,
+                detail={"task_id": task_id},
+            )
+            return {"error": "not_found", "task_id": task_id, "session_id": session_id}
+        status = str(task.get("status", ""))
+        failure_reason = str(task.get("error", "")).strip()
+        if status == "failed":
+            self._emit_deep_archive_audit(
+                session_id=session_id,
+                action="archive_export_task_download",
+                status="failed",
+                started_at=started_at,
+                detail={"task_id": task_id, "error": failure_reason},
+            )
+            return {
+                "error": "failed",
+                "task_id": task_id,
+                "session_id": session_id,
+                "message": failure_reason or "export task failed",
+            }
+        if status != "completed":
+            self._emit_deep_archive_audit(
+                session_id=session_id,
+                action="archive_export_task_download",
+                status="not_ready",
+                started_at=started_at,
+                detail={"task_id": task_id, "status": status},
+            )
+            return {"error": "not_ready", "task_id": task_id, "session_id": session_id, "status": status}
+        content = str(task.get("content_text", ""))
+        self._emit_deep_archive_audit(
+            session_id=session_id,
+            action="archive_export_task_download",
+            status="ok",
+            started_at=started_at,
+            result_count=int(task.get("row_count", 0) or 0),
+            export_bytes=len(content.encode("utf-8")),
+            detail={"task_id": task_id, "format": task.get("format", "")},
+        )
+        return {
+            "task_id": task_id,
+            "session_id": session_id,
+            "status": status,
+            "format": str(task.get("format", "jsonl")),
+            "filename": str(task.get("filename", f"{task_id}.txt")),
+            "media_type": str(task.get("media_type", "text/plain; charset=utf-8")),
+            "content": content,
+            "count": int(task.get("row_count", 0) or 0),
         }
 
     def a2a_agent_cards(self) -> list[dict[str, Any]]:
@@ -1428,6 +1844,10 @@ class AShareAgentService:
         if not task:
             return {"error": "not_found", "task_id": task_id}
         return task
+
+    def ops_deep_think_archive_metrics(self, token: str, *, window_hours: int = 24) -> dict[str, Any]:
+        self.web.require_role(token, {"admin", "ops"})
+        return self.web.deep_think_archive_audit_metrics(window_hours=window_hours)
 
     def ops_source_health(self, token: str) -> list[dict[str, Any]]:
         # 基于 scheduler 状态刷新 source health 快照

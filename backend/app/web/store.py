@@ -206,6 +206,34 @@ class WebStore:
                 UNIQUE(session_id, round_id, event_seq)
             );
 
+            CREATE TABLE IF NOT EXISTS deep_think_export_task (
+                task_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                format TEXT NOT NULL,
+                filters_json TEXT NOT NULL DEFAULT '{}',
+                filename TEXT NOT NULL DEFAULT '',
+                media_type TEXT NOT NULL DEFAULT '',
+                content_text TEXT NOT NULL DEFAULT '',
+                row_count INTEGER NOT NULL DEFAULT 0,
+                error TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                completed_at DATETIME
+            );
+
+            CREATE TABLE IF NOT EXISTS deep_think_archive_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                status TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                result_count INTEGER NOT NULL DEFAULT 0,
+                export_bytes INTEGER NOT NULL DEFAULT 0,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS agent_card_registry (
                 agent_id TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL,
@@ -249,6 +277,9 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_deep_think_opinion_round ON deep_think_opinion(round_id);
             CREATE INDEX IF NOT EXISTS idx_deep_think_event_session ON deep_think_event(session_id, round_no, event_seq);
             CREATE INDEX IF NOT EXISTS idx_deep_think_event_name ON deep_think_event(session_id, event_name, round_no, event_seq);
+            CREATE INDEX IF NOT EXISTS idx_deep_think_export_task_session ON deep_think_export_task(session_id, status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_deep_think_archive_audit_action ON deep_think_archive_audit(action, created_at);
+            CREATE INDEX IF NOT EXISTS idx_deep_think_archive_audit_session ON deep_think_archive_audit(session_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_a2a_task_agent_status ON a2a_task(agent_id, status);
             CREATE INDEX IF NOT EXISTS idx_group_knowledge_topic ON group_knowledge_card(topic, quality_score);
             """

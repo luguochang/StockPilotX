@@ -107,3 +107,15 @@
 - Upgraded frontend DeepThink console with archive time filters, next-page replay loading, and one-click JSONL/CSV export.
 - Added regression assertions for pagination metadata (`has_more`, `next_cursor`) and export content-type/body contracts.
 - Validation kept green: targeted backend tests `27 passed`; full backend regression `63 passed`; frontend build + typecheck passed.
+
+## Round-L Update (2026-02-15)
+- Added async archive export task workflow:
+  - `POST /v1/deep-think/sessions/{session_id}/events/export-tasks`
+  - `GET /v1/deep-think/sessions/{session_id}/events/export-tasks/{task_id}`
+  - `GET /v1/deep-think/sessions/{session_id}/events/export-tasks/{task_id}/download`
+- Added archive observability endpoint: `GET /v1/ops/deep-think/archive-metrics`.
+- Added strict archive time-filter validation (`YYYY-MM-DD HH:MM:SS`) with 400 mapping on invalid input.
+- Added storage/service audit pipeline (`deep_think_archive_audit`) and task persistence (`deep_think_export_task`).
+- Upgraded frontend `/deep-think` with export task polling/download flow and archive cursor-history navigation.
+- Fixed error-contract edge case: API now checks non-empty `error` code, avoiding false 404 on successful export-task snapshots.
+- Validation kept green: targeted backend tests `28 passed`; full backend regression `64 passed`; frontend build + typecheck passed.

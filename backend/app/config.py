@@ -48,6 +48,12 @@ class Settings:
     llm_retry_backoff_seconds: float = 0.8
     llm_fallback_to_local: bool = True
     use_langgraph_runtime: bool = True
+    deep_archive_max_events_default: int = 1200
+    deep_archive_max_events_dev: int = 1200
+    deep_archive_max_events_staging: int = 2400
+    deep_archive_max_events_prod: int = 3600
+    deep_archive_max_events_hard_cap: int = 5000
+    deep_archive_tenant_policy_json: str = "{}"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -76,6 +82,12 @@ class Settings:
             llm_retry_backoff_seconds=max(0.0, float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "0.8"))),
             llm_fallback_to_local=_to_bool(os.getenv("LLM_FALLBACK_TO_LOCAL"), True),
             use_langgraph_runtime=_to_bool(os.getenv("USE_LANGGRAPH_RUNTIME"), True),
+            deep_archive_max_events_default=max(1, int(os.getenv("DEEP_ARCHIVE_MAX_EVENTS_DEFAULT", "1200"))),
+            deep_archive_max_events_dev=max(1, int(os.getenv("DEEP_ARCHIVE_MAX_EVENTS_DEV", "1200"))),
+            deep_archive_max_events_staging=max(1, int(os.getenv("DEEP_ARCHIVE_MAX_EVENTS_STAGING", "2400"))),
+            deep_archive_max_events_prod=max(1, int(os.getenv("DEEP_ARCHIVE_MAX_EVENTS_PROD", "3600"))),
+            deep_archive_max_events_hard_cap=max(100, int(os.getenv("DEEP_ARCHIVE_MAX_EVENTS_HARD_CAP", "5000"))),
+            deep_archive_tenant_policy_json=os.getenv("DEEP_ARCHIVE_TENANT_POLICY_JSON", "{}"),
         )
 
     def load_llm_provider_configs(self) -> list[dict]:

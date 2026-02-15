@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import unittest
 
 from backend.app.data.sources import NeteaseAdapter, QuoteService, SinaAdapter, TencentAdapter
@@ -176,6 +177,46 @@ class ServiceTestCase(unittest.TestCase):
         latest = snapshot["rounds"][-1]
         self.assertEqual(latest["stop_reason"], "DEEP_BUDGET_EXCEEDED")
         self.assertEqual(snapshot["status"], "completed")
+
+    def test_deep_think_export_task_and_archive_metrics(self) -> None:
+        created = self.svc.deep_think_create_session(
+            {
+                "user_id": "deep-export-user",
+                "question": "请导出deep-think归档",
+                "stock_codes": ["SH600000"],
+                "max_rounds": 2,
+            }
+        )
+        session_id = created["session_id"]
+        updated = self.svc.deep_think_run_round(session_id, {})
+        self.assertEqual(updated["current_round"], 1)
+        with self.assertRaises(ValueError):
+            _ = self.svc.deep_think_list_events(session_id, created_from="2026-02-15T00:00:00")
+        with self.assertRaises(ValueError):
+            _ = self.svc.deep_think_list_events(
+                session_id,
+                created_from="2026-02-15 12:00:00",
+                created_to="2026-02-15 01:00:00",
+            )
+        task = self.svc.deep_think_create_export_task(session_id, format="jsonl", limit=80)
+        self.assertEqual(task["session_id"], session_id)
+        task_id = task["task_id"]
+        final_task = task
+        for _ in range(50):
+            final_task = self.svc.deep_think_get_export_task(session_id, task_id)
+            if final_task.get("status") in {"completed", "failed"}:
+                break
+            time.sleep(0.05)
+        self.assertEqual(final_task["status"], "completed")
+        exported = self.svc.deep_think_download_export_task(session_id, task_id)
+        self.assertEqual(exported["status"], "completed")
+        self.assertTrue(str(exported["content"]).strip())
+        self.assertEqual(exported["format"], "jsonl")
+        metrics = self.svc.ops_deep_think_archive_metrics("", window_hours=24)
+        self.assertGreater(metrics["total_calls"], 0)
+        actions = {str(x.get("action", "")) for x in metrics.get("by_action", [])}
+        self.assertIn("archive_query", actions)
+        self.assertIn("archive_export_task_create", actions)
 
     def test_a2a_task_lifecycle(self) -> None:
         created = self.svc.deep_think_create_session(
