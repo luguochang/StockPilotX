@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import ReactECharts from "echarts-for-react";
 import { Alert, Button, Card, Col, Input, InputNumber, List, Progress, Row, Segmented, Select, Space, Statistic, Table, Tag, Timeline, Typography } from "antd";
@@ -166,6 +166,52 @@ const DEEP_ROUND_STAGE_LABEL: Record<DeepRoundStageKey, string> = {
   done: "执行完成",
 };
 
+type AgentMeta = { name: string; role: string };
+// 统一的 Agent 中文展示映射：让业务用户能看懂每个角色在做什么。
+const AGENT_META_MAP: Record<string, AgentMeta> = {
+  supervisor_agent: { name: "监督仲裁Agent", role: "统筹轮次推进并输出最终仲裁结论" },
+  pm_agent: { name: "主题叙事Agent", role: "评估题材逻辑与叙事一致性" },
+  quant_agent: { name: "量化评估Agent", role: "评估估值、收益风险比与概率信号" },
+  risk_agent: { name: "风险控制Agent", role: "评估回撤、波动与下行风险" },
+  critic_agent: { name: "质检复核Agent", role: "检查证据完整性与逻辑一致性" },
+  macro_agent: { name: "宏观研判Agent", role: "评估政策与宏观冲击影响" },
+  execution_agent: { name: "执行策略Agent", role: "评估仓位节奏与执行约束" },
+  compliance_agent: { name: "合规审查Agent", role: "评估合规边界与表达风险" },
+};
+
+function getAgentMeta(agentId: string): AgentMeta {
+  return AGENT_META_MAP[agentId] ?? { name: agentId, role: "未配置角色说明" };
+}
+
+function getSignalLabel(signal: string): string {
+  if (signal === "buy") return "增配";
+  if (signal === "reduce") return "减配";
+  if (signal === "hold") return "持有";
+  return signal || "未知";
+}
+
+function getPriorityLabel(priority: string): string {
+  if (priority === "high") return "高";
+  if (priority === "medium") return "中";
+  if (priority === "low") return "低";
+  return priority || "未知";
+}
+
+function getConflictSourceLabel(source: string): string {
+  const mapping: Record<string, string> = {
+    signal_conflict: "信号分歧",
+    signal_divergence: "信号分歧",
+    confidence_gap: "置信度分化",
+    confidence_divergence: "置信度分化",
+    risk_veto: "风险否决",
+    compliance_veto: "合规否决",
+    evidence_gap: "证据缺口",
+    evidence_conflict: "证据冲突",
+    budget_limit: "预算约束",
+  };
+  return mapping[source] ?? source;
+}
+
 function normalizeArchiveTimestamp(raw: string): string {
   const value = String(raw ?? "").trim();
   if (!value) return "";
@@ -266,6 +312,9 @@ export default function DeepThinkPage() {
   // 实时情报链路自检结果：用于快速确认 external/websearch/fallback 状态。
   const [deepIntelProbe, setDeepIntelProbe] = useState<Record<string, any> | null>(null);
   const [deepIntelProbeLoading, setDeepIntelProbeLoading] = useState(false);
+  // 股票切换后提示：明确告知 DeepThink 数据已按标的隔离重置。
+  const [deepStockSwitchNotice, setDeepStockSwitchNotice] = useState("");
+  const deepTrackedStockRef = useRef(stockCode);
 
   function formatDeepPercent(used: number, limit: number): number {
     const safeLimit = Number(limit) <= 0 ? 1 : Number(limit);
@@ -754,6 +803,7 @@ export default function DeepThinkPage() {
   async function startDeepThinkSession() {
     setDeepLoading(true);
     setDeepError("");
+    setDeepStockSwitchNotice("");
     setDeepProgressText("正在创建会话...");
     try {
       await ensureStockInUniverse([stockCode]);
@@ -870,10 +920,16 @@ export default function DeepThinkPage() {
   async function runDeepThinkRound() {
     setDeepLoading(true);
     setDeepError("");
+    setDeepStockSwitchNotice("");
     setDeepProgressText("准备执行下一轮 DeepThink...");
     try {
       await ensureStockInUniverse([stockCode]);
+      const autoCreateSession = !deepSession;
       const session = deepSession ?? (await createDeepThinkSessionRequest());
+      if (autoCreateSession) {
+        // 明确告诉用户：执行下一轮可自动建会话，不依赖先做高级分析。
+        setDeepProgressText("未检测到会话，已自动创建并开始执行...");
+      }
       setDeepSession(session);
       setDeepStreamEvents([]);
       // 每次执行前清空事件过滤，避免“过滤条件隐藏实时事件”的误判。
@@ -988,6 +1044,31 @@ export default function DeepThinkPage() {
       return latestId;
     });
   }, [deepSession]);
+
+  useEffect(() => {
+    const prevStock = deepTrackedStockRef.current;
+    if (prevStock === stockCode) return;
+    deepTrackedStockRef.current = stockCode;
+    const hasDeepThinkState = Boolean(
+      deepSession || deepStreamEvents.length || deepArchiveCount > 0 || deepLastA2ATask || deepIntelProbe
+    );
+    if (!hasDeepThinkState) return;
+    // 切换标的后自动清理 DeepThink 上下文，避免跨股票串用旧轮次数据。
+    setDeepSession(null);
+    setDeepStreamEvents([]);
+    setDeepLastA2ATask(null);
+    setDeepArchiveCount(0);
+    setDeepArchiveRoundId("");
+    setDeepArchiveEventName("");
+    setDeepArchiveCursor(0);
+    setDeepArchiveHasMore(false);
+    setDeepArchiveNextCursor(null);
+    setDeepArchiveCursorHistory([]);
+    setDeepArchiveExportTask(null);
+    setDeepIntelProbe(null);
+    setDeepProgressText("已切换标的，DeepThink 数据已自动清空，请重新执行。");
+    setDeepStockSwitchNotice(`已从 ${prevStock} 切换到 ${stockCode}，DeepThink 会话已清空。`);
+  }, [stockCode, deepArchiveCount, deepIntelProbe, deepLastA2ATask, deepSession, deepStreamEvents.length]);
 
   const trendOption = useMemo(() => {
     const bars = overview?.history ?? [];
@@ -1167,6 +1248,50 @@ export default function DeepThinkPage() {
             : "建议结合实时情报与仓位约束执行跟踪。"
     };
   }, [latestDeepRound]);
+  const deepDecisionExplainModel = useMemo(() => {
+    if (!latestDeepRound) return null;
+    const finalSignal = String(latestDeepRound.consensus_signal ?? "hold");
+    const allOpinions = Array.isArray(latestDeepRound.opinions) ? latestDeepRound.opinions : [];
+    const coreRows = allOpinions.filter((x) => String(x.agent_id) !== "supervisor_agent");
+    const supporting = coreRows
+      .filter((x) => String(x.signal) === finalSignal)
+      .sort((a, b) => Number(b.confidence ?? 0) - Number(a.confidence ?? 0))
+      .slice(0, 3);
+    const counter = coreRows
+      .filter((x) => String(x.signal) !== finalSignal)
+      .sort((a, b) => Number(b.confidence ?? 0) - Number(a.confidence ?? 0))
+      .slice(0, 2);
+    const disagreement = Number(latestDeepRound.disagreement_score ?? 0);
+    const stability =
+      disagreement <= 0.3 ? "稳定" : disagreement <= 0.55 ? "中等分歧" : "高分歧";
+    return { finalSignal, supporting, counter, stability };
+  }, [latestDeepRound]);
+  const deepRiskActionModel = useMemo(() => {
+    if (!latestDeepRound) return null;
+    const disagreement = Number(latestDeepRound.disagreement_score ?? 0);
+    const sources = Array.isArray(latestDeepRound.conflict_sources) ? latestDeepRound.conflict_sources : [];
+    const hasVeto = sources.includes("risk_veto") || sources.includes("compliance_veto");
+    let riskLevel = "低";
+    let action = "按计划跟踪执行，保持事件复核。";
+    if (disagreement > 0.55 || hasVeto) {
+      riskLevel = "高";
+      action = "建议降低仓位或暂停新增，等待关键风险事件确认。";
+    } else if (disagreement > 0.35) {
+      riskLevel = "中";
+      action = "建议轻仓观察，等待下一轮补证后再决策。";
+    }
+    return { riskLevel, action, sources };
+  }, [latestDeepRound]);
+  const deepAgentRoleRows = useMemo(() => {
+    const ids = new Set<string>();
+    for (const id of deepSession?.agent_profile ?? []) ids.add(String(id));
+    for (const task of latestDeepRound?.task_graph ?? []) ids.add(String(task.agent));
+    for (const op of latestDeepRound?.opinions ?? []) ids.add(String(op.agent_id));
+    if (!ids.size) {
+      Object.keys(AGENT_META_MAP).forEach((id) => ids.add(id));
+    }
+    return Array.from(ids).map((id) => ({ id, ...getAgentMeta(id) }));
+  }, [deepSession, latestDeepRound]);
   const deepLatestBusinessSummary = useMemo(() => {
     const reversed = [...deepStreamEvents].reverse();
     const hit = reversed.find((item) => String(item.event) === "business_summary");
@@ -1186,17 +1311,18 @@ export default function DeepThinkPage() {
   const latestBudget = latestDeepRound?.budget_usage;
   const deepTimelineItems = deepRounds.map((round) => ({
     color: round.replan_triggered ? "orange" : round.stop_reason ? "red" : "blue",
-    children: (
+    // antd Timeline 已改为 content 字段，避免 children 废弃告警。
+    content: (
       <Space direction="vertical" size={2}>
         <Text style={{ color: "#0f172a" }}>
-          第 {round.round_no} 轮 | 共识={round.consensus_signal} | 分歧={Number(round.disagreement_score).toFixed(3)}
+          第 {round.round_no} 轮 | 共识={getSignalLabel(String(round.consensus_signal ?? "hold"))} | 分歧={Number(round.disagreement_score).toFixed(3)}
         </Text>
         <Space size={6} wrap>
           {round.replan_triggered ? <Tag color="orange">replan_triggered</Tag> : null}
           {round.stop_reason ? <Tag color="red">{round.stop_reason}</Tag> : null}
           {(round.conflict_sources ?? []).map((src) => (
             <Tag key={`${round.round_id}-${src}`} color="gold">
-              {src}
+              {getConflictSourceLabel(String(src))}
             </Tag>
           ))}
         </Space>
@@ -1256,13 +1382,17 @@ export default function DeepThinkPage() {
     key: task.task_id,
     task_id: task.task_id,
     agent: task.agent,
+    agent_meta: getAgentMeta(String(task.agent)),
     title: task.title,
-    priority: task.priority
+    priority: task.priority,
+    priority_label: getPriorityLabel(String(task.priority ?? ""))
   }));
   const deepOpinionRows = (latestDeepRound?.opinions ?? []).map((opinion) => ({
     key: `${opinion.agent_id}-${opinion.created_at}-${opinion.signal}`,
     agent_id: opinion.agent_id,
+    agent_meta: getAgentMeta(String(opinion.agent_id)),
     signal: opinion.signal,
+    signal_label: getSignalLabel(String(opinion.signal ?? "")),
     confidence: Number(opinion.confidence ?? 0),
     risk_tags: (opinion.risk_tags ?? []).join(", "),
     reason: opinion.reason
@@ -1288,8 +1418,11 @@ export default function DeepThinkPage() {
       return {
         key: `${currRound.round_id}-${agentId}`,
         agent_id: agentId,
+        agent_meta: getAgentMeta(String(agentId)),
         prev_signal: prevSignal,
+        prev_signal_label: getSignalLabel(prevSignal),
         curr_signal: currSignal,
+        curr_signal_label: getSignalLabel(currSignal),
         prev_confidence: prevConfidence,
         curr_confidence: currConfidence,
         delta_confidence: deltaConfidence,
@@ -1313,7 +1446,9 @@ export default function DeepThinkPage() {
       .map((opinion) => ({
         key: `${latestDeepRound.round_id}-conflict-${opinion.agent_id}`,
         agent_id: opinion.agent_id,
+        agent_meta: getAgentMeta(String(opinion.agent_id)),
         signal: opinion.signal,
+        signal_label: getSignalLabel(String(opinion.signal ?? "")),
         confidence: Number(opinion.confidence ?? 0),
         evidence_ids: (opinion.evidence_ids ?? []).join(", "),
         risk_tags: (opinion.risk_tags ?? []).join(", "),
@@ -1606,7 +1741,7 @@ export default function DeepThinkPage() {
                         新建会话
                       </Button>
                       <Button type="primary" onClick={runDeepThinkRound} loading={deepLoading}>
-                        执行下一轮
+                        {deepSession?.session_id ? "执行下一轮" : "执行下一轮（自动建会话）"}
                       </Button>
                       <Button onClick={runDeepThinkRoundViaA2A} loading={deepLoading}>
                         A2A派发下一轮
@@ -1621,6 +1756,18 @@ export default function DeepThinkPage() {
                         情报链路自检
                       </Button>
                     </Space>
+                    <Text style={{ color: "#64748b" }}>
+                      提示：无需先执行高级分析，直接点击“执行下一轮”会自动创建会话并开始分析。
+                    </Text>
+                    {deepStockSwitchNotice ? (
+                      <Alert
+                        type="info"
+                        showIcon
+                        message={deepStockSwitchNotice}
+                        closable
+                        onClose={() => setDeepStockSwitchNotice("")}
+                      />
+                    ) : null}
                     <Space direction="vertical" size={4} style={{ width: "100%" }}>
                       <Text style={{ color: "#334155" }}>
                         执行状态：{deepActionStatusText} | 当前阶段：{DEEP_ROUND_STAGE_LABEL[deepCurrentStage]}
@@ -1633,19 +1780,19 @@ export default function DeepThinkPage() {
                         <Space direction="vertical" size={6} style={{ width: "100%" }}>
                           <Space wrap>
                             <Tag color={deepDecisionSummary.signal === "buy" ? "green" : deepDecisionSummary.signal === "reduce" ? "red" : "blue"}>
-                              signal: {deepDecisionSummary.signal}
+                              建议动作：{getSignalLabel(deepDecisionSummary.signal)}
                             </Tag>
                             <Tag color={deepDecisionSummary.confidence >= 0.7 ? "green" : deepDecisionSummary.confidence >= 0.5 ? "gold" : "red"}>
-                              confidence: {deepDecisionSummary.confidence.toFixed(3)}
+                              置信度：{deepDecisionSummary.confidence.toFixed(3)}
                             </Tag>
-                            <Tag>disagreement: {deepDecisionSummary.disagreement.toFixed(3)}</Tag>
-                            {deepDecisionSummary.replan ? <Tag color="orange">replan_triggered</Tag> : null}
+                            <Tag>分歧度：{deepDecisionSummary.disagreement.toFixed(3)}</Tag>
+                            {deepDecisionSummary.replan ? <Tag color="orange">触发补证重规划</Tag> : null}
                             {deepDecisionSummary.stopReason ? <Tag color="red">{deepDecisionSummary.stopReason}</Tag> : null}
                           </Space>
                           <Text style={{ color: "#334155" }}>{deepDecisionSummary.nextAction}</Text>
                           <Space wrap>
                             {(deepDecisionSummary.riskSources ?? []).map((src) => (
-                              <Tag key={`summary-${src}`} color="orange">{src}</Tag>
+                              <Tag key={`summary-${src}`} color="orange">{getConflictSourceLabel(String(src))}</Tag>
                             ))}
                             {!deepDecisionSummary.riskSources.length ? <Tag color="green">当前无显著冲突源</Tag> : null}
                           </Space>
@@ -1654,25 +1801,103 @@ export default function DeepThinkPage() {
                     ) : (
                       <Text style={{ color: "#64748b" }}>暂无轮次结果，请先执行一轮。</Text>
                     )}
+                    {deepDecisionExplainModel ? (
+                      <Card size="small" title={<span style={{ color: "#0f172a" }}>为什么是这个结论</span>}>
+                        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                          <Space wrap>
+                            <Tag color={deepDecisionExplainModel.finalSignal === "buy" ? "green" : deepDecisionExplainModel.finalSignal === "reduce" ? "red" : "blue"}>
+                              最终信号：{getSignalLabel(deepDecisionExplainModel.finalSignal)}
+                            </Tag>
+                            <Tag color="cyan">稳定性：{deepDecisionExplainModel.stability}</Tag>
+                          </Space>
+                          <Text style={{ color: "#334155" }}>支持结论的关键依据</Text>
+                          {(deepDecisionExplainModel.supporting ?? []).length ? (
+                            (deepDecisionExplainModel.supporting ?? []).map((row) => {
+                              const meta = getAgentMeta(String(row.agent_id));
+                              return (
+                                <Space key={`support-${row.agent_id}-${row.created_at}`} direction="vertical" size={1} style={{ width: "100%" }}>
+                                  <Text style={{ color: "#0f172a" }}>
+                                    {meta.name}（{meta.role}） | {String(row.signal)} | {Number(row.confidence ?? 0).toFixed(3)}
+                                  </Text>
+                                  <Text style={{ color: "#475569" }}>
+                                    观点：{getSignalLabel(String(row.signal ?? "hold"))}
+                                  </Text>
+                                  <Text style={{ color: "#64748b" }}>{String(row.reason ?? "")}</Text>
+                                </Space>
+                              );
+                            })
+                          ) : (
+                            <Text style={{ color: "#64748b" }}>暂无支持结论的可解释依据。</Text>
+                          )}
+                          <Text style={{ color: "#334155" }}>被压制的反对意见</Text>
+                          {(deepDecisionExplainModel.counter ?? []).length ? (
+                            (deepDecisionExplainModel.counter ?? []).map((row) => {
+                              const meta = getAgentMeta(String(row.agent_id));
+                              return (
+                                <Space key={`counter-${row.agent_id}-${row.created_at}`} direction="vertical" size={1} style={{ width: "100%" }}>
+                                  <Text style={{ color: "#0f172a" }}>
+                                    {meta.name}（{meta.role}） | {String(row.signal)} | {Number(row.confidence ?? 0).toFixed(3)}
+                                  </Text>
+                                  <Text style={{ color: "#475569" }}>
+                                    观点：{getSignalLabel(String(row.signal ?? "hold"))}
+                                  </Text>
+                                  <Text style={{ color: "#64748b" }}>{String(row.reason ?? "")}</Text>
+                                </Space>
+                              );
+                            })
+                          ) : (
+                            <Text style={{ color: "#64748b" }}>当前无显著反对意见。</Text>
+                          )}
+                        </Space>
+                      </Card>
+                    ) : null}
+                    {deepRiskActionModel ? (
+                      <Card size="small" title={<span style={{ color: "#0f172a" }}>风险与行动建议</span>}>
+                        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                          <Space wrap>
+                            <Tag color={deepRiskActionModel.riskLevel === "高" ? "red" : deepRiskActionModel.riskLevel === "中" ? "gold" : "green"}>
+                              风险等级：{deepRiskActionModel.riskLevel}
+                            </Tag>
+                            {(deepRiskActionModel.sources ?? []).map((src) => (
+                              <Tag key={`risk-src-${src}`} color="orange">{getConflictSourceLabel(String(src))}</Tag>
+                            ))}
+                            {!(deepRiskActionModel.sources ?? []).length ? <Tag color="green">暂无显著冲突源</Tag> : null}
+                          </Space>
+                          <Text style={{ color: "#334155" }}>{deepRiskActionModel.action}</Text>
+                        </Space>
+                      </Card>
+                    ) : null}
+                    {deepAgentRoleRows.length ? (
+                      <Card size="small" title={<span style={{ color: "#0f172a" }}>Agent 角色说明</span>}>
+                        <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                          {deepAgentRoleRows.map((row) => (
+                            <Space key={`agent-role-${row.id}`} direction="vertical" size={0} style={{ width: "100%" }}>
+                              <Text style={{ color: "#0f172a" }}>{row.name}</Text>
+                              <Text style={{ color: "#64748b" }}>{row.role}</Text>
+                            </Space>
+                          ))}
+                        </Space>
+                      </Card>
+                    ) : null}
                     {deepLatestBusinessSummary ? (
                       <Card size="small" title={<span style={{ color: "#0f172a" }}>业务融合结论</span>}>
                         <Space direction="vertical" size={6} style={{ width: "100%" }}>
                           <Space wrap>
                             <Tag color={String(deepLatestBusinessSummary.signal) === "buy" ? "green" : String(deepLatestBusinessSummary.signal) === "reduce" ? "red" : "blue"}>
-                              signal: {String(deepLatestBusinessSummary.signal ?? "hold")}
+                              建议动作：{getSignalLabel(String(deepLatestBusinessSummary.signal ?? "hold"))}
                             </Tag>
-                            <Tag>confidence: {Number(deepLatestBusinessSummary.confidence ?? 0).toFixed(3)}</Tag>
-                            <Tag>review: {String(deepLatestBusinessSummary.review_time_hint ?? "-")}</Tag>
+                            <Tag>置信度：{Number(deepLatestBusinessSummary.confidence ?? 0).toFixed(3)}</Tag>
+                            <Tag>复核周期：{String(deepLatestBusinessSummary.review_time_hint ?? "-")}</Tag>
                           </Space>
                           <Space wrap>
                             <Tag color={String(deepLatestBusinessSummary.intel_status) === "external_ok" ? "green" : "gold"}>
-                              intel_status: {String(deepLatestBusinessSummary.intel_status ?? "-")}
+                              情报状态：{String(deepLatestBusinessSummary.intel_status ?? "-")}
                             </Tag>
                             {String(deepLatestBusinessSummary.intel_fallback_reason ?? "").trim() ? (
-                              <Tag color="orange">fallback_reason: {String(deepLatestBusinessSummary.intel_fallback_reason)}</Tag>
+                              <Tag color="orange">降级原因：{String(deepLatestBusinessSummary.intel_fallback_reason)}</Tag>
                             ) : null}
                             {String(deepLatestBusinessSummary.intel_trace_id ?? "").trim() ? (
-                              <Tag color="cyan">trace: {String(deepLatestBusinessSummary.intel_trace_id)}</Tag>
+                              <Tag color="cyan">追踪ID：{String(deepLatestBusinessSummary.intel_trace_id)}</Tag>
                             ) : null}
                           </Space>
                           <Text style={{ color: "#334155" }}>
@@ -1690,16 +1915,16 @@ export default function DeepThinkPage() {
                           <Text style={{ color: "#64748b" }}>as_of: {String(deepLatestIntelSnapshot.as_of ?? "-")}</Text>
                           <Space wrap>
                             <Tag color={String(deepLatestIntelSnapshot.intel_status) === "external_ok" ? "green" : "gold"}>
-                              intel_status: {String(deepLatestIntelSnapshot.intel_status ?? "-")}
+                              情报状态：{String(deepLatestIntelSnapshot.intel_status ?? "-")}
                             </Tag>
-                            <Tag>citations: {Number(deepLatestIntelSnapshot.citations_count ?? 0)}</Tag>
+                            <Tag>引用数：{Number(deepLatestIntelSnapshot.citations_count ?? 0)}</Tag>
                             <Tag color={Boolean(deepLatestIntelSnapshot.websearch_tool_applied) ? "green" : "orange"}>
-                              tool_applied: {String(Boolean(deepLatestIntelSnapshot.websearch_tool_applied))}
+                              检索工具启用：{String(Boolean(deepLatestIntelSnapshot.websearch_tool_applied))}
                             </Tag>
                           </Space>
                           {String(deepLatestIntelSnapshot.fallback_reason ?? "").trim() ? (
                             <Text style={{ color: "#b45309" }}>
-                              fallback_reason: {String(deepLatestIntelSnapshot.fallback_reason)}
+                              降级原因：{String(deepLatestIntelSnapshot.fallback_reason)}
                             </Text>
                           ) : null}
                           {String(deepLatestIntelSnapshot.trace_id ?? "").trim() ? (
@@ -1721,22 +1946,22 @@ export default function DeepThinkPage() {
                       <Card size="small" title={<span style={{ color: "#0f172a" }}>情报链路自检结果</span>}>
                         <Space direction="vertical" size={6} style={{ width: "100%" }}>
                           <Space wrap>
-                            <Tag color={Boolean(deepIntelProbe.ok) ? "green" : "gold"}>ok: {String(Boolean(deepIntelProbe.ok))}</Tag>
+                            <Tag color={Boolean(deepIntelProbe.ok) ? "green" : "gold"}>链路可用：{String(Boolean(deepIntelProbe.ok))}</Tag>
                             <Tag color={String(deepIntelProbe.intel_status) === "external_ok" ? "green" : "orange"}>
-                              intel_status: {String(deepIntelProbe.intel_status ?? "-")}
+                              情报状态：{String(deepIntelProbe.intel_status ?? "-")}
                             </Tag>
-                            <Tag>citation_count: {Number(deepIntelProbe.citation_count ?? 0)}</Tag>
+                            <Tag>引用数：{Number(deepIntelProbe.citation_count ?? 0)}</Tag>
                           </Space>
                           <Space wrap>
-                            <Tag>external_enabled: {String(Boolean(deepIntelProbe.external_enabled))}</Tag>
-                            <Tag>provider_count: {Number(deepIntelProbe.provider_count ?? 0)}</Tag>
+                            <Tag>外部检索开关：{String(Boolean(deepIntelProbe.external_enabled))}</Tag>
+                            <Tag>可用Provider数：{Number(deepIntelProbe.provider_count ?? 0)}</Tag>
                             <Tag color={Boolean(deepIntelProbe.websearch_tool_applied) ? "green" : "orange"}>
-                              tool_applied: {String(Boolean(deepIntelProbe.websearch_tool_applied))}
+                              检索工具启用：{String(Boolean(deepIntelProbe.websearch_tool_applied))}
                             </Tag>
                           </Space>
                           {String(deepIntelProbe.fallback_reason ?? "").trim() ? (
                             <Text style={{ color: "#b45309" }}>
-                              fallback_reason: {String(deepIntelProbe.fallback_reason)}
+                              降级原因：{String(deepIntelProbe.fallback_reason)}
                             </Text>
                           ) : null}
                           {String(deepIntelProbe.trace_id ?? "").trim() ? (
@@ -1810,7 +2035,7 @@ export default function DeepThinkPage() {
                         新建会话
                       </Button>
                       <Button type="primary" onClick={runDeepThinkRound} loading={deepLoading}>
-                        执行下一轮
+                        {deepSession?.session_id ? "执行下一轮" : "执行下一轮（自动建会话）"}
                       </Button>
                       <Button onClick={runDeepThinkRoundViaA2A} loading={deepLoading}>
                         A2A派发下一轮
@@ -1874,221 +2099,364 @@ export default function DeepThinkPage() {
                         回放最新轮次流
                       </Button>
                     </Space>
+                    <Text style={{ color: "#64748b" }}>
+                      提示：无需先执行高级分析，直接点击“执行下一轮”会自动创建会话并开始分析。
+                    </Text>
+                    {deepStockSwitchNotice ? (
+                      <Alert
+                        type="info"
+                        showIcon
+                        message={deepStockSwitchNotice}
+                        closable
+                        onClose={() => setDeepStockSwitchNotice("")}
+                      />
+                    ) : null}
                   </>
                 )}
-                <Space wrap>
-                  <Tag color={deepSession ? "blue" : "default"}>session: {deepSession?.session_id ?? "未创建"}</Tag>
-                  <Tag color={deepSession?.status === "completed" ? "green" : "processing"}>status: {deepSession?.status ?? "idle"}</Tag>
-                  <Tag>round: {deepSession?.current_round ?? 0}/{deepSession?.max_rounds ?? 0}</Tag>
-                  <Tag color={deepArchiveCount > 0 ? "cyan" : "default"}>archive_events: {deepArchiveCount}</Tag>
-                  <Tag color={deepArchiveHasMore ? "gold" : "default"}>has_more: {String(deepArchiveHasMore)}</Tag>
-                  <Tag>next_cursor: {deepArchiveNextCursor ?? "-"}</Tag>
-                  <Tag>cursor_stack: {deepArchiveCursorHistory.length}</Tag>
-                  <Tag color={deepArchiveExportTask?.status === "failed" ? "red" : deepArchiveExportTask?.status === "completed" ? "green" : "blue"}>
-                    export_task: {deepArchiveExportTask?.status ?? "idle"}
-                  </Tag>
-                  {deepArchiveExportTask?.task_id ? <Tag>task_id: {deepArchiveExportTask.task_id}</Tag> : null}
-                  {deepArchiveExportTask?.task_id ? <Tag>attempt: {deepArchiveExportTask.attempt_count}/{deepArchiveExportTask.max_attempts}</Tag> : null}
-                  {latestDeepRound?.replan_triggered ? <Tag color="orange">replan_triggered</Tag> : null}
-                  {latestDeepRound?.stop_reason ? <Tag color="red">{latestDeepRound.stop_reason}</Tag> : null}
-                </Space>
-                {deepLastA2ATask ? (
-                  <Space wrap>
-                    <Tag color="cyan">A2A Task: {deepLastA2ATask.task_id}</Tag>
-                    <Tag color={deepLastA2ATask.status === "completed" ? "green" : "gold"}>A2A Status: {deepLastA2ATask.status}</Tag>
-                    <Tag>A2A Agent: {deepLastA2ATask.agent_id}</Tag>
-                  </Space>
-                ) : null}
+                {deepConsoleMode === "analysis" ? (
+                  <Card size="small" title={<span style={{ color: "#0f172a" }}>如何使用这块面板</span>}>
+                    <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                      <Text style={{ color: "#334155" }}>1. 点击“执行下一轮”，系统会自动拉取数据并推进多Agent研判。</Text>
+                      <Text style={{ color: "#334155" }}>2. 重点查看“本轮结论摘要/为什么是这个结论/风险与行动建议”。</Text>
+                      <Text style={{ color: "#334155" }}>3. 若触发补证重规划或存在高风险冲突，再执行下一轮复核。</Text>
+                      <Space wrap>
+                        <Tag color={deepSession ? "blue" : "default"}>会话：{deepSession?.session_id ?? "未创建"}</Tag>
+                        <Tag color={deepSession?.status === "completed" ? "green" : "processing"}>状态：{deepSession?.status ?? "idle"}</Tag>
+                        <Tag>轮次：{deepSession?.current_round ?? 0}/{deepSession?.max_rounds ?? 0}</Tag>
+                        {latestDeepRound?.replan_triggered ? <Tag color="orange">已触发补证重规划</Tag> : null}
+                        {latestDeepRound?.stop_reason ? <Tag color="red">停止原因：{latestDeepRound.stop_reason}</Tag> : null}
+                      </Space>
+                    </Space>
+                  </Card>
+                ) : (
+                  <>
+                    <Space wrap>
+                      <Tag color={deepSession ? "blue" : "default"}>session: {deepSession?.session_id ?? "未创建"}</Tag>
+                      <Tag color={deepSession?.status === "completed" ? "green" : "processing"}>status: {deepSession?.status ?? "idle"}</Tag>
+                      <Tag>round: {deepSession?.current_round ?? 0}/{deepSession?.max_rounds ?? 0}</Tag>
+                      <Tag color={deepArchiveCount > 0 ? "cyan" : "default"}>archive_events: {deepArchiveCount}</Tag>
+                      <Tag color={deepArchiveHasMore ? "gold" : "default"}>has_more: {String(deepArchiveHasMore)}</Tag>
+                      <Tag>next_cursor: {deepArchiveNextCursor ?? "-"}</Tag>
+                      <Tag>cursor_stack: {deepArchiveCursorHistory.length}</Tag>
+                      <Tag color={deepArchiveExportTask?.status === "failed" ? "red" : deepArchiveExportTask?.status === "completed" ? "green" : "blue"}>
+                        export_task: {deepArchiveExportTask?.status ?? "idle"}
+                      </Tag>
+                      {deepArchiveExportTask?.task_id ? <Tag>task_id: {deepArchiveExportTask.task_id}</Tag> : null}
+                      {deepArchiveExportTask?.task_id ? <Tag>attempt: {deepArchiveExportTask.attempt_count}/{deepArchiveExportTask.max_attempts}</Tag> : null}
+                      {latestDeepRound?.replan_triggered ? <Tag color="orange">replan_triggered</Tag> : null}
+                      {latestDeepRound?.stop_reason ? <Tag color="red">{latestDeepRound.stop_reason}</Tag> : null}
+                    </Space>
+                    {deepLastA2ATask ? (
+                      <Space wrap>
+                        <Tag color="cyan">A2A Task: {deepLastA2ATask.task_id}</Tag>
+                        <Tag color={deepLastA2ATask.status === "completed" ? "green" : "gold"}>A2A Status: {deepLastA2ATask.status}</Tag>
+                        <Tag>A2A Agent: {deepLastA2ATask.agent_id}</Tag>
+                      </Space>
+                    ) : null}
+                  </>
+                )}
                 {deepError ? <Alert message={deepError} type="error" showIcon /> : null}
               </Space>
             </Card>
 
-            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>Round Timeline</span>} style={{ marginTop: 12 }}>
-              {deepTimelineItems.length ? (
-                <Timeline items={deepTimelineItems} />
-              ) : (
-                <Text style={{ color: "#64748b" }}>尚未执行 DeepThink 轮次。可先点击「新建会话」再执行。</Text>
-              )}
-            </Card>
+            {/* 分析模式聚焦业务决策解释；工程模式展示全量排障与治理数据。 */}
+            {deepConsoleMode === "analysis" ? (
+              <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>执行过程摘要（业务视角）</span>} style={{ marginTop: 12 }}>
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  <Text style={{ color: "#334155" }}>
+                    已执行轮次：{deepRounds.length} | 当前最新轮次任务数：{deepTaskRows.length}
+                  </Text>
+                  <Space wrap>
+                    {(latestDeepRound?.conflict_sources ?? []).map((src) => (
+                      <Tag key={`analysis-conflict-${src}`} color="orange">
+                        {getConflictSourceLabel(String(src))}
+                      </Tag>
+                    ))}
+                    {!(latestDeepRound?.conflict_sources ?? []).length ? <Tag color="green">当前无显著冲突源</Tag> : null}
+                  </Space>
+                  {deepTimelineItems.length ? (
+                    <Timeline items={deepTimelineItems.slice(-3)} />
+                  ) : (
+                    <Text style={{ color: "#64748b" }}>尚未执行 DeepThink 轮次。可先点击“执行下一轮”。</Text>
+                  )}
+                </Space>
+              </Card>
+            ) : (
+              <>
+                <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>Round Timeline</span>} style={{ marginTop: 12 }}>
+                  {deepTimelineItems.length ? (
+                    <Timeline items={deepTimelineItems} />
+                  ) : (
+                    <Text style={{ color: "#64748b" }}>尚未执行 DeepThink 轮次。可先点击「新建会话」再执行。</Text>
+                  )}
+                </Card>
 
-            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>最新轮次 Task Graph</span>} style={{ marginTop: 12 }}>
-              <Table
-                size="small"
-                pagination={false}
-                locale={{ emptyText: "无任务图数据" }}
-                dataSource={deepTaskRows}
-                columns={[
-                  { title: "Task ID", dataIndex: "task_id", key: "task_id", width: 110 },
-                  { title: "Agent", dataIndex: "agent", key: "agent", width: 130 },
-                  { title: "Title", dataIndex: "title", key: "title" },
-                  {
-                    title: "Priority",
-                    dataIndex: "priority",
-                    key: "priority",
-                    width: 100,
-                    render: (v: string) => <Tag color={v === "high" ? "red" : v === "medium" ? "gold" : "blue"}>{v}</Tag>
-                  }
-                ]}
-              />
-            </Card>
+                <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>最新轮次 Task Graph</span>} style={{ marginTop: 12 }}>
+                  <Table
+                    size="small"
+                    pagination={false}
+                    locale={{ emptyText: "无任务图数据" }}
+                    dataSource={deepTaskRows}
+                    columns={[
+                      { title: "任务ID", dataIndex: "task_id", key: "task_id", width: 110 },
+                      {
+                        title: "Agent",
+                        dataIndex: "agent_meta",
+                        key: "agent_meta",
+                        width: 170,
+                        render: (_: unknown, row: any) => (
+                          <Space direction="vertical" size={0}>
+                            <Text style={{ color: "#0f172a" }}>{row.agent_meta?.name ?? row.agent}</Text>
+                            <Text style={{ color: "#64748b" }}>{row.agent_meta?.role ?? row.agent}</Text>
+                          </Space>
+                        )
+                      },
+                      { title: "任务说明", dataIndex: "title", key: "title" },
+                      {
+                        title: "优先级",
+                        dataIndex: "priority",
+                        key: "priority",
+                        width: 100,
+                        render: (v: string) => <Tag color={v === "high" ? "red" : v === "medium" ? "gold" : "blue"}>{getPriorityLabel(v)}</Tag>
+                      }
+                    ]}
+                  />
+                </Card>
+              </>
+            )}
           </Col>
 
           <Col xs={24} xl={10}>
-            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>预算使用与剩余</span>}>
-              {latestBudget ? (
-                <Space direction="vertical" style={{ width: "100%" }} size={10}>
-                  <div>
-                    <Text style={{ color: "#334155" }}>Token: {latestBudget.used.token_used} / {latestBudget.limit.token_budget}</Text>
-                    <Progress percent={deepTokenPercent} status={latestBudget.exceeded ? "exception" : latestBudget.warn ? "active" : "normal"} />
-                  </div>
-                  <div>
-                    <Text style={{ color: "#334155" }}>Time(ms): {latestBudget.used.time_used_ms} / {latestBudget.limit.time_budget_ms}</Text>
-                    <Progress percent={deepTimePercent} status={latestBudget.exceeded ? "exception" : latestBudget.warn ? "active" : "normal"} />
-                  </div>
-                  <div>
-                    <Text style={{ color: "#334155" }}>Tool Calls: {latestBudget.used.tool_calls_used} / {latestBudget.limit.tool_call_budget}</Text>
-                    <Progress percent={deepToolPercent} status={latestBudget.exceeded ? "exception" : latestBudget.warn ? "active" : "normal"} />
-                  </div>
-                  <Space wrap>
-                    <Tag color={latestBudget.warn ? "gold" : "green"}>warn: {String(latestBudget.warn)}</Tag>
-                    <Tag color={latestBudget.exceeded ? "red" : "green"}>exceeded: {String(latestBudget.exceeded)}</Tag>
+            {/* 右侧面板在分析模式给出可行动信息，避免业务用户被技术噪音淹没。 */}
+            {deepConsoleMode === "analysis" ? (
+              <>
+                <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>关键 Agent 观点（业务版）</span>}>
+                  <Table
+                    size="small"
+                    pagination={false}
+                    locale={{ emptyText: "暂无观点数据" }}
+                    dataSource={deepOpinionRows}
+                    columns={[
+                      {
+                        title: "角色",
+                        dataIndex: "agent_meta",
+                        key: "agent_meta",
+                        width: 186,
+                        render: (_: unknown, row: any) => (
+                          <Space direction="vertical" size={0}>
+                            <Text style={{ color: "#0f172a" }}>{row.agent_meta?.name ?? row.agent_id}</Text>
+                            <Text style={{ color: "#64748b" }}>{row.agent_meta?.role ?? row.agent_id}</Text>
+                          </Space>
+                        )
+                      },
+                      {
+                        title: "观点",
+                        dataIndex: "signal",
+                        key: "signal",
+                        width: 84,
+                        render: (v: string) => <Tag color={v === "buy" ? "green" : v === "reduce" ? "red" : "blue"}>{getSignalLabel(v)}</Tag>
+                      },
+                      {
+                        title: "置信度",
+                        dataIndex: "confidence",
+                        key: "confidence",
+                        width: 88,
+                        render: (v: number) => v.toFixed(3)
+                      },
+                      { title: "关键理由", dataIndex: "reason", key: "reason" }
+                    ]}
+                  />
+                </Card>
+                <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>冲突与行动提示</span>} style={{ marginTop: 12 }}>
+                  <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                    <Space wrap>
+                      {(latestDeepRound?.conflict_sources ?? []).map((src) => (
+                        <Tag key={`analysis-right-${src}`} color="orange">{getConflictSourceLabel(String(src))}</Tag>
+                      ))}
+                      {!(latestDeepRound?.conflict_sources ?? []).length ? <Tag color="green">暂无冲突源</Tag> : null}
+                    </Space>
+                    <Text style={{ color: "#334155" }}>
+                      当前轮次的分歧度越高，建议动作越保守；出现风险/合规否决时优先执行风险控制。
+                    </Text>
                   </Space>
-                </Space>
-              ) : (
-                <Text style={{ color: "#64748b" }}>执行轮次后展示预算治理指标。</Text>
-              )}
-            </Card>
-
-            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>冲突源可视化</span>} style={{ marginTop: 12 }}>
-              <ReactECharts option={deepConflictOption} style={{ height: 240 }} />
-              <Space wrap>
-                {(latestDeepRound?.conflict_sources ?? []).map((src) => (
-                  <Tag key={src} color="orange">{src}</Tag>
-                ))}
-                {!(latestDeepRound?.conflict_sources ?? []).length ? <Tag>暂无冲突源</Tag> : null}
-              </Space>
-            </Card>
-
-            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>最新轮次 Agent 观点</span>} style={{ marginTop: 12 }}>
-              <Table
-                size="small"
-                pagination={false}
-                locale={{ emptyText: "暂无观点数据" }}
-                dataSource={deepOpinionRows}
-                columns={[
-                  { title: "Agent", dataIndex: "agent_id", key: "agent_id", width: 126 },
-                  {
-                    title: "Signal",
-                    dataIndex: "signal",
-                    key: "signal",
-                    width: 92,
-                    render: (v: string) => <Tag color={v === "buy" ? "green" : v === "reduce" ? "red" : "blue"}>{v}</Tag>
-                  },
-                  {
-                    title: "Confidence",
-                    dataIndex: "confidence",
-                    key: "confidence",
-                    width: 104,
-                    render: (v: number) => v.toFixed(3)
-                  }
-                ]}
-              />
-            </Card>
-
-            {deepConsoleMode === "engineering" ? (
-              <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>跨轮次观点差分</span>} style={{ marginTop: 12 }}>
-                <Table
-                  size="small"
-                  pagination={false}
-                  locale={{ emptyText: "至少执行两轮后可查看差分" }}
-                  dataSource={deepOpinionDiffRows}
-                  columns={[
-                    { title: "Agent", dataIndex: "agent_id", key: "agent_id", width: 120 },
-                    {
-                      title: "Signal",
-                      key: "signal_diff",
-                      width: 160,
-                      render: (_: unknown, row: any) => (
-                        <Text style={{ color: "#334155" }}>{row.prev_signal} → {row.curr_signal}</Text>
-                      )
-                    },
-                    {
-                      title: "ΔConf",
-                      dataIndex: "delta_confidence",
-                      key: "delta_confidence",
-                      width: 92,
-                      render: (v: number) => (
-                        <Text style={{ color: v > 0 ? "#059669" : v < 0 ? "#dc2626" : "#475569" }}>{v.toFixed(4)}</Text>
-                      )
-                    },
-                    {
-                      title: "Type",
-                      dataIndex: "change_type",
-                      key: "change_type",
-                      width: 120,
-                      render: (v: string) => (
-                        <Tag color={v === "signal_changed" ? "red" : v === "confidence_shift" ? "gold" : "blue"}>{v}</Tag>
-                      )
-                    }
-                  ]}
-                />
-              </Card>
-            ) : null}
-
-            {deepConsoleMode === "engineering" ? (
-              <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>冲突源下钻（证据视角）</span>} style={{ marginTop: 12 }}>
-                <Table
-                  size="small"
-                  pagination={false}
-                  locale={{ emptyText: "暂无冲突观点可下钻" }}
-                  dataSource={deepConflictDrillRows}
-                  columns={[
-                    { title: "Agent", dataIndex: "agent_id", key: "agent_id", width: 118 },
-                    {
-                      title: "Signal",
-                      dataIndex: "signal",
-                      key: "signal",
-                      width: 84,
-                      render: (v: string) => <Tag color={v === "buy" ? "green" : v === "reduce" ? "red" : "blue"}>{v}</Tag>
-                    },
-                    {
-                      title: "Confidence",
-                      dataIndex: "confidence",
-                      key: "confidence",
-                      width: 100,
-                      render: (v: number) => v.toFixed(3)
-                    },
-                    { title: "Evidence IDs", dataIndex: "evidence_ids", key: "evidence_ids" }
-                  ]}
-                />
-              </Card>
-            ) : null}
-
-            {deepConsoleMode === "engineering" ? (
-              <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>SSE 回放事件</span>} style={{ marginTop: 12 }}>
-                <Text style={{ color: "#64748b" }}>
-                  当前筛选：round={deepArchiveRoundId ? deepArchiveRoundId : "all"} | event={deepArchiveEventName || "all"} | limit={deepArchiveLimit} | cursor={deepArchiveCursor} | from={deepArchiveCreatedFrom || "-"} | to={deepArchiveCreatedTo || "-"}
-                </Text>
-                <List
-                  size="small"
-                  locale={{ emptyText: "暂无流事件记录" }}
-                  dataSource={deepReplayRows}
-                  renderItem={(item) => (
-                    <List.Item>
-                      <Space direction="vertical" size={1}>
-                        <Space>
-                          <Tag color="processing">{item.event}</Tag>
-                          <Text style={{ color: "#64748b" }}>{item.emitted_at}</Text>
-                        </Space>
-                        <Text style={{ color: "#475569" }}>
-                          {JSON.stringify(item.data).slice(0, 180)}
-                        </Text>
+                </Card>
+              </>
+            ) : (
+              <>
+                <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>预算使用与剩余</span>}>
+                  {latestBudget ? (
+                    <Space direction="vertical" style={{ width: "100%" }} size={10}>
+                      <div>
+                        <Text style={{ color: "#334155" }}>Token: {latestBudget.used.token_used} / {latestBudget.limit.token_budget}</Text>
+                        <Progress percent={deepTokenPercent} status={latestBudget.exceeded ? "exception" : latestBudget.warn ? "active" : "normal"} />
+                      </div>
+                      <div>
+                        <Text style={{ color: "#334155" }}>Time(ms): {latestBudget.used.time_used_ms} / {latestBudget.limit.time_budget_ms}</Text>
+                        <Progress percent={deepTimePercent} status={latestBudget.exceeded ? "exception" : latestBudget.warn ? "active" : "normal"} />
+                      </div>
+                      <div>
+                        <Text style={{ color: "#334155" }}>Tool Calls: {latestBudget.used.tool_calls_used} / {latestBudget.limit.tool_call_budget}</Text>
+                        <Progress percent={deepToolPercent} status={latestBudget.exceeded ? "exception" : latestBudget.warn ? "active" : "normal"} />
+                      </div>
+                      <Space wrap>
+                        <Tag color={latestBudget.warn ? "gold" : "green"}>warn: {String(latestBudget.warn)}</Tag>
+                        <Tag color={latestBudget.exceeded ? "red" : "green"}>exceeded: {String(latestBudget.exceeded)}</Tag>
                       </Space>
-                    </List.Item>
+                    </Space>
+                  ) : (
+                    <Text style={{ color: "#64748b" }}>执行轮次后展示预算治理指标。</Text>
                   )}
-                />
-              </Card>
-            ) : null}
+                </Card>
+
+                <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>冲突源可视化</span>} style={{ marginTop: 12 }}>
+                  <ReactECharts option={deepConflictOption} style={{ height: 240 }} />
+                  <Space wrap>
+                    {(latestDeepRound?.conflict_sources ?? []).map((src) => (
+                      <Tag key={src} color="orange">{getConflictSourceLabel(String(src))}</Tag>
+                    ))}
+                    {!(latestDeepRound?.conflict_sources ?? []).length ? <Tag>暂无冲突源</Tag> : null}
+                  </Space>
+                </Card>
+
+                <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>最新轮次 Agent 观点</span>} style={{ marginTop: 12 }}>
+                  <Table
+                    size="small"
+                    pagination={false}
+                    locale={{ emptyText: "暂无观点数据" }}
+                    dataSource={deepOpinionRows}
+                    columns={[
+                      {
+                        title: "Agent",
+                        dataIndex: "agent_meta",
+                        key: "agent_meta",
+                        width: 168,
+                        render: (_: unknown, row: any) => (
+                          <Space direction="vertical" size={0}>
+                            <Text style={{ color: "#0f172a" }}>{row.agent_meta?.name ?? row.agent_id}</Text>
+                            <Text style={{ color: "#64748b" }}>{row.agent_id}</Text>
+                          </Space>
+                        )
+                      },
+                      {
+                        title: "Signal",
+                        dataIndex: "signal",
+                        key: "signal",
+                        width: 92,
+                        render: (v: string) => <Tag color={v === "buy" ? "green" : v === "reduce" ? "red" : "blue"}>{v}</Tag>
+                      },
+                      {
+                        title: "Confidence",
+                        dataIndex: "confidence",
+                        key: "confidence",
+                        width: 104,
+                        render: (v: number) => v.toFixed(3)
+                      }
+                    ]}
+                  />
+                </Card>
+
+                <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>跨轮次观点差分</span>} style={{ marginTop: 12 }}>
+                  <Table
+                    size="small"
+                    pagination={false}
+                    locale={{ emptyText: "至少执行两轮后可查看差分" }}
+                    dataSource={deepOpinionDiffRows}
+                    columns={[
+                      {
+                        title: "Agent",
+                        dataIndex: "agent_meta",
+                        key: "agent_meta",
+                        width: 128,
+                        render: (_: unknown, row: any) => row.agent_meta?.name ?? row.agent_id
+                      },
+                      {
+                        title: "Signal",
+                        key: "signal_diff",
+                        width: 160,
+                        render: (_: unknown, row: any) => (
+                          <Text style={{ color: "#334155" }}>{row.prev_signal_label} → {row.curr_signal_label}</Text>
+                        )
+                      },
+                      {
+                        title: "ΔConf",
+                        dataIndex: "delta_confidence",
+                        key: "delta_confidence",
+                        width: 92,
+                        render: (v: number) => (
+                          <Text style={{ color: v > 0 ? "#059669" : v < 0 ? "#dc2626" : "#475569" }}>{v.toFixed(4)}</Text>
+                        )
+                      },
+                      {
+                        title: "Type",
+                        dataIndex: "change_type",
+                        key: "change_type",
+                        width: 120,
+                        render: (v: string) => (
+                          <Tag color={v === "signal_changed" ? "red" : v === "confidence_shift" ? "gold" : "blue"}>{v}</Tag>
+                        )
+                      }
+                    ]}
+                  />
+                </Card>
+
+                <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>冲突源下钻（证据视角）</span>} style={{ marginTop: 12 }}>
+                  <Table
+                    size="small"
+                    pagination={false}
+                    locale={{ emptyText: "暂无冲突观点可下钻" }}
+                    dataSource={deepConflictDrillRows}
+                    columns={[
+                      {
+                        title: "Agent",
+                        dataIndex: "agent_meta",
+                        key: "agent_meta",
+                        width: 146,
+                        render: (_: unknown, row: any) => row.agent_meta?.name ?? row.agent_id
+                      },
+                      {
+                        title: "Signal",
+                        dataIndex: "signal",
+                        key: "signal",
+                        width: 84,
+                        render: (v: string) => <Tag color={v === "buy" ? "green" : v === "reduce" ? "red" : "blue"}>{v}</Tag>
+                      },
+                      {
+                        title: "Confidence",
+                        dataIndex: "confidence",
+                        key: "confidence",
+                        width: 100,
+                        render: (v: number) => v.toFixed(3)
+                      },
+                      { title: "Evidence IDs", dataIndex: "evidence_ids", key: "evidence_ids" }
+                    ]}
+                  />
+                </Card>
+
+                <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>SSE 回放事件</span>} style={{ marginTop: 12 }}>
+                  <Text style={{ color: "#64748b" }}>
+                    当前筛选：round={deepArchiveRoundId ? deepArchiveRoundId : "all"} | event={deepArchiveEventName || "all"} | limit={deepArchiveLimit} | cursor={deepArchiveCursor} | from={deepArchiveCreatedFrom || "-"} | to={deepArchiveCreatedTo || "-"}
+                  </Text>
+                  <List
+                    size="small"
+                    locale={{ emptyText: "暂无流事件记录" }}
+                    dataSource={deepReplayRows}
+                    renderItem={(item) => (
+                      <List.Item>
+                        <Space direction="vertical" size={1}>
+                          <Space>
+                            <Tag color="processing">{item.event}</Tag>
+                            <Text style={{ color: "#64748b" }}>{item.emitted_at}</Text>
+                          </Space>
+                          <Text style={{ color: "#475569" }}>
+                            {JSON.stringify(item.data).slice(0, 180)}
+                          </Text>
+                        </Space>
+                      </List.Item>
+                    )}
+                  />
+                </Card>
+              </>
+            )}
           </Col>
         </Row>
       </motion.section>

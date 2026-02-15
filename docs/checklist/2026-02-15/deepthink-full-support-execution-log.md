@@ -112,3 +112,20 @@
 ## 2026-02-15T12:45:00Z - Batch H Test Evidence
 - `npm --prefix frontend run -s build`
   - Result: passed
+
+## 2026-02-15T13:40:00Z - Batch I (Business Console Clarity)
+- Frontend (`frontend/app/deep-think/page.tsx`):
+  - Added business semantic mapping helpers (signal/priority/conflict source).
+  - Added Chinese role metadata rendering in task/opinion/diff/drill tables.
+  - Added analysis-mode usage guidance and process summary cards.
+  - Isolated engineering-heavy timeline/taskgraph/replay panels to engineering mode.
+  - Preserved stock-switch DeepThink reset and explicit notice.
+  - Updated Timeline items to `content` field (compat with latest antd API).
+- Runtime interface validation (real API chain):
+  - `/v1/query/stream`: first event 4ms, first answer delta 6340ms, done ok.
+  - `/v2/deep-think/sessions/{session_id}/rounds/stream`: first event 2ms, full events emitted, done ok.
+  - `/v1/deep-think/sessions/{session_id}/business-export`: CSV BOM present (`has_utf8_bom=true`).
+- Test evidence:
+  - `npx tsc --noEmit` (frontend): passed.
+  - `npm --prefix frontend run -s build`: passed.
+  - `.\.venv\Scripts\python.exe -m pytest tests/test_service.py tests/test_http_api.py -q`: `37 passed`.

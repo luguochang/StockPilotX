@@ -63,3 +63,10 @@
 - [x] Show sample coverage, interval dates, close price range, and interval pct change
 - [x] Add no-data fallback message for insufficient history
 - [x] Verify with frontend production build
+
+## Batch I - Business Console Clarity and Interaction
+- [x] Clarify `macro_agent/pm_agent/...` with Chinese role labels in core tables
+- [x] Explicitly communicate that DeepThink round can auto-create session without advanced analysis
+- [x] Auto-clear DeepThink state when stock code changes to avoid cross-stock contamination
+- [x] Split analysis/engineering panels to reduce business-view cognitive load
+- [x] Run interface-level self-test for query stream + deep-think round stream + business export
