@@ -1,0 +1,32 @@
+[
+  {
+    "name": "primary-openai-responses",
+    "enabled": true,
+    "api_style": "openai_responses",
+    "api_base": "https://your-gateway.example.com/v1",
+    "model": "gpt-5.2",
+    "api_key_env": "PRIMARY_LLM_API_KEY",
+    "api_key_header": "Authorization",
+    "api_key_prefix": "Bearer ",
+    "max_tokens": 1200,
+    "temperature": 0.2,
+    "top_p": 0.95,
+    "stream": true,
+    "timeout_seconds": 20
+  },
+  {
+    "name": "secondary-anthropic-proxy",
+    "enabled": false,
+    "api_style": "anthropic_messages",
+    "api_base": "https://another-gateway.example.com/v1",
+    "model": "claude-sonnet-4-5-20250929",
+    "api_key_env": "SECONDARY_LLM_API_KEY",
+    "api_key_header": "Authorization",
+    "api_key_prefix": "Bearer ",
+    "anthropic_version": "2023-06-01",
+    "max_tokens": 1200,
+    "temperature": 0.2,
+    "stream": false,
+    "timeout_seconds": 20
+  }
+]

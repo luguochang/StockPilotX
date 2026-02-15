@@ -1,0 +1,45 @@
+﻿# StockPilotX 技术实现现状矩阵（2026-02-15）
+
+> 基准文档：`docs/a-share-agent-system-executable-spec.md`
+
+## 1. 总体判定
+- 核心系统属于“可运行工程骨架 + 关键能力可验证”状态。
+- 多数能力已具备最小可用实现，但部分为轻量版或可选启用，不等同于生产增强版。
+
+## 2. 技术点落地矩阵
+
+| 技术点 | 实现状态 | 代码锚点 | 说明 |
+|---|---|---|---|
+| 状态管理 | 已实现（请求态） | `backend/app/state.py`, `backend/app/agents/workflow.py` | 采用 `AgentState` 贯穿路由、检索、分析、引用构建。 |
+| LangSmith | 已实现（可选启用） | `backend/app/observability/tracing.py` | 配置 `LANGSMITH_API_KEY` 后上报；无 key 自动本地降级。 |
+| 多 Agent 协作 | 已实现（同进程阶段式） | `backend/app/agents/workflow.py` | Router/Data/RAG/Analysis/Report/Critic 在同一工作流类中编排。 |
+| Long-term Memory | 已实现 | `backend/app/memory/store.py`, `backend/app/service.py` | SQLite 持久化记忆，查询前注入 memory hint，完成后回写。 |
+| LangGraph 集成 | 已实现（主链路可切换） | `backend/app/agents/langgraph_runtime.py`, `backend/app/service.py` | `query` 主链路支持 LangGraph runtime，支持 direct 回退。 |
+| Middleware 工程化 | 已实现 | `backend/app/middleware/hooks.py` | 含 `before/after`、`wrap_model_call`、`wrap_tool_call` 洋葱模型。 |
+| Deep Agents | 已实现（轻量并行） | `backend/app/agents/workflow.py` | 通过子任务拆分 + `ThreadPoolExecutor` 并行检索。 |
+| 文档处理工程 | 已实现 | `backend/app/docs/pipeline.py`, `backend/app/service.py` | 上传、索引、质量门禁、复核队列已接通。 |
+| RAG（AgenticRAG） | 已实现（轻量版） | `backend/app/rag/retriever.py` | BM25 + ngram 向量近似 + rerank，不是外部向量库方案。 |
+| RAG（GraphRAG） | 已实现（可选Neo4j） | `backend/app/rag/graphrag.py` | 默认 InMemory 图；配置 `NEO4J_*` 才切真实图数据库。 |
+| RAG 测评 | 已实现 | `backend/app/rag/evaluation.py`, `tests/test_rag_retrieval.py` | 提供检索指标基线测试。 |
+| Prompt 工程化管理 | 已实现 | `backend/app/prompt/registry.py`, `backend/app/prompt/runtime.py`, `backend/app/prompt/evaluator.py` | 三层模板、版本、评测、发布门禁已具备。 |
+| LangChain 1.0 | 部分实现（已接入工具绑定与模板） | `backend/app/agents/tools.py`, `backend/app/prompt/runtime.py` | 已接入 `StructuredTool` + `ChatPromptTemplate`，主编排仍以 LangGraph + 自有 workflow 为核心。 |
+| 外部 LLM 多 Provider | 已实现 | `backend/app/llm/gateway.py`, `backend/config/llm_providers.local.json` | 支持 openai-responses/openai-chat/anthropic-messages，并含回退策略。 |
+| 流式输出（SSE） | 已实现 | `backend/app/http_api.py`, `backend/app/agents/workflow.py`, `frontend/app/page.tsx` | `/v1/query/stream` 端到端可用，前端可显示 provider/model/api。 |
+
+## 3. API 与前端覆盖结论
+- 后端：`/v1/*` 接口已覆盖核心域与运维域。
+- 前端：主站、预测、报告、文档中心、运维页均已存在，且 2026-02-15 新增了文档上传/复核、调度状态与停启、报告生成与版本查询、`auth me/refresh` 操作入口，以及技术点能力快照展示（`ops/evals`）。
+
+## 4. 自测证据
+- 命令：`\.venv\Scripts\python -m pytest -q`
+- 结果：`57 passed in 16.97s`
+
+## 5. 当前主要差距
+1. LangChain 的 structured output / agent executor 尚未进入主执行链（目前仅工具绑定已接入）。
+2. RAG 检索层尚未接入 embedding + 向量数据库（当前为轻量实现）。
+3. 多 Agent 仍是单进程内编排，未引入独立 Agent Runtime 或跨进程协作。
+
+## 6. 建议下一阶段
+1. 将 `query_stream` 迁移到 LangGraph 事件流节点。
+2. 引入可替换向量后端（Milvus/Qdrant/PGVector 其一）并保留当前轻量检索作回退。
+3. 形成线上门禁：RAG 指标阈值 + Prompt Gate + 模型回退演练。

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local virtual env
+.venv/
+
+# Runtime logs
+*.log
+backend/logs/*.log
+
+# Secrets / local configs
+backend/config/*.local.json
+backend/.env*
+
+# Node
+frontend/node_modules/
+frontend/.next/
+
+# Temp artifacts
+tmp_assets/
+tmp_*.txt
+*.tmp
+minimax-home.html

@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+_DATA_DIR = _BACKEND_DIR / "data"
+_CONFIG_DIR = _BACKEND_DIR / "config"
+
+
+def _to_bool(value: str | None, default: bool) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass(slots=True)
+class Settings:
+    """系统配置。"""
+
+    # 应用基础配置
+    app_name: str = "a-share-agent-system"
+    env: str = "dev"
+
+    # SQLite 路径：用于本地 MVP 的记忆与 Prompt 资产化存储
+    memory_db_path: str = str(_DATA_DIR / "memory.db")
+    prompt_db_path: str = str(_DATA_DIR / "prompt.db")
+    web_db_path: str = str(_DATA_DIR / "web.db")
+    jwt_secret: str = "stockpilotx-dev-secret"
+    jwt_expire_seconds: int = 60 * 60 * 8
+
+    # 预算控制：限制模型调用、工具调用和上下文大小
+    max_tool_calls: int = 12
+    max_model_calls: int = 8
+    max_context_chars: int = 12000
+
+    # 触发 GraphRAG 的关键词（后续可演进为规则引擎）
+    graph_trigger_keywords: tuple[str, ...] = ("关系", "演化", "关联", "产业链", "股权")
+
+    # 外部大模型网关配置（支持多供应商回退）
+    llm_external_enabled: bool = False
+    llm_config_path: str = str(_CONFIG_DIR / "llm_providers.local.json")
+    llm_request_timeout_seconds: float = 20.0
+    llm_retry_count: int = 1
+    llm_retry_backoff_seconds: float = 0.8
+    llm_fallback_to_local: bool = True
+    use_langgraph_runtime: bool = True
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        """从环境变量构建配置对象。"""
+        default_memory = str(_DATA_DIR / "memory.db")
+        default_prompt = str(_DATA_DIR / "prompt.db")
+        default_llm_config = str(_CONFIG_DIR / "llm_providers.local.json")
+        graph_keywords_env = os.getenv("GRAPH_TRIGGER_KEYWORDS")
+        graph_keywords = (
+            tuple(x.strip() for x in graph_keywords_env.split(",") if x.strip())
+            if graph_keywords_env
+            else ("关系", "演化", "关联", "产业链", "股权")
+        )
+        return cls(
+            env=os.getenv("APP_ENV", "dev"),
+            memory_db_path=os.getenv("MEMORY_DB_PATH", default_memory),
+            prompt_db_path=os.getenv("PROMPT_DB_PATH", default_prompt),
+            web_db_path=os.getenv("WEB_DB_PATH", str(_DATA_DIR / "web.db")),
+            jwt_secret=os.getenv("JWT_SECRET", "stockpilotx-dev-secret"),
+            jwt_expire_seconds=int(os.getenv("JWT_EXPIRE_SECONDS", str(60 * 60 * 8))),
+            graph_trigger_keywords=graph_keywords,
+            llm_external_enabled=_to_bool(os.getenv("LLM_EXTERNAL_ENABLED"), False),
+            llm_config_path=os.getenv("LLM_CONFIG_PATH", default_llm_config),
+            llm_request_timeout_seconds=float(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "20")),
+            llm_retry_count=max(1, int(os.getenv("LLM_RETRY_COUNT", "1"))),
+            llm_retry_backoff_seconds=max(0.0, float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "0.8"))),
+            llm_fallback_to_local=_to_bool(os.getenv("LLM_FALLBACK_TO_LOCAL"), True),
+            use_langgraph_runtime=_to_bool(os.getenv("USE_LANGGRAPH_RUNTIME"), True),
+        )
+
+    def load_llm_provider_configs(self) -> list[dict]:
+        """读取多提供商LLM配置（JSON数组）。"""
+        path = Path(self.llm_config_path)
+        if not path.exists():
+            return []
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            raise ValueError("llm provider config must be a JSON array")
+        return [x for x in payload if isinstance(x, dict)]

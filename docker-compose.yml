@@ -1,0 +1,22 @@
+version: "3.9"
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: deploy/backend.Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=prod
+      - JWT_SECRET=change-me
+  frontend:
+    build:
+      context: .
+      dockerfile: deploy/frontend.Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_BASE=http://backend:8000
+    depends_on:
+      - backend
+
