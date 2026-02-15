@@ -1,4 +1,4 @@
-﻿# Round-M: DeepThink Export Retry Hardening, Audit Percentiles, and Time-Filter UX
+# Round-M: DeepThink Export Retry Hardening, Audit Percentiles, and Time-Filter UX
 
 Date: 2026-02-15  
 Scope: DeepThink archive export reliability + observability + frontend filtering UX
@@ -66,8 +66,8 @@ Scope: DeepThink archive export reliability + observability + frontend filtering
 - `docs/rounds/2026-02-15/round-M-deepthink-export-retry-metrics-ux.md`
 - `docs/agent-column/17-Round-M-DeepThink导出重试与审计分位指标实现记录.md`
 - `docs/agent-column/00-总览-多agent-a2a-deepagent.md`
-- `docs/implementation-checklist.md`
-- `docs/spec-traceability-matrix.md`
+- `docs/governance/implementation-checklist.md`
+- `docs/governance/spec-traceability-matrix.md`
 - `docs/reports/2026-02-15/implementation-status-matrix-2026-02-15.md`
 
 ## 5. Checklist Mapping

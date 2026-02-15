@@ -59,8 +59,8 @@ Scope: DeepThink archive query contract hardening and audit export path (backend
 - `docs/rounds/2026-02-15/round-K-deepthink-archive-pagination-export.md`
 - `docs/agent-column/15-Round-K-DeepThink归档分页时间过滤与导出实现记录.md`
 - `docs/agent-column/00-总览-多agent-a2a-deepagent.md`
-- `docs/implementation-checklist.md`
-- `docs/spec-traceability-matrix.md`
+- `docs/governance/implementation-checklist.md`
+- `docs/governance/spec-traceability-matrix.md`
 - `docs/reports/2026-02-15/implementation-status-matrix-2026-02-15.md`
 
 ## 5. Checklist Mapping

@@ -1,4 +1,4 @@
-﻿# Round-L: DeepThink Archive Async Export Tasks and Audit Metrics
+# Round-L: DeepThink Archive Async Export Tasks and Audit Metrics
 
 Date: 2026-02-15  
 Scope: DeepThink archive governance hardening (backend + frontend)
@@ -72,8 +72,8 @@ Scope: DeepThink archive governance hardening (backend + frontend)
 - `docs/rounds/2026-02-15/round-L-deepthink-archive-async-export-audit.md`
 - `docs/agent-column/16-Round-L-DeepThink归档异步导出任务与审计指标实现记录.md`
 - `docs/agent-column/00-总览-多agent-a2a-deepagent.md`
-- `docs/implementation-checklist.md`
-- `docs/spec-traceability-matrix.md`
+- `docs/governance/implementation-checklist.md`
+- `docs/governance/spec-traceability-matrix.md`
 - `docs/reports/2026-02-15/implementation-status-matrix-2026-02-15.md`
 
 ## 5. Checklist Mapping

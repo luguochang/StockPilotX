@@ -6,8 +6,8 @@
   - 先填 `input`、`expected_facts`、`expected_citations`。
   - 执行后回填 `actual_output`、`score`、`pass/fail`。
 - 治理绑定：
-  - 每条测试执行必须绑定 `Task ID`（来自 `docs/implementation-checklist.md`）。
-  - 发布判定必须满足 `docs/global-constraints.md` 门禁要求。
+  - 每条测试执行必须绑定 `Task ID`（来自 `docs/governance/implementation-checklist.md`）。
+  - 发布判定必须满足 `docs/governance/global-constraints.md` 门禁要求。
 - 评分建议：
   - 事实正确性（40）
   - 引用完整性（30）

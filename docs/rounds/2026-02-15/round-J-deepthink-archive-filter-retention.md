@@ -57,8 +57,8 @@ Scope: DeepThink event archive queryability and retention controls (backend + fr
 - `docs/rounds/2026-02-15/round-J-deepthink-archive-filter-retention.md`
 - `docs/agent-column/14-Round-J-DeepThink事件过滤与归档保留治理实现记录.md`
 - `docs/agent-column/00-总览-多agent-a2a-deepagent.md`
-- `docs/implementation-checklist.md`
-- `docs/spec-traceability-matrix.md`
+- `docs/governance/implementation-checklist.md`
+- `docs/governance/spec-traceability-matrix.md`
 - `docs/reports/2026-02-15/implementation-status-matrix-2026-02-15.md`
 
 ## 5. Checklist Mapping

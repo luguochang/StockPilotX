@@ -2,15 +2,15 @@
 
 ## 1. 文档定位
 - 本文整合以下 4 份文档为一个可执行版本：
-  - `docs/a-share-agent-system-tech-solution.md`
-  - `docs/free-data-source-implementation.md`
-  - `docs/prompt-engineering-spec.md`
-  - `docs/prompt-test-cases-template.md`
+  - `docs/specs/a-share-agent-system-tech-solution.md`
+  - `docs/specs/free-data-source-implementation.md`
+  - `docs/specs/prompt-engineering-spec.md`
+  - `docs/templates/prompt-test-cases-template.md`
 - 目标：作为唯一主文档，指导从需求到上线的完整实现与验收。
 - 文档治理约束（新增）：
-  - 执行清单：`docs/implementation-checklist.md`
-  - 追踪矩阵：`docs/spec-traceability-matrix.md`
-  - 全局门禁：`docs/global-constraints.md`
+  - 执行清单：`docs/governance/implementation-checklist.md`
+  - 追踪矩阵：`docs/governance/spec-traceability-matrix.md`
+  - 全局门禁：`docs/governance/global-constraints.md`
 
 ## 2. 产品目标与边界
 1. 目标
@@ -204,9 +204,9 @@ flowchart TD
   - 第一版报告类型（事实报告/研究报告）
   - 发布门禁阈值是否按本文默认值执行
 - 实施治理规则（新增）：
-  - 任何实现任务必须先登记到 `docs/implementation-checklist.md`。
-  - 任何需求必须先映射到 `docs/spec-traceability-matrix.md`。
-  - 任何任务完成必须满足 `docs/global-constraints.md` 硬门禁。
+  - 任何实现任务必须先登记到 `docs/governance/implementation-checklist.md`。
+  - 任何需求必须先映射到 `docs/governance/spec-traceability-matrix.md`。
+  - 任何任务完成必须满足 `docs/governance/global-constraints.md` 硬门禁。
 
 ## 17. 核心技术实现矩阵（逐项落地）
 ## 17.1 状态管理（State Management）
@@ -490,13 +490,13 @@ flowchart TD
 
 ## 18. 实施治理与防遗漏机制（新增）
 1. 单一执行真相源
-- 所有执行状态以 `docs/implementation-checklist.md` 为准。
+- 所有执行状态以 `docs/governance/implementation-checklist.md` 为准。
 
 2. 需求追踪闭环
-- 所有需求点必须在 `docs/spec-traceability-matrix.md` 有映射后方可执行。
+- 所有需求点必须在 `docs/governance/spec-traceability-matrix.md` 有映射后方可执行。
 
 3. 强门禁机制
-- 门禁阈值与完成规则统一由 `docs/global-constraints.md` 约束。
+- 门禁阈值与完成规则统一由 `docs/governance/global-constraints.md` 约束。
 - 未满足硬门禁时禁止标记任务为完成。
 
 4. 记录要求

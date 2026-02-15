@@ -1,6 +1,6 @@
 # A-Share Agent System Backend (MVP)
 
-This backend implements a runnable MVP based on `docs/a-share-agent-system-executable-spec.md`.
+This backend implements a runnable MVP based on `docs/specs/a-share-agent-system-executable-spec.md`.
 
 ## Implemented
 - Multi-agent workflow: Router -> Data -> RAG -> Analysis -> Report -> Critic

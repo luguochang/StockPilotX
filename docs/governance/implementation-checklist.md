@@ -11,9 +11,9 @@
 - 任何任务在无 Evidence 的情况下禁止标记为 `[x]`。
 
 ## 2. 当前基线
-- 主规范：`docs/a-share-agent-system-executable-spec.md`
-- 追踪矩阵：`docs/spec-traceability-matrix.md`
-- 全局门禁：`docs/global-constraints.md`
+- 主规范：`docs/specs/a-share-agent-system-executable-spec.md`
+- 追踪矩阵：`docs/governance/spec-traceability-matrix.md`
+- 全局门禁：`docs/governance/global-constraints.md`
 - 最近更新时间：2026-02-15
 
 ## 3. 里程碑总览
@@ -28,9 +28,9 @@
 ## 4. 任务总表
 | Task ID | Spec Ref | Scope | Status | DoD（完成标准） | Evidence |
 |---|---|---|---|---|---|
-| GOV-001 | S1,S16 | 建立单一执行清单与流程规则 | [x] | 清单创建并定义状态机 | 创建 `docs/implementation-checklist.md`（2026-02-13） |
-| GOV-002 | S1,S16 | 建立需求追踪矩阵 | [x] | 主文档 2~17 节均可映射到任务 | 创建 `docs/spec-traceability-matrix.md`（2026-02-13） |
-| GOV-003 | S14,S15 | 建立全局强约束门禁文档 | [x] | 硬门禁、软门禁、阻塞规则可执行 | 创建 `docs/global-constraints.md`（2026-02-13） |
+| GOV-001 | S1,S16 | 建立单一执行清单与流程规则 | [x] | 清单创建并定义状态机 | 创建 `docs/governance/implementation-checklist.md`（2026-02-13） |
+| GOV-002 | S1,S16 | 建立需求追踪矩阵 | [x] | 主文档 2~17 节均可映射到任务 | 创建 `docs/governance/spec-traceability-matrix.md`（2026-02-13） |
+| GOV-003 | S14,S15 | 建立全局强约束门禁文档 | [x] | 硬门禁、软门禁、阻塞规则可执行 | 创建 `docs/governance/global-constraints.md`（2026-02-13） |
 | BASE-001 | S8,S12,S17.3 | 多 Agent MVP 主流程（Router->Data->RAG->Analysis->Report->Critic） | [x] | 问答路径可运行并返回 citations | `python -m unittest ...` 7/7 通过（2026-02-13） |
 | BASE-002 | S17.6 | Middleware 生命周期与 wrap 链路 | [x] | before/after + wrap 已接入 | 同上测试通过（2026-02-13） |
 | BASE-003 | S17.4 | Long-term Memory 基线 | [x] | Memory Store 可写入/读取 | 同上测试通过（2026-02-13） |
@@ -74,7 +74,7 @@
 | FRONT-008 | S4,S12,S15,S17.7 | DeepThink 存档分页与导出控制台（Round-K） | [x] | `/deep-think` 支持按时间过滤、游标翻页并导出 JSONL/CSV | 增强 `frontend/app/deep-think/page.tsx`，新增 `created_from/created_to`、`next_cursor` 翻页与导出按钮；`npm run build`、`npx tsc --noEmit` 通过（2026-02-15） |
 | FRONT-009 | S4,S12,S15,S17.7 | DeepThink 存档异步导出任务与回放导航（Round-L） | [x] | `/deep-think` 支持导出任务轮询下载与上一页/回到第一页导航 | 增强 `frontend/app/deep-think/page.tsx`，新增 `deepArchiveCursorHistory` 与导出任务状态流；`npm run build`、`npx tsc --noEmit` 通过（2026-02-15） |
 | FRONT-010 | S4,S12,S15,S17.7 | DeepThink 时间过滤输入规范化与导出尝试可视化（Round-M） | [x] | `/deep-think` 使用结构化时间输入并可快速设置窗口，导出任务展示尝试次数 | 增强 `frontend/app/deep-think/page.tsx`（datetime-local 规范化、最近24小时、attempt tag）；`npm run build`、`npx tsc --noEmit` 通过（2026-02-15） |
-| OPS-001 | S14,S15 | 上线前工程化检查（SLO/Runbook/回滚） | [x] | 检查项完成并可审计 | 新增 `docs/ops-runbook.md`（SLO、告警、回滚、发布前检查）；`tests/test_project_assets.py` 校验存在（2026-02-13） |
+| OPS-001 | S14,S15 | 上线前工程化检查（SLO/Runbook/回滚） | [x] | 检查项完成并可审计 | 新增 `docs/operations/ops-runbook.md`（SLO、告警、回滚、发布前检查）；`tests/test_project_assets.py` 校验存在（2026-02-13） |
 
 ## 4.1 完整 Web 应用扩展清单（新增）
 > 说明：以下为“从 MVP 到完整 Web 应用”必须补齐的产品功能，避免范围遗漏。

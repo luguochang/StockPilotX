@@ -7,9 +7,9 @@
   - 不使用绕过登录、破解、逆向加密等高风险抓取方式。
   - 输出仅供研究参考，不构成投资建议。
 - 治理绑定（新增）：
-  - 执行清单：`docs/implementation-checklist.md`
-  - 追踪矩阵：`docs/spec-traceability-matrix.md`
-  - 全局门禁：`docs/global-constraints.md`
+  - 执行清单：`docs/governance/implementation-checklist.md`
+  - 追踪矩阵：`docs/governance/spec-traceability-matrix.md`
+  - 全局门禁：`docs/governance/global-constraints.md`
 
 ## 2. 数据源分层（免费方案）
 ## 2.1 一级事实源（结论主依据）

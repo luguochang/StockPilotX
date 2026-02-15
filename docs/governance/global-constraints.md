@@ -5,8 +5,8 @@
 
 ## 2. 约束优先级
 1. 本文件（全局约束）
-2. `docs/a-share-agent-system-executable-spec.md`
-3. `docs/prompt-engineering-spec.md` 与 `docs/free-data-source-implementation.md`
+2. `docs/specs/a-share-agent-system-executable-spec.md`
+3. `docs/specs/prompt-engineering-spec.md` 与 `docs/specs/free-data-source-implementation.md`
 4. 其他说明文档
 
 若冲突，按优先级高者执行。
@@ -28,8 +28,8 @@
   - 高风险违规率 `= 0`
 
 4. 变更门禁
-- 未写入 `docs/spec-traceability-matrix.md` 的需求禁止执行。
-- 未登记到 `docs/implementation-checklist.md` 的执行项禁止开始。
+- 未写入 `docs/governance/spec-traceability-matrix.md` 的需求禁止执行。
+- 未登记到 `docs/governance/implementation-checklist.md` 的执行项禁止开始。
 
 ## 4. 软门禁（Soft Gates）
 - 推荐每次提交后执行最小回归测试并记录结果。

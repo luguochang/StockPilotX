@@ -1,7 +1,7 @@
 # 规格追踪矩阵（Spec Traceability Matrix）
 
 ## 1. 目的
-- 确保 `docs/a-share-agent-system-executable-spec.md` 与辅助文档要求可映射到可执行任务。
+- 确保 `docs/specs/a-share-agent-system-executable-spec.md` 与辅助文档要求可映射到可执行任务。
 - 防止“实现遗漏、记录遗漏、验收遗漏”。
 
 ## 2. 映射规则
@@ -9,7 +9,7 @@
   - 主文档章节：`S2`~`S17.x`
   - Prompt 文档：`P3`、`P7.2` 等
   - 免费源文档：`D2.1`、`D6.2` 等
-- 每个映射项必须绑定 `Task ID`（见 `docs/implementation-checklist.md`）。
+- 每个映射项必须绑定 `Task ID`（见 `docs/governance/implementation-checklist.md`）。
 
 ## 3. 主文档映射（核心）
 | Spec Ref | 要求摘要 | Task ID | 状态 |

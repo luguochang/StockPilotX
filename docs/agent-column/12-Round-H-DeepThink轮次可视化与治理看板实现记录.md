@@ -55,8 +55,8 @@
 - `docs/rounds/2026-02-15/round-H-deepthink-round-visualization.md`
 - `docs/agent-column/12-Round-H-DeepThink轮次可视化与治理看板实现记录.md`
 - `docs/agent-column/00-总览-多agent-a2a-deepagent.md`
-- `docs/implementation-checklist.md`
-- `docs/spec-traceability-matrix.md`
+- `docs/governance/implementation-checklist.md`
+- `docs/governance/spec-traceability-matrix.md`
 - `docs/reports/2026-02-15/implementation-status-matrix-2026-02-15.md`
 
 ## 6. 本轮自测

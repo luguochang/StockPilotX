@@ -29,7 +29,7 @@ class ProjectAssetsTestCase(unittest.TestCase):
 
     def test_ops_runbook_exists(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        self.assertTrue((root / "docs" / "ops-runbook.md").exists())
+        self.assertTrue((root / "docs" / "operations" / "ops-runbook.md").exists())
 
     def test_deployment_assets_exist(self) -> None:
         root = Path(__file__).resolve().parents[1]

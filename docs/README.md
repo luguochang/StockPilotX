@@ -4,7 +4,11 @@
 This directory keeps project documentation organized by **artifact type** and **date**.
 
 ## Top-Level Rules
-- Keep **core specs and governance docs** in `docs/` root.
+- Keep `docs/` root minimal and use category subdirectories.
+- Put specs under `docs/specs/`.
+- Put governance and gate docs under `docs/governance/`.
+- Put operations runbooks under `docs/operations/`.
+- Put templates under `docs/templates/`.
 - Put **date-based reports** under `docs/reports/YYYY-MM-DD/`.
 - Put **optimization iteration notes** under `docs/optimization/YYYY-MM-DD/`.
 - Put **round execution records** under `docs/rounds/YYYY-MM-DD/`.
@@ -12,16 +16,19 @@ This directory keeps project documentation organized by **artifact type** and **
 - Put reusable references under `docs/references/`.
 
 ## Current Layout
-- Core specs and governance (root):
-  - `docs/a-share-agent-system-executable-spec.md`
-  - `docs/a-share-agent-system-tech-solution.md`
-  - `docs/free-data-source-implementation.md`
-  - `docs/prompt-engineering-spec.md`
-  - `docs/prompt-test-cases-template.md`
-  - `docs/implementation-checklist.md`
-  - `docs/spec-traceability-matrix.md`
-  - `docs/global-constraints.md`
-  - `docs/ops-runbook.md`
+- Specs:
+  - `docs/specs/a-share-agent-system-executable-spec.md`
+  - `docs/specs/a-share-agent-system-tech-solution.md`
+  - `docs/specs/free-data-source-implementation.md`
+  - `docs/specs/prompt-engineering-spec.md`
+- Templates:
+  - `docs/templates/prompt-test-cases-template.md`
+- Governance:
+  - `docs/governance/implementation-checklist.md`
+  - `docs/governance/spec-traceability-matrix.md`
+  - `docs/governance/global-constraints.md`
+- Operations:
+  - `docs/operations/ops-runbook.md`
 - Reports:
   - `docs/reports/2026-02-14/`
   - `docs/reports/2026-02-15/`

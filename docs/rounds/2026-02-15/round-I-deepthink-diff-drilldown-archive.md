@@ -57,8 +57,8 @@ Scope: DeepThink observability and replay persistence (backend + frontend)
 - `docs/rounds/2026-02-15/round-I-deepthink-diff-drilldown-archive.md`
 - `docs/agent-column/13-Round-I-DeepThink跨轮差分与事件存档实现记录.md`
 - `docs/agent-column/00-总览-多agent-a2a-deepagent.md`
-- `docs/implementation-checklist.md`
-- `docs/spec-traceability-matrix.md`
+- `docs/governance/implementation-checklist.md`
+- `docs/governance/spec-traceability-matrix.md`
 - `docs/reports/2026-02-15/implementation-status-matrix-2026-02-15.md`
 
 ## 5. Checklist Mapping

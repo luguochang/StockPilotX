@@ -1,6 +1,6 @@
-﻿# StockPilotX 技术实现现状矩阵（2026-02-15）
+# StockPilotX 技术实现现状矩阵（2026-02-15）
 
-> 基准文档：`docs/a-share-agent-system-executable-spec.md`
+> 基准文档：`docs/specs/a-share-agent-system-executable-spec.md`
 
 ## 1. 总体判定
 - 核心系统属于“可运行工程骨架 + 关键能力可验证”状态。

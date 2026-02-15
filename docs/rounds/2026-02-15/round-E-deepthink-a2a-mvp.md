@@ -61,8 +61,8 @@ Scope: Backend capability upgrade + API exposure + tests + governance records
 - `tests/test_service.py`
 - `tests/test_http_api.py`
 - `docs/rounds/README.md`
-- `docs/implementation-checklist.md`
-- `docs/spec-traceability-matrix.md`
+- `docs/governance/implementation-checklist.md`
+- `docs/governance/spec-traceability-matrix.md`
 
 ## 5. Self-test Evidence
 - Backend targeted:

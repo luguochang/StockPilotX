@@ -4,9 +4,9 @@
 - 把 Prompt 从“经验写法”变成“可管理的工程资产”。
 - 支撑金融分析场景的稳定输出、合规约束、可观测与可回溯。
 - 绑定治理文档：
-  - 执行清单：`docs/implementation-checklist.md`
-  - 追踪矩阵：`docs/spec-traceability-matrix.md`
-  - 全局门禁：`docs/global-constraints.md`
+  - 执行清单：`docs/governance/implementation-checklist.md`
+  - 追踪矩阵：`docs/governance/spec-traceability-matrix.md`
+  - 全局门禁：`docs/governance/global-constraints.md`
 
 ## 2. 适用范围
 - 适用服务：`agent-gateway`、`report-service`、`eval-service`
