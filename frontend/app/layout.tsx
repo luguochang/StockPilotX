@@ -9,7 +9,8 @@ export const metadata = {
 };
 
 const navItems = [
-  { href: "/", label: "工作台" },
+  { href: "/", label: "首页" },
+  { href: "/deep-think", label: "DeepThink" },
   { href: "/predict", label: "预测" },
   { href: "/watchlist", label: "关注池" },
   { href: "/reports", label: "报告" },

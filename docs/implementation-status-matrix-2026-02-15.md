@@ -73,3 +73,9 @@
 - Added planner/replan control path: disagreement threshold can trigger replan task insertion.
 - Added budget guard path: exceeded budget yields deterministic stop reason `DEEP_BUDGET_EXCEEDED`.
 - Validation: backend 63 passed; frontend build passed; frontend typecheck currently blocked by existing `tsconfig` include mismatch.
+
+## Round-G Update (2026-02-15)
+- Frontend IA refactor: `/` now serves as product-style navigation homepage, while deep analysis is moved to `/deep-think`.
+- Added dedicated route `frontend/app/deep-think/page.tsx` and updated top nav in `frontend/app/layout.tsx`.
+- Kept existing analysis capability intact by migrating previous workspace page to the new route.
+- Validation: frontend build passed; frontend typecheck passed; backend regression remained green (63 passed).

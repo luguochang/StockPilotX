@@ -90,6 +90,38 @@ a { color: inherit; text-decoration: none; }
   padding: 4px 8px;
 }
 
+.landing-hero {
+  position: relative;
+  overflow: hidden;
+  border-radius: 10px;
+  min-height: 340px;
+  margin-bottom: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background:
+    radial-gradient(1200px 440px at 0% -10%, rgba(37, 99, 235, 0.26), transparent 55%),
+    radial-gradient(920px 380px at 100% 0%, rgba(8, 145, 178, 0.22), transparent 58%),
+    linear-gradient(118deg, #0f172a, #1e293b 52%, #0b3a59);
+}
+
+.landing-hero-mask {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(120deg, rgba(2, 6, 23, 0.36), rgba(2, 6, 23, 0.12));
+}
+
+.landing-hero-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 30px 28px;
+}
+
+.landing-card {
+  min-height: 220px;
+}
+
 .premium-card {
   border: none !important;
   border-bottom: 1px solid rgba(148, 163, 184, 0.24) !important;
@@ -275,5 +307,13 @@ a { color: inherit; text-decoration: none; }
   .media-carousel-slide {
     height: 300px;
     border-radius: 8px;
+  }
+
+  .landing-hero {
+    min-height: 280px;
+  }
+
+  .landing-hero-content {
+    padding: 20px 16px;
   }
 }

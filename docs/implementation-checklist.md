@@ -61,6 +61,8 @@
 | PROMPT-003 | S10 | 30 条回归样本自动执行 | [x] | Golden/Boundary/RedTeam/Freshness 全跑通 | 新增 `backend/app/prompt/evaluator.py`（30 样本分组执行），评测指标并入 `/v1/evals/run`（2026-02-13） |
 | OBS-001 | S4,S10,S17.2 | LangSmith 真接入（trace/eval/experiment） | [x] | trace 与 eval 可关联到 report/prompt/source | 重写 `backend/app/observability/tracing.py`，增加 `LangSmithAdapter`（有 key 真上报，无 key 本地降级）；`tests/test_observability.py` 通过（2026-02-13） |
 | FRONT-001 | S4 | Next.js 前端最小闭环 | [x] | 支持 query/report/citations 展示 | 新建 `frontend/` Next.js 最小项目（query + answer + citations）；`tests/test_project_assets.py` 资产检查通过（2026-02-13） |
+| FRONT-003 | S4,S12 | 首页导航化与 DeepThink 独立页面拆分 | [x] | 首页仅展示系统介绍与模块跳转，深度分析迁移到 `/deep-think` | 新增 `frontend/app/deep-think/page.tsx`，重构 `frontend/app/page.tsx` 为导航首页；更新 `frontend/app/layout.tsx` 导航；`npm run build` 通过（2026-02-15） |
+| FRONT-004 | S14,S15 | 前端构建与类型检查稳定化（Round-G） | [x] | 本轮改造后 `build` 与 `tsc` 均通过 | 更新 `frontend/tsconfig.json` 并完成 `npm run build`、`npx tsc --noEmit`（2026-02-15） |
 | OPS-001 | S14,S15 | 上线前工程化检查（SLO/Runbook/回滚） | [x] | 检查项完成并可审计 | 新增 `docs/ops-runbook.md`（SLO、告警、回滚、发布前检查）；`tests/test_project_assets.py` 校验存在（2026-02-13） |
 
 ## 4.1 完整 Web 应用扩展清单（新增）
@@ -273,3 +275,16 @@
   - key output: `build passed`
   - command: `cd frontend && npx tsc --noEmit`
   - key output: `failed: tsconfig include '.next/types/**/*.ts' matched missing files (pre-existing config issue)`
+
+### 2026-02-15 (Round-G)
+- Completed:
+  - [FRONT-003] 首页与分析页拆分：`/` 重构为导航首页，深度分析迁移至 `/deep-think`。
+  - [FRONT-004] 前端稳定性：本轮改造后 `build + tsc` 均通过。
+  - [GOV-004] 本轮交付文档化：新增 `docs/rounds/2026-02-15/round-G-homepage-deepthink-separation.md` 与专栏记录 `docs/agent-column/11-Round-G-首页导航化与DeepThink独立页面实现记录.md`。
+- Evidence:
+  - command: `cd frontend && npm run build`
+  - key output: `build passed, route /deep-think generated`
+  - command: `cd frontend && npx tsc --noEmit`
+  - key output: `typecheck passed`
+  - command: `.\.venv\Scripts\python -m pytest -q`
+  - key output: `63 passed`
