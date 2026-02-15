@@ -82,3 +82,20 @@
   - `fallback_reason=external_disabled`
   - `external_enabled=false`
   - `trace_event=deep_intel_fallback`
+
+## 2026-02-15T12:10:00Z - Batch G Interface-Driven Optimization
+- Executed real API chain tests (not unit-only):
+  - `/v1/query/stream` for advanced analysis
+  - `/v2/deep-think/sessions/{session_id}/rounds/stream` for next-round execution
+- Found and fixed:
+  - Upstream provider 400 detail was hidden; added HTTP body passthrough in gateway.
+  - Intel parser failed on textual confidence adjustment (`down`); added robust mapping.
+  - Query still prone to sparse-sample interpretation; added 3-month continuous sample context injection.
+  - Added min-sample refresh rule for history and 3-month window retrieval evidence.
+- Interface re-check results:
+  - Query stream: no sparse/isolated-sample misclassification in sampled run, includes `eastmoney_history_3m_window`.
+  - DeepThink stream: `intel_status=external_ok`, `citations_count=5`, no fallback reason.
+
+## 2026-02-15T12:20:00Z - Batch G Test Evidence
+- `.\.venv\Scripts\python.exe -m pytest tests/test_service.py tests/test_http_api.py -q`
+  - Result: `37 passed`

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import json
 import time
 from typing import Any, Iterator
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from backend.app.config import Settings
@@ -442,11 +443,18 @@ class MultiProviderLLMGateway:
             headers=headers,
             method="POST",
         )
-        with urlopen(req, timeout=timeout) as resp:  # noqa: S310 - 
-            text = resp.read().decode("utf-8", errors="ignore")
-            if not text and not stream:
-                raise RuntimeError("empty http response body")
-            return text
+        try:
+            with urlopen(req, timeout=timeout) as resp:  # noqa: S310 - 
+                text = resp.read().decode("utf-8", errors="ignore")
+                if not text and not stream:
+                    raise RuntimeError("empty http response body")
+                return text
+        except HTTPError as ex:
+            # 将上游错误体透传出来，便于上层识别“Unsupported tool type”等可恢复错误。
+            detail = ex.read().decode("utf-8", errors="ignore").strip()
+            if detail:
+                raise RuntimeError(f"HTTP {ex.code}: {detail}") from ex
+            raise RuntimeError(f"HTTP {ex.code}: {ex.reason}") from ex
 
     @staticmethod
     def _iter_sse_events(
@@ -461,31 +469,37 @@ class MultiProviderLLMGateway:
             headers=headers,
             method="POST",
         )
-        with urlopen(req, timeout=timeout) as resp:  # noqa: S310 - 
-            buffer = ""
-            while True:
-                raw = resp.readline()
-                if not raw:
-                    break
-                line = raw.decode("utf-8", errors="ignore")
-                if line == "\n":
-                    block = buffer.strip()
-                    buffer = ""
-                    if not block:
+        try:
+            with urlopen(req, timeout=timeout) as resp:  # noqa: S310 - 
+                buffer = ""
+                while True:
+                    raw = resp.readline()
+                    if not raw:
+                        break
+                    line = raw.decode("utf-8", errors="ignore")
+                    if line == "\n":
+                        block = buffer.strip()
+                        buffer = ""
+                        if not block:
+                            continue
+                        for row in block.splitlines():
+                            row = row.strip()
+                            if not row.startswith("data:"):
+                                continue
+                            data = row[5:].strip()
+                            if not data or data == "[DONE]":
+                                continue
+                            try:
+                                yield json.loads(data)
+                            except json.JSONDecodeError:
+                                continue
                         continue
-                    for row in block.splitlines():
-                        row = row.strip()
-                        if not row.startswith("data:"):
-                            continue
-                        data = row[5:].strip()
-                        if not data or data == "[DONE]":
-                            continue
-                        try:
-                            yield json.loads(data)
-                        except json.JSONDecodeError:
-                            continue
-                    continue
-                buffer += line
+                    buffer += line
+        except HTTPError as ex:
+            detail = ex.read().decode("utf-8", errors="ignore").strip()
+            if detail:
+                raise RuntimeError(f"HTTP {ex.code}: {detail}") from ex
+            raise RuntimeError(f"HTTP {ex.code}: {ex.reason}") from ex
 
     @staticmethod
     def _parse_anthropic_response(payload: str) -> str:

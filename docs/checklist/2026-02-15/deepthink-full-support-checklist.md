@@ -49,3 +49,11 @@
 - [x] Add trace event query API for intelligence chain debugging
 - [x] Expose intel status/reason/trace fields in stream events and frontend cards
 - [x] Verify with backend tests + frontend build + manual self-test output
+
+## Batch G - Interface-Driven Runtime Optimization
+- [x] Run real `/v1/query/stream` and `/v2/deep-think/.../rounds/stream` interface self-tests
+- [x] Fix provider error observability by preserving upstream HTTP error body
+- [x] Fix intel parser for textual `confidence_adjustment` values (e.g. `down`)
+- [x] Inject 3-month continuous history context into query/query_stream model input
+- [x] Enforce history min-sample refresh and add 3m window evidence item
+- [x] Re-verify with interface self-test and automated tests

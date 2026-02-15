@@ -4,6 +4,8 @@ import json
 import time
 import unittest
 import uuid
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from backend.app.data.sources import NeteaseAdapter, QuoteService, SinaAdapter, TencentAdapter
 from backend.app.service import AShareAgentService
@@ -360,6 +362,128 @@ class ServiceTestCase(unittest.TestCase):
         trace_rows = self.svc.deep_think_trace_events(str(result.get("trace_id", "")), limit=60)
         self.assertIn("events", trace_rows)
         self.assertTrue(isinstance(trace_rows["events"], list))
+
+    def test_deep_fetch_intel_retry_without_tool_when_tool_unsupported(self) -> None:
+        # 回归：当 provider 不支持 web-search tool 参数时，应自动回退到无 tools 再尝试一次。
+        self.svc.settings.llm_external_enabled = True
+        self.svc.llm_gateway.providers = [
+            SimpleNamespace(enabled=True, name="mock-provider", api_style="openai_responses", model="mock-model")
+        ]
+        calls: list[dict[str, object]] = []
+
+        def fake_generate(state, prompt, request_overrides=None):  # noqa: ANN001
+            calls.append({"request_overrides": request_overrides})
+            if isinstance(request_overrides, dict) and request_overrides.get("tools"):
+                raise RuntimeError('HTTP 400: {"detail":"Unsupported tool type: web_search_preview"}')
+            return json.dumps(
+                {
+                    "as_of": "2026-02-15T10:00:00Z",
+                    "macro_signals": [
+                        {
+                            "title": "政策窗口观察",
+                            "summary": "测试数据：验证无 tool 回退后仍可返回结构化情报。",
+                            "impact_direction": "mixed",
+                            "impact_horizon": "1w",
+                            "why_relevant_to_stock": "影响风险偏好",
+                            "url": "https://example.com/macro",
+                            "published_at": "2026-02-15T09:00:00Z",
+                            "source_type": "media",
+                        }
+                    ],
+                    "industry_forward_events": [],
+                    "stock_specific_catalysts": [],
+                    "calendar_watchlist": [],
+                    "impact_chain": [],
+                    "decision_adjustment": {
+                        "signal_bias": "hold",
+                        "confidence_adjustment": -0.05,
+                        "rationale": "测试回退链路",
+                    },
+                    "citations": [
+                        {
+                            "title": "示例来源",
+                            "url": "https://example.com/source",
+                            "published_at": "2026-02-15T09:00:00Z",
+                            "source_type": "media",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        original_generate = self.svc.llm_gateway.generate
+        self.svc.llm_gateway.generate = fake_generate  # type: ignore[assignment]
+        try:
+            result = self.svc._deep_fetch_intel_via_llm_websearch(
+                stock_code="SH600000",
+                question="请做实时情报自检",
+                quote={"price": 10.5, "pct_change": 0.8},
+                trend={"momentum_20": 0.03, "max_drawdown_60": 0.12},
+                quant_20={"signal": "hold"},
+            )
+        finally:
+            self.svc.llm_gateway.generate = original_generate  # type: ignore[assignment]
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(bool(calls[0]["request_overrides"]))
+        self.assertFalse(bool(calls[1]["request_overrides"]))
+        self.assertEqual(result["intel_status"], "external_ok")
+        self.assertEqual(result["websearch_tool_requested"], True)
+        self.assertEqual(result["websearch_tool_applied"], False)
+        self.assertGreaterEqual(len(result.get("citations", [])), 1)
+
+    def test_deep_validate_intel_payload_accepts_text_confidence_adjustment(self) -> None:
+        payload = {
+            "as_of": "2026-02-15T00:00:00Z",
+            "macro_signals": [
+                {
+                    "title": "测试",
+                    "summary": "测试文本置信度",
+                    "impact_direction": "mixed",
+                    "impact_horizon": "1w",
+                    "why_relevant_to_stock": "测试",
+                    "url": "https://example.com",
+                    "published_at": "2026-02-15T00:00:00Z",
+                    "source_type": "media",
+                }
+            ],
+            "decision_adjustment": {
+                "signal_bias": "hold",
+                "confidence_adjustment": "down",
+                "rationale": "文本置信度表达",
+            },
+            "citations": [{"title": "x", "url": "https://example.com/x", "published_at": "", "source_type": "media"}],
+        }
+        normalized = self.svc._deep_validate_intel_payload(payload)  # type: ignore[attr-defined]
+        self.assertIn("decision_adjustment", normalized)
+        self.assertAlmostEqual(float(normalized["decision_adjustment"]["confidence_adjustment"]), -0.12, places=3)
+
+    def test_augment_question_with_history_context_includes_3m_summary(self) -> None:
+        code = "SH600000"
+        base = datetime(2025, 10, 1)
+        rows = []
+        for i in range(95):
+            day = (base + timedelta(days=i)).strftime("%Y-%m-%d")
+            close = 10.0 + i * 0.03
+            rows.append(
+                {
+                    "stock_code": code,
+                    "trade_date": day,
+                    "open": close - 0.05,
+                    "close": close,
+                    "high": close + 0.08,
+                    "low": close - 0.1,
+                    "volume": 100000 + i,
+                    "source_id": "eastmoney_history",
+                    "source_url": "https://example.com/kline",
+                    "reliability_score": 0.9,
+                }
+            )
+        self.svc.ingestion_store.history_bars = rows
+        enriched = self.svc._augment_question_with_history_context("请做高级分析", [code])  # type: ignore[attr-defined]
+        self.assertIn("系统补充", enriched)
+        self.assertIn("最近三个月连续日线样本", enriched)
+        self.assertIn(code, enriched)
 
     def test_a2a_task_lifecycle(self) -> None:
         created = self.svc.deep_think_create_session(

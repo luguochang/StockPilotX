@@ -5,6 +5,7 @@ import difflib
 import io
 import json
 import queue
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -404,7 +405,22 @@ class AShareAgentService:
             bias = str(decision.get("signal_bias", "hold")).strip().lower()
             if bias not in {"buy", "hold", "reduce"}:
                 bias = "hold"
-            conf_adj = float(decision.get("confidence_adjustment", 0.0) or 0.0)
+            raw_adj = decision.get("confidence_adjustment", 0.0)
+            # 兼容模型输出文本强弱（例如 "down"/"up"），避免 float 强转异常导致整段降级。
+            try:
+                conf_adj = float(raw_adj or 0.0)
+            except Exception:
+                text = str(raw_adj or "").strip().lower()
+                if any(x in text for x in ("down", "decrease", "lower", "negative", "bearish", "reduce")):
+                    conf_adj = -0.12
+                elif any(x in text for x in ("up", "increase", "higher", "positive", "bullish", "buy")):
+                    conf_adj = 0.12
+                elif "neutral" in text or "hold" in text:
+                    conf_adj = 0.0
+                else:
+                    # 若文本里含数字（如 "-0.1"、"0.08"），尝试提取首个浮点值。
+                    hit = re.search(r"-?\\d+(?:\\.\\d+)?", text)
+                    conf_adj = float(hit.group(0)) if hit else 0.0
             conf_adj = max(-0.5, min(0.5, conf_adj))
             normalized["decision_adjustment"] = {
                 "signal_bias": bias,
@@ -432,6 +448,8 @@ class AShareAgentService:
     def _deep_infer_intel_fallback_reason(self, message: str) -> str:
         """根据异常文本映射稳定原因码，避免前端只能看到含糊报错。"""
         msg = (message or "").strip().lower()
+        if "unsupported tool type" in msg:
+            return "websearch_tool_unsupported"
         if "external llm disabled" in msg:
             return "external_disabled"
         if "no llm providers configured" in msg:
@@ -786,11 +804,13 @@ class AShareAgentService:
 
         # 基于最新摄取数据动态构建检索语料，避免固定示例语料导致输出雷同。
         self.workflow.retriever = HybridRetriever(corpus=self._build_runtime_corpus(req.stock_codes))
+        enriched_question = self._augment_question_with_history_context(req.question, req.stock_codes)
 
         trace_id = self.traces.new_trace()
         state = AgentState(
             user_id=req.user_id,
-            question=req.question,
+            # 仅增强模型输入上下文，输出层仍使用用户原始问题文案。
+            question=enriched_question,
             stock_codes=req.stock_codes,
             trace_id=trace_id,
         )
@@ -857,10 +877,11 @@ class AShareAgentService:
             yield {"event": "progress", "data": {"phase": "data_refresh", "status": "done"}}
         yield {"event": "progress", "data": {"phase": "retriever", "message": "正在准备检索语料"}}
         self.workflow.retriever = HybridRetriever(corpus=self._build_runtime_corpus(req.stock_codes))
+        enriched_question = self._augment_question_with_history_context(req.question, req.stock_codes)
         trace_id = self.traces.new_trace()
         state = AgentState(
             user_id=req.user_id,
-            question=req.question,
+            question=enriched_question,
             stock_codes=req.stock_codes,
             trace_id=trace_id,
         )
@@ -931,7 +952,9 @@ class AShareAgentService:
         lines.append("## 数据证据分析")
         for code in stock_codes:
             realtime = self._latest_quote(code)
-            bars = self._history_bars(code, limit=120)
+            # 问答主链路尽量使用更长窗口，减少“样本稀疏”判断误差。
+            bars = self._history_bars(code, limit=260)
+            summary_3m = self._history_3m_summary(code)
             if not realtime or len(bars) < 30:
                 lines.append(f"- {code}: 数据不足（实时或历史样本不足），仅给出保守判断。 [insufficient_data]")
                 continue
@@ -945,6 +968,15 @@ class AShareAgentService:
                 f"  解释: MA20>{'MA60' if trend['ma20'] >= trend['ma60'] else 'MA60以下'}，"
                 f"近20日动量 `{trend['momentum_20']:.4f}`，最大回撤 `{trend['max_drawdown_60']:.4f}`。"
             )
+            if int(summary_3m.get("sample_count", 0)) >= 60:
+                lines.append(
+                    "  三个月窗口: "
+                    f"`{summary_3m.get('start_date','')}` -> `{summary_3m.get('end_date','')}`，"
+                    f"连续样本 `{int(summary_3m.get('sample_count', 0))}` 条，"
+                    f"收盘 `{float(summary_3m.get('start_close', 0.0)):.3f}` -> "
+                    f"`{float(summary_3m.get('end_close', 0.0)):.3f}`，"
+                    f"区间 `{float(summary_3m.get('pct_change', 0.0)) * 100:.2f}%`。"
+                )
             merged.append(
                 {
                     "source_id": realtime.get("source_id", "unknown"),
@@ -962,6 +994,21 @@ class AShareAgentService:
                         "event_time": bars[-1].get("trade_date"),
                         "reliability_score": bars[-1].get("reliability_score", 0.9),
                         "excerpt": f"{code} 历史K线样本 {len(bars)} 条，最近交易日 {bars[-1].get('trade_date','')}",
+                    }
+                )
+            # 额外补充三个月窗口首末点引用，避免模型仅看到“离散两点”却不知完整窗口样本量。
+            if int(summary_3m.get("sample_count", 0)) >= 2:
+                merged.append(
+                    {
+                        "source_id": "eastmoney_history_3m_window",
+                        "source_url": bars[-1].get("source_url", "") if bars else "",
+                        "event_time": summary_3m.get("end_date", ""),
+                        "reliability_score": 0.92,
+                        "excerpt": (
+                            f"{code} 近3个月样本 {int(summary_3m.get('sample_count', 0))} 条，"
+                            f"区间 {summary_3m.get('start_date','')}->{summary_3m.get('end_date','')}，"
+                            f"收盘 {float(summary_3m.get('start_close', 0.0)):.3f}->{float(summary_3m.get('end_close', 0.0)):.3f}"
+                        ),
                     }
                 )
 
@@ -991,7 +1038,7 @@ class AShareAgentService:
         now = datetime.now(timezone.utc)
         for code in stock_codes:
             realtime = self._latest_quote(code)
-            bars = self._history_bars(code, limit=120)
+            bars = self._history_bars(code, limit=260)
             trend = self._trend_metrics(bars) if len(bars) >= 30 else {}
             freshness_sec = None
             if realtime:
@@ -1104,10 +1151,12 @@ class AShareAgentService:
             )
 
         # 历史K线 -> 文本事实（趋势查询时关键证据）
+        history_by_code: dict[str, list[dict[str, Any]]] = {}
         for b in self.ingestion_store.history_bars[-2000:]:
             code = str(b.get("stock_code", ""))
             if symbols and code not in symbols:
                 continue
+            history_by_code.setdefault(code, []).append(b)
             text = (
                 f"{code} 历史K线 {b.get('trade_date','')} 开{b.get('open')} 高{b.get('high')} "
                 f"低{b.get('low')} 收{b.get('close')} 量{b.get('volume')}"
@@ -1120,6 +1169,33 @@ class AShareAgentService:
                     score=0.0,
                     event_time=self._parse_time(str(b.get("trade_date", ""))),
                     reliability_score=float(b.get("reliability_score", 0.9)),
+                )
+            )
+        # 为每个标的增加“最近三个月连续窗口摘要”，避免模型只看到离散点后误判样本稀疏。
+        for code, rows in history_by_code.items():
+            if not rows:
+                continue
+            rows = sorted(rows, key=lambda x: str(x.get("trade_date", "")))
+            window = rows[-90:]
+            if len(window) < 2:
+                continue
+            start = window[0]
+            end = window[-1]
+            start_close = float(start.get("close", 0.0) or 0.0)
+            end_close = float(end.get("close", 0.0) or 0.0)
+            pct_change = (end_close / start_close - 1.0) if start_close > 0 else 0.0
+            text = (
+                f"{code} 最近三个月连续日线样本={len(window)}，区间={start.get('trade_date')}到{end.get('trade_date')}，"
+                f"收盘从{start_close:.3f}到{end_close:.3f}，区间涨跌={pct_change * 100:.2f}%。"
+            )
+            corpus.append(
+                RetrievalItem(
+                    text=text,
+                    source_id="eastmoney_history_3m_window",
+                    source_url=str(end.get("source_url", "")),
+                    score=0.0,
+                    event_time=self._parse_time(str(end.get("trade_date", ""))),
+                    reliability_score=0.92,
                 )
             )
 
@@ -1176,9 +1252,18 @@ class AShareAgentService:
             return (now - ts).total_seconds() > max_age_seconds
         return True
 
-    def _needs_history_refresh(self, stock_code: str, max_age_seconds: int = 60 * 60 * 8) -> bool:
+    def _needs_history_refresh(
+        self,
+        stock_code: str,
+        max_age_seconds: int = 60 * 60 * 8,
+        min_samples: int = 90,
+    ) -> bool:
         code = stock_code.upper().replace(".", "")
         now = datetime.now(timezone.utc)
+        # 若本地历史样本不足三个月（约90个交易日窗口），也强制刷新一次。
+        sample_count = sum(1 for b in self.ingestion_store.history_bars if str(b.get("stock_code", "")).upper() == code)
+        if sample_count < max(30, int(min_samples)):
+            return True
         for b in reversed(self.ingestion_store.history_bars):
             if str(b.get("stock_code", "")).upper() != code:
                 continue
@@ -1198,6 +1283,48 @@ class AShareAgentService:
         rows = [x for x in self.ingestion_store.history_bars if str(x.get("stock_code", "")).upper() == code]
         rows.sort(key=lambda x: str(x.get("trade_date", "")))
         return rows[-limit:]
+
+    def _history_3m_summary(self, stock_code: str) -> dict[str, Any]:
+        """提炼最近三个月（约90日）历史窗口，供模型与前端输出更稳健的连续样本描述。"""
+        bars = self._history_bars(stock_code, limit=90)
+        if len(bars) < 2:
+            return {"sample_count": len(bars), "start_date": "", "end_date": "", "start_close": 0.0, "end_close": 0.0, "pct_change": 0.0}
+        start = bars[0]
+        end = bars[-1]
+        start_close = float(start.get("close", 0.0) or 0.0)
+        end_close = float(end.get("close", 0.0) or 0.0)
+        pct_change = (end_close / start_close - 1.0) if start_close > 0 else 0.0
+        return {
+            "sample_count": len(bars),
+            "start_date": str(start.get("trade_date", "")),
+            "end_date": str(end.get("trade_date", "")),
+            "start_close": start_close,
+            "end_close": end_close,
+            "pct_change": pct_change,
+        }
+
+    def _augment_question_with_history_context(self, question: str, stock_codes: list[str]) -> str:
+        """在模型输入前注入三个月连续样本摘要，减少“离散样本误判”。"""
+        extras: list[str] = []
+        for code in stock_codes:
+            summary = self._history_3m_summary(code)
+            sample_count = int(summary.get("sample_count", 0) or 0)
+            if sample_count < 30:
+                continue
+            extras.append(
+                f"{code}: 最近三个月连续日线样本 {sample_count} 条，"
+                f"区间 {summary.get('start_date','')} -> {summary.get('end_date','')}，"
+                f"收盘 {float(summary.get('start_close', 0.0)):.3f} -> {float(summary.get('end_close', 0.0)):.3f}，"
+                f"区间涨跌 {float(summary.get('pct_change', 0.0)) * 100:.2f}%。"
+            )
+        if not extras:
+            return question
+        return (
+            f"{question}\n"
+            "【系统补充：连续样本上下文】\n"
+            "以下为历史连续样本摘要，请优先基于该窗口判断，避免把结论建立在离散点上：\n"
+            + "\n".join(f"- {line}" for line in extras)
+        )
 
     def _trend_metrics(self, bars: list[dict[str, Any]]) -> dict[str, float]:
         closes = [float(x.get("close", 0.0)) for x in bars if float(x.get("close", 0.0)) > 0]
