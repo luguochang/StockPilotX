@@ -58,3 +58,6 @@
 - `docs/checklist/2026-02-15/rag-two-phase-execution-log.md`
 - `docs/reports/2026-02-15/rag-two-phase-architecture-business-plan-2026-02-15.md`
 - `docs/reports/2026-02-15/README.md`
+
+### Commit
+- `c81f12c` - `docs(rag): finalize two-phase checklist and architecture business report`
