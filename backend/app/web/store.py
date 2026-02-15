@@ -149,6 +149,79 @@ class WebStore:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS deep_think_session (
+                session_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                question TEXT NOT NULL,
+                stock_codes TEXT NOT NULL,
+                agent_profile TEXT NOT NULL,
+                max_rounds INTEGER NOT NULL,
+                current_round INTEGER NOT NULL DEFAULT 0,
+                budget_json TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'created',
+                trace_id TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS deep_think_round (
+                round_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                round_no INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                consensus_signal TEXT NOT NULL,
+                disagreement_score REAL NOT NULL,
+                conflict_sources TEXT NOT NULL,
+                counter_view TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(session_id, round_no)
+            );
+
+            CREATE TABLE IF NOT EXISTS deep_think_opinion (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                round_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                signal TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                reason TEXT NOT NULL,
+                evidence_ids TEXT NOT NULL,
+                risk_tags TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_card_registry (
+                agent_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                capabilities TEXT NOT NULL,
+                version TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS a2a_task (
+                task_id TEXT PRIMARY KEY,
+                session_id TEXT,
+                agent_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                result_json TEXT NOT NULL DEFAULT '{}',
+                trace_ref TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS group_knowledge_card (
+                card_id TEXT PRIMARY KEY,
+                topic TEXT NOT NULL,
+                normalized_question TEXT NOT NULL,
+                fact_summary TEXT NOT NULL,
+                citation_ids TEXT NOT NULL,
+                quality_score REAL NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE INDEX IF NOT EXISTS idx_stock_universe_name ON stock_universe(stock_name);
             CREATE INDEX IF NOT EXISTS idx_stock_universe_exchange ON stock_universe(exchange);
             CREATE INDEX IF NOT EXISTS idx_stock_universe_tier ON stock_universe(market_tier);
@@ -156,6 +229,10 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_stock_universe_industry ON stock_universe(industry_l1);
             CREATE INDEX IF NOT EXISTS idx_stock_industry_map_code ON stock_universe_industry_map(stock_code);
             CREATE INDEX IF NOT EXISTS idx_stock_industry_map_l1 ON stock_universe_industry_map(industry_l1);
+            CREATE INDEX IF NOT EXISTS idx_deep_think_round_session ON deep_think_round(session_id, round_no);
+            CREATE INDEX IF NOT EXISTS idx_deep_think_opinion_round ON deep_think_opinion(round_id);
+            CREATE INDEX IF NOT EXISTS idx_a2a_task_agent_status ON a2a_task(agent_id, status);
+            CREATE INDEX IF NOT EXISTS idx_group_knowledge_topic ON group_knowledge_card(topic, quality_score);
             """
         )
         # 兼容历史库：补齐新增列

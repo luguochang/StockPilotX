@@ -14,7 +14,7 @@
 - 主规范：`docs/a-share-agent-system-executable-spec.md`
 - 追踪矩阵：`docs/spec-traceability-matrix.md`
 - 全局门禁：`docs/global-constraints.md`
-- 最近更新时间：2026-02-13
+- 最近更新时间：2026-02-15
 
 ## 3. 里程碑总览
 - `M0` 文档治理与基线稳定（当前）
@@ -51,6 +51,9 @@
 | AGT-005 | S17.10,S12 | Query 显式返回运行时 + LangChain 工具绑定落地 | [x] | `/v1/query` 返回 `workflow_runtime`；工具调用走结构化绑定且保留 ACL 回退 | `models.QueryResponse` 新增字段；新增 `LangChainToolRunner` 并接入 `workflow`；`tests/test_http_api.py` 与 `tests/test_agents_deep_acl.py` 增强；`pytest` 55/55 通过（2026-02-15） |
 | AGT-006 | S17.2,S17.10,S12 | 技术点能力核查接口 + LangChain Prompt 模板渲染 | [x] | `/v1/ops/capabilities` 可返回技术点快照；PromptRuntime 优先走 LangChain 渲染并可回退 | 新增 `backend/app/capabilities.py`、`/v1/ops/capabilities`、`ops/evals` 前端展示；`PromptRuntime` 接入 `ChatPromptTemplate`；`tests/test_http_api.py` 与 `tests/test_prompt_engineering.py` 增强；`pytest` 56/56 通过（2026-02-15） |
 | AGT-007 | S17.10,S12 | 细粒度 Tool Schema + 请求级 runtime 覆盖 | [x] | Tool binding 支持按工具参数 schema；`query/query_stream` 可按请求指定 `workflow_runtime` | `tools.py` 增加 `Quote/Retrieve/Graph` schema；`workflow` 注册 schema；`service` 增加 `_select_runtime`；`tests/test_http_api.py` 与 `tests/test_agents_deep_acl.py` 增强；`pytest` 57/57 通过（2026-02-15） |
+| AGT-009 | S8,S12,S17.7 | DeepThink 会话接口与轮次流式裁决 MVP | [x] | `/v1/deep-think/*` 可创建会话、执行轮次、查询会话、SSE 回放轮次事件 | 新增 deep_think session/round/opinion 存储与服务编排；新增 `tests/test_service.py::test_deep_think_session_and_round` 与 `tests/test_http_api.py::test_deep_think_and_a2a`；`pytest` 61/61 通过（2026-02-15） |
+| AGT-010 | S8,S12,S17.11 | 内部 A2A 适配层（agent card + task lifecycle） | [x] | `/v1/a2a/agent-cards` 与 `/v1/a2a/tasks` 可完成卡片发现与任务状态流转 | 新增 `agent_card_registry/a2a_task` 表与应用服务流程；`tests/test_service.py::test_a2a_task_lifecycle` 与 `tests/test_http_api.py::test_deep_think_and_a2a` 覆盖；`pytest` 61/61 通过（2026-02-15） |
+| GOV-004 | S1,S16 | 每轮交付文档化与可追溯规范 | [x] | 每轮必须有独立 md 记录设计、改动、验证、风险与后续建议 | 新增 `docs/rounds/README.md` 与 `docs/rounds/2026-02-15/round-E-deepthink-a2a-mvp.md`（2026-02-15） |
 | PROMPT-001 | S7 | Prompt 三层模板运行时装配 | [x] | system/policy/task 全链路启用 | 新增 `backend/app/prompt/runtime.py` 并在 `service/workflow` 接入；`tests/test_prompt_engineering.py` 通过（2026-02-13） |
 | PROMPT-002 | S7,S10 | `prompt_eval_result` 回写与发布门禁 | [x] | 不达阈值禁止进入 stable | `prompt_registry` 增加 `prompt_eval_result` 表、release gate；`evals_run` 自动回写；`tests/test_prompt_persistence.py` 通过（2026-02-13） |
 | PROMPT-003 | S10 | 30 条回归样本自动执行 | [x] | Golden/Boundary/RedTeam/Freshness 全跑通 | 新增 `backend/app/prompt/evaluator.py`（30 样本分组执行），评测指标并入 `/v1/evals/run`（2026-02-13） |
@@ -234,6 +237,21 @@
   - key output: `25 passed`
   - command: `.\.venv\Scripts\python -m pytest -q`
   - key output: `58 passed`
+  - command: `cd frontend && npm run build`
+  - key output: `build passed`
+  - command: `cd frontend && npx tsc --noEmit`
+  - key output: `typecheck passed`
+
+### 2026-02-15 (Round-E)
+- Completed:
+  - [AGT-009] DeepThink 会话接口与轮次流式裁决 MVP：新增 `/v1/deep-think/sessions`、`/v1/deep-think/sessions/{session_id}/rounds`、`/v1/deep-think/sessions/{session_id}`、`/v1/deep-think/sessions/{session_id}/stream`。
+  - [AGT-010] 内部 A2A 适配层：新增 `/v1/a2a/agent-cards`、`/v1/a2a/tasks`、`/v1/a2a/tasks/{task_id}`；内置 agent cards 与任务状态流转。
+  - [GOV-004] 每轮文档化落地：新增 `docs/rounds/README.md` 与本轮日志 `docs/rounds/2026-02-15/round-E-deepthink-a2a-mvp.md`。
+- Evidence:
+  - command: `.\.venv\Scripts\python -m pytest -q tests/test_service.py tests/test_http_api.py`
+  - key output: `25 passed`
+  - command: `.\.venv\Scripts\python -m pytest -q`
+  - key output: `61 passed`
   - command: `cd frontend && npm run build`
   - key output: `build passed`
   - command: `cd frontend && npx tsc --noEmit`

@@ -279,6 +279,58 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertTrue(any(v.get("version") == "1.0.0" for v in versions))
         self.assertTrue(any(v.get("version") == "1.1.0" for v in versions))
 
+    def test_deep_think_and_a2a(self) -> None:
+        c1, session = self._post(
+            "/v1/deep-think/sessions",
+            {
+                "user_id": "api-deep-1",
+                "question": "请多agent深度分析SH600000",
+                "stock_codes": ["SH600000"],
+                "max_rounds": 2,
+            },
+        )
+        self.assertEqual(c1, 200)
+        session_id = session["session_id"]
+
+        c2, round_snapshot = self._post(f"/v1/deep-think/sessions/{session_id}/rounds", {})
+        self.assertEqual(c2, 200)
+        self.assertEqual(round_snapshot["current_round"], 1)
+        self.assertTrue(round_snapshot["rounds"])
+        self.assertIn("consensus_signal", round_snapshot["rounds"][-1])
+
+        c3, loaded = self._get(f"/v1/deep-think/sessions/{session_id}")
+        self.assertEqual(c3, 200)
+        self.assertEqual(loaded["session_id"], session_id)
+
+        with urllib.request.urlopen(self.base_url + f"/v1/deep-think/sessions/{session_id}/stream", timeout=15) as resp:  # noqa: S310 - local
+            self.assertEqual(resp.status, 200)
+            stream_text = resp.read().decode("utf-8", errors="ignore")
+        self.assertIn("event: round_started", stream_text)
+        self.assertIn("event: agent_opinion_final", stream_text)
+        self.assertIn("event: arbitration_final", stream_text)
+        self.assertIn("event: done", stream_text)
+
+        c4, cards = self._get("/v1/a2a/agent-cards")
+        self.assertEqual(c4, 200)
+        self.assertTrue(any(card.get("agent_id") == "supervisor_agent" for card in cards))
+
+        c5, task = self._post(
+            "/v1/a2a/tasks",
+            {
+                "agent_id": "supervisor_agent",
+                "session_id": session_id,
+                "task_type": "deep_round",
+                "question": "继续做下一轮",
+            },
+        )
+        self.assertEqual(c5, 200)
+        self.assertEqual(task["status"], "completed")
+        task_id = task["task_id"]
+
+        c6, loaded_task = self._get(f"/v1/a2a/tasks/{task_id}")
+        self.assertEqual(c6, 200)
+        self.assertEqual(loaded_task["task_id"], task_id)
+
 
 if __name__ == "__main__":
     unittest.main()

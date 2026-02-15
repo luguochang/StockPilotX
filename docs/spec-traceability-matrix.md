@@ -56,6 +56,15 @@
 | S17.9 | Agentic 预测评测闭环 | PRED-003 | [x] |
 | S17.10 | LangChain/LangGraph 既有架构复用 | PRED-001 | [x] |
 
+## 3.2 DeepThink + Internal A2A 映射（2026-02-15 Round-E）
+| Spec Ref | 要求摘要 | Task ID | 状态 |
+|---|---|---|---|
+| S8 | 多 Agent 协作与深度任务执行 | AGT-009, AGT-010 | [x] |
+| S12 | API 契约扩展（DeepThink/A2A） | AGT-009, AGT-010 | [x] |
+| S16 | 实施治理与执行可追溯 | GOV-004 | [x] |
+| S17.7 | Deep Agents 会话化与轮次化 | AGT-009 | [x] |
+| S17.11 | 多阶段技术映射（多 Agent 协议化） | AGT-010 | [x] |
+
 ## 4. Prompt 文档映射
 | Spec Ref | 要求摘要 | Task ID | 状态 |
 |---|---|---|---|

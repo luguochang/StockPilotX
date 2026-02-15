@@ -76,6 +76,42 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.post("/v1/deep-think/sessions")
+    def deep_think_create_session(payload: dict):
+        return svc.deep_think_create_session(payload)
+
+    @app.post("/v1/deep-think/sessions/{session_id}/rounds")
+    def deep_think_run_round(session_id: str, payload: dict):
+        result = svc.deep_think_run_round(session_id, payload)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result)
+        return result
+
+    @app.get("/v1/deep-think/sessions/{session_id}")
+    def deep_think_get_session(session_id: str):
+        result = svc.deep_think_get_session(session_id)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result)
+        return result
+
+    @app.get("/v1/deep-think/sessions/{session_id}/stream")
+    def deep_think_stream(session_id: str):
+        def event_gen():
+            for event in svc.deep_think_stream_events(session_id):
+                event_name = str(event.get("event", "message"))
+                data = event.get("data", {})
+                yield f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            event_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @app.post("/v1/report/generate")
     def report_generate(payload: dict):
         return svc.report_generate(payload)
@@ -322,6 +358,21 @@ def create_app() -> FastAPI:
     @app.get("/v1/ops/prompts/{prompt_id}/versions")
     def ops_prompt_versions(prompt_id: str):
         return svc.ops_prompt_versions(prompt_id)
+
+    @app.get("/v1/a2a/agent-cards")
+    def a2a_agent_cards():
+        return svc.a2a_agent_cards()
+
+    @app.post("/v1/a2a/tasks")
+    def a2a_create_task(payload: dict):
+        return svc.a2a_create_task(payload)
+
+    @app.get("/v1/a2a/tasks/{task_id}")
+    def a2a_get_task(task_id: str):
+        result = svc.a2a_get_task(task_id)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result)
+        return result
 
     @app.post("/v1/scheduler/pause")
     def scheduler_pause(payload: dict, authorization: str | None = Header(default=None)):

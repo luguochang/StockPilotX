@@ -298,6 +298,278 @@ class WebAppService:
                 row["predicted_source_ids"] = []
         return rows
 
+    # ----------------- Deep Think / A2A -----------------
+    def deep_think_create_session(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        question: str,
+        stock_codes: list[str],
+        agent_profile: list[str],
+        max_rounds: int,
+        budget: dict[str, Any],
+        mode: str,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        self.store.execute(
+            """
+            INSERT INTO deep_think_session
+            (session_id, user_id, question, stock_codes, agent_profile, max_rounds, current_round, budget_json, mode, status, trace_id)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 'created', ?)
+            """,
+            (
+                session_id,
+                user_id,
+                question,
+                json.dumps(stock_codes, ensure_ascii=False),
+                json.dumps(agent_profile, ensure_ascii=False),
+                max_rounds,
+                json.dumps(budget, ensure_ascii=False),
+                mode,
+                trace_id,
+            ),
+        )
+        return self.deep_think_get_session(session_id)
+
+    def deep_think_get_session(self, session_id: str) -> dict[str, Any]:
+        session = self.store.query_one(
+            """
+            SELECT session_id, user_id, question, stock_codes, agent_profile, max_rounds,
+                   current_round, budget_json, mode, status, trace_id, created_at, updated_at
+            FROM deep_think_session
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        )
+        if not session:
+            return {}
+        session["stock_codes"] = self._json_loads_or(session.get("stock_codes"), [])
+        session["agent_profile"] = self._json_loads_or(session.get("agent_profile"), [])
+        session["budget"] = self._json_loads_or(session.get("budget_json"), {})
+        session.pop("budget_json", None)
+
+        rounds = self.store.query_all(
+            """
+            SELECT round_id, session_id, round_no, status, consensus_signal, disagreement_score,
+                   conflict_sources, counter_view, created_at
+            FROM deep_think_round
+            WHERE session_id = ?
+            ORDER BY round_no ASC
+            """,
+            (session_id,),
+        )
+        for rnd in rounds:
+            rnd["conflict_sources"] = self._json_loads_or(rnd.get("conflict_sources"), [])
+            opinions = self.store.query_all(
+                """
+                SELECT agent_id, signal, confidence, reason, evidence_ids, risk_tags, created_at
+                FROM deep_think_opinion
+                WHERE round_id = ?
+                ORDER BY id ASC
+                """,
+                (rnd["round_id"],),
+            )
+            for opinion in opinions:
+                opinion["evidence_ids"] = self._json_loads_or(opinion.get("evidence_ids"), [])
+                opinion["risk_tags"] = self._json_loads_or(opinion.get("risk_tags"), [])
+            rnd["opinions"] = opinions
+        session["rounds"] = rounds
+        return session
+
+    def deep_think_append_round(
+        self,
+        *,
+        session_id: str,
+        round_id: str,
+        round_no: int,
+        status: str,
+        consensus_signal: str,
+        disagreement_score: float,
+        conflict_sources: list[str],
+        counter_view: str,
+        opinions: list[dict[str, Any]],
+        session_status: str,
+    ) -> dict[str, Any]:
+        self.store.execute(
+            """
+            INSERT INTO deep_think_round
+            (round_id, session_id, round_no, status, consensus_signal, disagreement_score, conflict_sources, counter_view)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                round_id,
+                session_id,
+                round_no,
+                status,
+                consensus_signal,
+                disagreement_score,
+                json.dumps(conflict_sources, ensure_ascii=False),
+                counter_view,
+            ),
+        )
+        for opinion in opinions:
+            self.store.execute(
+                """
+                INSERT INTO deep_think_opinion
+                (round_id, agent_id, signal, confidence, reason, evidence_ids, risk_tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    round_id,
+                    str(opinion.get("agent", "")),
+                    str(opinion.get("signal", "hold")),
+                    float(opinion.get("confidence", 0.5)),
+                    str(opinion.get("reason", "")),
+                    json.dumps(opinion.get("evidence_ids", []), ensure_ascii=False),
+                    json.dumps(opinion.get("risk_tags", []), ensure_ascii=False),
+                ),
+            )
+
+        self.store.execute(
+            """
+            UPDATE deep_think_session
+            SET current_round = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE session_id = ?
+            """,
+            (round_no, session_status, session_id),
+        )
+        return self.deep_think_get_session(session_id)
+
+    def register_agent_card(
+        self,
+        *,
+        agent_id: str,
+        display_name: str,
+        description: str,
+        capabilities: list[str],
+        version: str = "1.0.0",
+        status: str = "active",
+    ) -> None:
+        self.store.execute(
+            """
+            INSERT OR REPLACE INTO agent_card_registry
+            (agent_id, display_name, description, capabilities, version, status, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                agent_id,
+                display_name,
+                description,
+                json.dumps(capabilities, ensure_ascii=False),
+                version,
+                status,
+            ),
+        )
+
+    def list_agent_cards(self) -> list[dict[str, Any]]:
+        rows = self.store.query_all(
+            """
+            SELECT agent_id, display_name, description, capabilities, version, status, updated_at
+            FROM agent_card_registry
+            ORDER BY agent_id ASC
+            """,
+            (),
+        )
+        for row in rows:
+            row["capabilities"] = self._json_loads_or(row.get("capabilities"), [])
+        return rows
+
+    def a2a_create_task(
+        self,
+        *,
+        task_id: str,
+        session_id: str | None,
+        agent_id: str,
+        status: str,
+        payload: dict[str, Any],
+        result: dict[str, Any] | None,
+        trace_ref: str,
+    ) -> None:
+        self.store.execute(
+            """
+            INSERT INTO a2a_task
+            (task_id, session_id, agent_id, status, payload_json, result_json, trace_ref)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                session_id,
+                agent_id,
+                status,
+                json.dumps(payload, ensure_ascii=False),
+                json.dumps(result or {}, ensure_ascii=False),
+                trace_ref,
+            ),
+        )
+
+    def a2a_update_task(self, *, task_id: str, status: str, result: dict[str, Any] | None) -> None:
+        self.store.execute(
+            """
+            UPDATE a2a_task
+            SET status = ?, result_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE task_id = ?
+            """,
+            (
+                status,
+                json.dumps(result or {}, ensure_ascii=False),
+                task_id,
+            ),
+        )
+
+    def a2a_get_task(self, task_id: str) -> dict[str, Any]:
+        row = self.store.query_one(
+            """
+            SELECT task_id, session_id, agent_id, status, payload_json, result_json, trace_ref, created_at, updated_at
+            FROM a2a_task
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        )
+        if not row:
+            return {}
+        row["payload"] = self._json_loads_or(row.get("payload_json"), {})
+        row["result"] = self._json_loads_or(row.get("result_json"), {})
+        row.pop("payload_json", None)
+        row.pop("result_json", None)
+        return row
+
+    def add_group_knowledge_card(
+        self,
+        *,
+        card_id: str,
+        topic: str,
+        normalized_question: str,
+        fact_summary: str,
+        citation_ids: list[str],
+        quality_score: float,
+    ) -> None:
+        self.store.execute(
+            """
+            INSERT OR REPLACE INTO group_knowledge_card
+            (card_id, topic, normalized_question, fact_summary, citation_ids, quality_score)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                card_id,
+                topic,
+                normalized_question,
+                fact_summary,
+                json.dumps(citation_ids, ensure_ascii=False),
+                quality_score,
+            ),
+        )
+
+    def _json_loads_or(self, payload: Any, default: Any) -> Any:
+        if payload is None:
+            return default
+        if isinstance(payload, (list, dict)):
+            return payload
+        try:
+            return json.loads(str(payload))
+        except Exception:
+            return default
+
     def close(self) -> None:
         self.store.close()
 

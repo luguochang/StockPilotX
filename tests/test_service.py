@@ -91,6 +91,54 @@ class ServiceTestCase(unittest.TestCase):
             )
             self.assertIn("answer", result)
 
+    def test_deep_think_session_and_round(self) -> None:
+        created = self.svc.deep_think_create_session(
+            {
+                "user_id": "deep-u1",
+                "question": "请对SH600000做深度多角色研判",
+                "stock_codes": ["SH600000"],
+                "max_rounds": 2,
+            }
+        )
+        self.assertIn("session_id", created)
+        session_id = created["session_id"]
+        self.assertEqual(created["current_round"], 0)
+
+        updated = self.svc.deep_think_run_round(session_id, {})
+        self.assertEqual(updated["current_round"], 1)
+        self.assertTrue(updated["rounds"])
+        latest = updated["rounds"][-1]
+        self.assertIn("consensus_signal", latest)
+        self.assertGreaterEqual(len(latest["opinions"]), 8)
+
+        stream_events = list(self.svc.deep_think_stream_events(session_id))
+        names = [x["event"] for x in stream_events]
+        self.assertIn("round_started", names)
+        self.assertIn("agent_opinion_final", names)
+        self.assertIn("arbitration_final", names)
+        self.assertEqual(names[-1], "done")
+
+    def test_a2a_task_lifecycle(self) -> None:
+        created = self.svc.deep_think_create_session(
+            {
+                "user_id": "deep-u2",
+                "question": "请多角色评估SH600000风险",
+                "stock_codes": ["SH600000"],
+            }
+        )
+        session_id = created["session_id"]
+        cards = self.svc.a2a_agent_cards()
+        self.assertTrue(any(x.get("agent_id") == "supervisor_agent" for x in cards))
+        task = self.svc.a2a_create_task(
+            {
+                "agent_id": "supervisor_agent",
+                "session_id": session_id,
+                "task_type": "deep_round",
+            }
+        )
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["agent_id"], "supervisor_agent")
+
 
 class QuoteFallbackTestCase(unittest.TestCase):
     """验证免费源回退顺序。"""

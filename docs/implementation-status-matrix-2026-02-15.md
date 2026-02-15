@@ -61,3 +61,9 @@
 - Agent debate upgraded to optional LLM-parallel mode with fallback.
 - RAG quality upgraded with online continuous dataset persistence and merged metrics.
 - Validation kept green: backend 58 passed; frontend build + typecheck passed.
+
+## Round-E Update (2026-02-15)
+- Added DeepThink APIs: `/v1/deep-think/sessions`, `/v1/deep-think/sessions/{session_id}/rounds`, `/v1/deep-think/sessions/{session_id}`, `/v1/deep-think/sessions/{session_id}/stream`.
+- Added internal A2A adapter APIs: `/v1/a2a/agent-cards`, `/v1/a2a/tasks`, `/v1/a2a/tasks/{task_id}`.
+- Added persistence tables for deep-think sessions/rounds/opinions, agent cards, a2a tasks, and shared knowledge cards.
+- Validation kept green: backend 61 passed; frontend build + typecheck passed.
