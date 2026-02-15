@@ -1,5 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import base64
 import json
 import time
 import unittest
@@ -107,6 +108,33 @@ class ServiceTestCase(unittest.TestCase):
         source_ids = [item.source_id for item in corpus]
         self.assertTrue(any(s.startswith("doc::") for s in source_ids))
         self.assertIn("qa_memory_summary", source_ids)
+
+    def test_rag_upload_workflow_and_dashboard(self) -> None:
+        encoded = base64.b64encode("SH600000 附件上传测试文本".encode("utf-8")).decode("ascii")
+        workflow = self.svc.rag_workflow_upload_and_index(
+            "",
+            {
+                "filename": "upload-demo.txt",
+                "content_type": "text/plain",
+                "content_base64": encoded,
+                "source": "user_upload",
+                "stock_codes": ["SH600000"],
+                "tags": ["测试"],
+            },
+        )
+        self.assertEqual(workflow["status"], "ok")
+        self.assertIn("timeline", workflow)
+        result = workflow.get("result", {})
+        self.assertTrue(str(result.get("doc_id", "")).startswith("ragdoc-"))
+
+        uploads = self.svc.rag_uploads_list("", limit=20)
+        self.assertGreater(len(uploads), 0)
+        self.assertTrue(any(str(x.get("filename", "")) == "upload-demo.txt" for x in uploads))
+
+        dashboard = self.svc.rag_dashboard("")
+        self.assertIn("doc_total", dashboard)
+        self.assertIn("active_chunks", dashboard)
+        self.assertIn("retrieval_hit_rate_7d", dashboard)
 
     def test_semantic_summary_then_origin_backfill(self) -> None:
         _ = self.svc.docs_upload("rag-doc-3", "semantic-rag.pdf", "SH600000 纪要 提及现金流改善与订单增长" * 200, "cninfo")

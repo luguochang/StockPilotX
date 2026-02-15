@@ -1,12 +1,16 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import base64
 import csv
 import difflib
+import hashlib
 import io
 import json
 import queue
 import re
 import threading
+import zipfile
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 import time
 import uuid
@@ -39,6 +43,11 @@ from backend.app.rag.vector_store import LocalSummaryVectorStore, VectorSummaryR
 from backend.app.state import AgentState
 from backend.app.web.service import WebAppService
 from backend.app.web.store import WebStore
+
+try:
+    from openpyxl import load_workbook
+except Exception:  # pragma: no cover - optional dependency
+    load_workbook = None  # type: ignore[assignment]
 
 
 class AShareAgentService:
@@ -1844,6 +1853,214 @@ class AShareAgentService:
             self._persist_doc_chunks_to_rag(doc_id, doc)
         return result
 
+    def rag_upload_from_payload(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """统一处理 RAG 附件上传：解码 -> 去重 -> docs_upload -> (可选)index -> 资产入库。"""
+        filename = str(payload.get("filename", "")).strip()
+        if not filename:
+            raise ValueError("filename is required")
+        source = str(payload.get("source", "user_upload")).strip().lower() or "user_upload"
+        source_url = str(payload.get("source_url", "")).strip()
+        content_type = str(payload.get("content_type", "")).strip()
+        stock_codes = [str(x).strip().upper() for x in payload.get("stock_codes", []) if str(x).strip()]
+        tags = [str(x).strip() for x in payload.get("tags", []) if str(x).strip()]
+        auto_index = bool(payload.get("auto_index", True))
+        force_reupload = bool(payload.get("force_reupload", False))
+        user_hint = str(payload.get("user_id", "frontend-user")).strip() or "frontend-user"
+
+        text_content = str(payload.get("content", "") or "")
+        raw_bytes: bytes
+        parse_note_parts: list[str] = []
+        if text_content.strip():
+            raw_bytes = text_content.encode("utf-8", errors="ignore")
+            extracted = text_content
+            parse_note_parts.append("text_payload")
+        else:
+            encoded = str(payload.get("content_base64", "")).strip()
+            if not encoded:
+                raise ValueError("content or content_base64 is required")
+            try:
+                raw_bytes = base64.b64decode(encoded, validate=True)
+            except Exception as ex:  # noqa: BLE001
+                raise ValueError("content_base64 is invalid") from ex
+            extracted, parse_note = self._extract_text_from_upload_bytes(
+                filename=filename,
+                raw_bytes=raw_bytes,
+                content_type=content_type,
+            )
+            if parse_note:
+                parse_note_parts.append(parse_note)
+
+        if not extracted.strip():
+            raise ValueError("uploaded file could not be parsed into text content")
+
+        file_sha256 = hashlib.sha256(raw_bytes).hexdigest().lower()
+        if not force_reupload:
+            existing = self.web.rag_upload_asset_get_by_hash(file_sha256)
+            if existing:
+                return {
+                    "status": "deduplicated",
+                    "dedupe_hit": True,
+                    "existing": existing,
+                    "doc_id": str(existing.get("doc_id", "")),
+                    "upload_id": str(existing.get("upload_id", "")),
+                }
+
+        doc_id = str(payload.get("doc_id", "")).strip()
+        if not doc_id:
+            # 用 hash 前缀生成稳定 doc_id，便于后续跨入口追踪同一文件。
+            doc_id = f"ragdoc-{file_sha256[:12]}"
+            if force_reupload:
+                doc_id = f"{doc_id}-{uuid.uuid4().hex[:4]}"
+        upload_id = str(payload.get("upload_id", "")).strip() or f"ragu-{uuid.uuid4().hex[:12]}"
+
+        _ = self.docs_upload(doc_id, filename, extracted, source)
+        indexed = None
+        status = "uploaded"
+        if auto_index:
+            indexed = self.docs_index(doc_id)
+            status = "indexed"
+            chunk_rows = self.rag_doc_chunks_list(token, doc_id=doc_id, limit=1)
+            if chunk_rows:
+                status = str(chunk_rows[0].get("effective_status", "indexed"))
+
+        parse_note = ",".join(parse_note_parts)
+        asset = self.web.rag_upload_asset_upsert(
+            token,
+            upload_id=upload_id,
+            doc_id=doc_id,
+            filename=filename,
+            source=source,
+            source_url=source_url,
+            file_sha256=file_sha256,
+            file_size=len(raw_bytes),
+            content_type=content_type,
+            stock_codes=stock_codes,
+            tags=tags,
+            parse_note=parse_note,
+            status=status,
+            created_by=user_hint,
+        )
+        return {
+            "status": "ok",
+            "dedupe_hit": False,
+            "upload_id": upload_id,
+            "doc_id": doc_id,
+            "source": source,
+            "auto_index": auto_index,
+            "index_result": indexed or {},
+            "asset": asset,
+        }
+
+    def rag_workflow_upload_and_index(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """业务入口：上传并立即索引，返回阶段时间线，便于前端给出可解释反馈。"""
+        req = dict(payload or {})
+        req["auto_index"] = True
+        started = datetime.now(timezone.utc)
+        result = self.rag_upload_from_payload(token, req)
+        timeline = [
+            {"phase": "upload_received", "status": "done", "at": started.isoformat()},
+            {
+                "phase": "indexing",
+                "status": "done" if bool(result.get("index_result")) else "skipped",
+                "at": datetime.now(timezone.utc).isoformat(),
+            },
+            {
+                "phase": "asset_recorded",
+                "status": "done",
+                "at": datetime.now(timezone.utc).isoformat(),
+            },
+        ]
+        return {"status": "ok", "result": result, "timeline": timeline}
+
+    def rag_uploads_list(
+        self,
+        token: str,
+        *,
+        status: str = "",
+        source: str = "",
+        limit: int = 40,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        return self.web.rag_upload_asset_list(
+            token,
+            status=status,
+            source=source,
+            limit=limit,
+            offset=offset,
+        )
+
+    def rag_dashboard(self, token: str) -> dict[str, Any]:
+        return self.web.rag_dashboard_summary(token)
+
+    @staticmethod
+    def _decode_text_bytes(raw_bytes: bytes) -> str:
+        for enc in ("utf-8", "gbk", "utf-16", "latin1"):
+            try:
+                return raw_bytes.decode(enc, errors="ignore")
+            except Exception:  # noqa: BLE001
+                continue
+        return ""
+
+    def _extract_text_from_upload_bytes(self, *, filename: str, raw_bytes: bytes, content_type: str = "") -> tuple[str, str]:
+        """从附件字节提取文本内容；无第三方解析器时执行可回退的轻量策略。"""
+        ext = ""
+        idx = str(filename).rfind(".")
+        if idx >= 0:
+            ext = str(filename)[idx:].lower()
+        note_parts: list[str] = []
+        if ext in {".txt", ".md", ".csv", ".json", ".log", ".html", ".htm", ".ts", ".js", ".py"}:
+            note_parts.append("plain_text_decode")
+            return self._decode_text_bytes(raw_bytes), ",".join(note_parts)
+        if ext == ".docx":
+            try:
+                with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
+                    xml_bytes = zf.read("word/document.xml")
+                root = ET.fromstring(xml_bytes)
+                text = " ".join(x.strip() for x in root.itertext() if str(x).strip())
+                note_parts.append("docx_xml_extract")
+                return text, ",".join(note_parts)
+            except Exception:  # noqa: BLE001
+                note_parts.append("docx_extract_failed_fallback_decode")
+                return self._decode_text_bytes(raw_bytes), ",".join(note_parts)
+        if ext in {".xlsx", ".xlsm"} and load_workbook is not None:
+            try:
+                wb = load_workbook(filename=io.BytesIO(raw_bytes), read_only=True, data_only=True)
+                ws = wb.active
+                lines: list[str] = []
+                max_rows = 1500
+                max_cols = 32
+                for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+                    if row_idx > max_rows:
+                        break
+                    cells = [str(c).strip() for c in row[:max_cols] if c is not None and str(c).strip()]
+                    if cells:
+                        lines.append(" | ".join(cells))
+                note_parts.append("xlsx_extract")
+                return "\n".join(lines), ",".join(note_parts)
+            except Exception:  # noqa: BLE001
+                note_parts.append("xlsx_extract_failed_fallback_decode")
+                return self._decode_text_bytes(raw_bytes), ",".join(note_parts)
+        if ext == ".pdf":
+            try:
+                import pypdf  # type: ignore
+
+                reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
+                pages = [str(page.extract_text() or "") for page in reader.pages]
+                text = "\n".join(x for x in pages if x.strip())
+                if text.strip():
+                    note_parts.append("pdf_pypdf_extract")
+                    return text, ",".join(note_parts)
+            except Exception:  # noqa: BLE001
+                note_parts.append("pdf_parser_unavailable")
+            # 无 pdf 解析库时的兜底：尝试抽取可见 ASCII 串，至少保留部分可检索内容。
+            ascii_chunks = re.findall(rb"[A-Za-z0-9][A-Za-z0-9 ,.;:%()\-_/]{16,}", raw_bytes)
+            decoded = " ".join(x.decode("latin1", errors="ignore") for x in ascii_chunks)
+            note_parts.append("pdf_ascii_fallback")
+            return decoded, ",".join(note_parts)
+
+        note_parts.append(f"generic_decode:{content_type or 'unknown'}")
+        return self._decode_text_bytes(raw_bytes), ",".join(note_parts)
+
     def _persist_doc_chunks_to_rag(self, doc_id: str, doc: dict[str, Any]) -> None:
         """把内存态文档 chunk 同步到 Web 持久层。"""
         chunks = [str(x) for x in doc.get("chunks", []) if str(x).strip()]
@@ -2018,8 +2235,10 @@ class AShareAgentService:
         # 审核动作需要同步到 chunk 生效状态，避免“文档状态已改但检索仍命中旧片段”。
         if action == "approve":
             self.web.rag_doc_chunk_set_status_by_doc(doc_id=doc_id, status="active")
+            self.web.rag_upload_asset_set_status(doc_id=doc_id, status="active", parse_note="review_approved")
         elif action == "reject":
             self.web.rag_doc_chunk_set_status_by_doc(doc_id=doc_id, status="rejected")
+            self.web.rag_upload_asset_set_status(doc_id=doc_id, status="rejected", parse_note="review_rejected")
         return result
 
     # ----------------- RAG Asset APIs -----------------
@@ -3639,6 +3858,8 @@ class AShareAgentService:
         self.web.require_role(token, {"admin", "ops"})
         del limit  # 当前实现按实时资产全集重建，后续可扩展增量重建窗口。
         result = self._refresh_summary_vector_index([], force=True)
+        # 记录最近一次重建时间，便于前端业务看板展示运维状态。
+        self.web.rag_ops_meta_set(key="last_reindex_at", value=datetime.now(timezone.utc).isoformat())
         return {
             "status": "ok",
             "index_backend": self.vector_store.backend,
@@ -3840,6 +4061,7 @@ class AShareAgentService:
         self.memory.close()
         self.prompts.close()
         self.web.close()
+
 
 
 

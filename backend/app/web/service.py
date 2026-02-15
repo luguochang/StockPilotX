@@ -625,6 +625,199 @@ class WebAppService:
             row.pop("selected_ids_json", None)
         return rows
 
+    def rag_upload_asset_get_by_hash(self, file_sha256: str) -> dict[str, Any] | None:
+        row = self.store.query_one(
+            """
+            SELECT upload_id, doc_id, filename, source, source_url, file_sha256, file_size, content_type,
+                   stock_codes_json, tags_json, parse_note, status, created_by, created_at, updated_at
+            FROM rag_upload_asset
+            WHERE file_sha256 = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (str(file_sha256).strip().lower(),),
+        )
+        if not row:
+            return None
+        row["stock_codes"] = self._json_loads_or(row.get("stock_codes_json"), [])
+        row["tags"] = self._json_loads_or(row.get("tags_json"), [])
+        row.pop("stock_codes_json", None)
+        row.pop("tags_json", None)
+        return row
+
+    def rag_upload_asset_upsert(
+        self,
+        token: str,
+        *,
+        upload_id: str,
+        doc_id: str,
+        filename: str,
+        source: str,
+        source_url: str,
+        file_sha256: str,
+        file_size: int,
+        content_type: str,
+        stock_codes: list[str],
+        tags: list[str],
+        parse_note: str,
+        status: str,
+        created_by: str,
+    ) -> dict[str, Any]:
+        _ = self.require_role(token, {"admin", "ops"})
+        self.store.execute(
+            """
+            INSERT OR REPLACE INTO rag_upload_asset
+            (upload_id, doc_id, filename, source, source_url, file_sha256, file_size, content_type,
+             stock_codes_json, tags_json, parse_note, status, created_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM rag_upload_asset WHERE upload_id = ?), CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
+            """,
+            (
+                str(upload_id),
+                str(doc_id),
+                str(filename),
+                str(source),
+                str(source_url or ""),
+                str(file_sha256).strip().lower(),
+                int(max(0, file_size)),
+                str(content_type or ""),
+                json.dumps(stock_codes, ensure_ascii=False),
+                json.dumps(tags, ensure_ascii=False),
+                str(parse_note or ""),
+                str(status or "uploaded"),
+                str(created_by or ""),
+                str(upload_id),
+            ),
+        )
+        row = self.store.query_one(
+            """
+            SELECT upload_id, doc_id, filename, source, source_url, file_sha256, file_size, content_type,
+                   stock_codes_json, tags_json, parse_note, status, created_by, created_at, updated_at
+            FROM rag_upload_asset
+            WHERE upload_id = ?
+            """,
+            (str(upload_id),),
+        )
+        if not row:
+            return {"error": "not_found", "upload_id": upload_id}
+        row["stock_codes"] = self._json_loads_or(row.get("stock_codes_json"), [])
+        row["tags"] = self._json_loads_or(row.get("tags_json"), [])
+        row.pop("stock_codes_json", None)
+        row.pop("tags_json", None)
+        return row
+
+    def rag_upload_asset_list(
+        self,
+        token: str,
+        *,
+        status: str = "",
+        source: str = "",
+        limit: int = 40,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        _ = self.require_role(token, {"admin", "ops"})
+        safe_limit = max(1, min(300, int(limit)))
+        safe_offset = max(0, int(offset))
+        cond = ["1=1"]
+        params: list[Any] = []
+        if status.strip():
+            cond.append("status = ?")
+            params.append(status.strip().lower())
+        if source.strip():
+            cond.append("source = ?")
+            params.append(source.strip().lower())
+        sql = f"""
+            SELECT upload_id, doc_id, filename, source, source_url, file_sha256, file_size, content_type,
+                   stock_codes_json, tags_json, parse_note, status, created_by, created_at, updated_at
+            FROM rag_upload_asset
+            WHERE {' AND '.join(cond)}
+            ORDER BY updated_at DESC
+            LIMIT ? OFFSET ?
+            """
+        params.extend([safe_limit, safe_offset])
+        rows = self.store.query_all(sql, tuple(params))
+        for row in rows:
+            row["stock_codes"] = self._json_loads_or(row.get("stock_codes_json"), [])
+            row["tags"] = self._json_loads_or(row.get("tags_json"), [])
+            row.pop("stock_codes_json", None)
+            row.pop("tags_json", None)
+        return rows
+
+    def rag_upload_asset_set_status(self, *, doc_id: str, status: str, parse_note: str = "") -> None:
+        self.store.execute(
+            """
+            UPDATE rag_upload_asset
+            SET status = ?, parse_note = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE doc_id = ?
+            """,
+            (str(status or "uploaded"), str(parse_note or ""), str(doc_id)),
+        )
+
+    def rag_ops_meta_set(self, *, key: str, value: str) -> None:
+        self.store.execute(
+            """
+            INSERT OR REPLACE INTO rag_ops_meta (meta_key, meta_value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            """,
+            (str(key), str(value)),
+        )
+
+    def rag_ops_meta_get(self, *, key: str) -> dict[str, Any]:
+        row = self.store.query_one(
+            """
+            SELECT meta_key, meta_value, updated_at
+            FROM rag_ops_meta
+            WHERE meta_key = ?
+            """,
+            (str(key),),
+        )
+        return row or {}
+
+    def rag_dashboard_summary(self, token: str) -> dict[str, Any]:
+        _ = self.require_role(token, {"admin", "ops"})
+        doc_total = int(self.store.query_one("SELECT COUNT(1) AS cnt FROM doc_index", ())["cnt"])
+        active_chunks = int(
+            self.store.query_one(
+                "SELECT COUNT(1) AS cnt FROM rag_doc_chunk WHERE effective_status = 'active'",
+                (),
+            )["cnt"]
+        )
+        review_pending = int(
+            self.store.query_one(
+                "SELECT COUNT(1) AS cnt FROM doc_index WHERE needs_review = 1",
+                (),
+            )["cnt"]
+        )
+        qa_memory_total = int(self.store.query_one("SELECT COUNT(1) AS cnt FROM rag_qa_memory", ())["cnt"])
+        trace_total = int(
+            self.store.query_one(
+                "SELECT COUNT(1) AS cnt FROM rag_retrieval_trace WHERE created_at >= datetime('now', '-7 day')",
+                (),
+            )["cnt"]
+        )
+        trace_hit = int(
+            self.store.query_one(
+                """
+                SELECT COUNT(1) AS cnt
+                FROM rag_retrieval_trace
+                WHERE created_at >= datetime('now', '-7 day')
+                  AND selected_ids_json IS NOT NULL
+                  AND selected_ids_json != '[]'
+                """,
+                (),
+            )["cnt"]
+        )
+        hit_rate = round((trace_hit / trace_total), 4) if trace_total > 0 else 0.0
+        latest_reindex = self.rag_ops_meta_get(key="last_reindex_at")
+        return {
+            "doc_total": doc_total,
+            "active_chunks": active_chunks,
+            "review_pending": review_pending,
+            "qa_memory_total": qa_memory_total,
+            "retrieval_hit_rate_7d": hit_rate,
+            "retrieval_trace_count_7d": trace_total,
+            "last_reindex_at": str(latest_reindex.get("meta_value", "")),
+        }
+
     # ----------------- Ops / Health / Alerts -----------------
     def source_health_upsert(self, source_id: str, success_rate: float, circuit_open: bool, last_error: str = "") -> None:
         self.store.execute(

@@ -558,6 +558,50 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    @app.get("/v1/rag/dashboard")
+    def rag_dashboard(authorization: str | None = Header(default=None)):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_dashboard(token)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/rag/uploads")
+    def rag_uploads_list(
+        authorization: str | None = Header(default=None),
+        status: str = "",
+        source: str = "",
+        limit: int = 40,
+        offset: int = 0,
+    ):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_uploads_list(
+                token,
+                status=status,
+                source=source,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.post("/v1/rag/uploads")
+    def rag_upload(payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_upload_from_payload(token, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.post("/v1/rag/workflow/upload-and-index")
+    def rag_workflow_upload_and_index(payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_workflow_upload_and_index(token, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     # ---------------- WEB-005/006/007/008 Ops ----------------
     @app.get("/v1/ops/data-sources/health")
     def ops_source_health(authorization: str | None = Header(default=None)):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 import time
@@ -232,6 +233,32 @@ class HttpApiTestCase(unittest.TestCase):
         c7, reindex = self._post("/v1/ops/rag/reindex", {"limit": 2000})
         self.assertEqual(c7, 200)
         self.assertEqual(str(reindex.get("status", "")), "ok")
+
+        encoded = base64.b64encode("SH600000 新上传附件样本".encode("utf-8")).decode("ascii")
+        c8, uploaded = self._post(
+            "/v1/rag/workflow/upload-and-index",
+            {
+                "filename": "api-upload.txt",
+                "content_type": "text/plain",
+                "content_base64": encoded,
+                "source": "user_upload",
+                "stock_codes": ["SH600000"],
+                "tags": ["api"],
+            },
+        )
+        self.assertEqual(c8, 200)
+        self.assertEqual(str(uploaded.get("status", "")), "ok")
+        self.assertIn("timeline", uploaded)
+
+        c9, dashboard = self._get("/v1/rag/dashboard")
+        self.assertEqual(c9, 200)
+        self.assertIn("doc_total", dashboard)
+        self.assertIn("active_chunks", dashboard)
+
+        c10, upload_rows = self._get("/v1/rag/uploads?limit=10")
+        self.assertEqual(c10, 200)
+        self.assertTrue(isinstance(upload_rows, list))
+        self.assertTrue(any(str(x.get("filename", "")) == "api-upload.txt" for x in upload_rows))
 
     def test_evals_run_and_get(self) -> None:
         code, run = self._post(

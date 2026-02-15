@@ -62,3 +62,10 @@
   - [x] Add “Shared Knowledge Hits” business card to show doc/QA memory reuse in analysis output.
   - [x] Add engineering-card usage descriptions (timeline/task graph/conflict/opinion/budget).
   - [x] Run backend tests + API smoke test (`/v1/query/stream`, `/v2/deep-think/*/rounds/stream`).
+
+- [x] Batch-9: RAG dual-mode UX and upload workflow integration
+  - [x] Add business/ops dual mode in `/rag-center` to reduce user input burden.
+  - [x] Add attachment upload workflow APIs (`/v1/rag/dashboard`, `/v1/rag/uploads`, `/v1/rag/workflow/upload-and-index`).
+  - [x] Add upload asset persistence and dedupe by file hash.
+  - [x] Add docs-center attachment upload entry and align with RAG workflow.
+  - [x] Run backend + frontend self-test and update docs.

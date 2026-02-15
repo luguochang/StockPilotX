@@ -13,22 +13,25 @@ type DocRow = {
   parse_confidence?: number;
   needs_review?: boolean;
   review_status?: string;
-  updated_at?: string;
+  created_at?: string;
 };
 
 export default function DocsCenterPage() {
   const [docs, setDocs] = useState<DocRow[]>([]);
   const [queue, setQueue] = useState<DocRow[]>([]);
-  const [docId, setDocId] = useState("web-doc-demo");
-  const [filename, setFilename] = useState("demo-report.pdf");
-  const [source, setSource] = useState("user_upload");
-  const [content, setContent] = useState("这是一份用于测试的财报摘要文档内容。");
-  const [reviewComment, setReviewComment] = useState("人工复核通过");
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  // 中文注释：统一处理 API 错误，减少页面重复代码。
+  const [file, setFile] = useState<File | null>(null);
+  const [fileSource, setFileSource] = useState("user_upload");
+  const [reviewComment, setReviewComment] = useState("人工复核通过");
+
+  const [docId, setDocId] = useState("web-doc-demo");
+  const [filename, setFilename] = useState("demo-note.txt");
+  const [source, setSource] = useState("user_upload");
+  const [content, setContent] = useState("这是用于测试的文本内容，可直接走旧的 JSON 上传接口。\nSH600000 纪要。\n");
+
   async function parseOrThrow(resp: Response) {
     const body = await resp.json();
     if (!resp.ok) {
@@ -37,13 +40,37 @@ export default function DocsCenterPage() {
     return body;
   }
 
+  function resetFeedback() {
+    setError("");
+    setMessage("");
+  }
+
+  async function fileToBase64(uploadFile: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const value = reader.result;
+        if (!(value instanceof ArrayBuffer)) {
+          reject(new Error("文件读取失败"));
+          return;
+        }
+        const bytes = new Uint8Array(value);
+        let binary = "";
+        for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+        resolve(btoa(binary));
+      };
+      reader.onerror = () => reject(new Error("文件读取失败"));
+      reader.readAsArrayBuffer(uploadFile);
+    });
+  }
+
   async function load() {
     setLoading(true);
-    setError("");
+    resetFeedback();
     try {
       const [a, b] = await Promise.all([
         fetch(`${API_BASE}/v1/docs`),
-        fetch(`${API_BASE}/v1/docs/review-queue`)
+        fetch(`${API_BASE}/v1/docs/review-queue`),
       ]);
       setDocs((await parseOrThrow(a)) as DocRow[]);
       setQueue((await parseOrThrow(b)) as DocRow[]);
@@ -55,22 +82,59 @@ export default function DocsCenterPage() {
     }
   }
 
-  async function uploadAndIndex() {
+  async function uploadFileToRag() {
+    if (!file) {
+      setError("请先选择附件");
+      return;
+    }
     setLoading(true);
-    setError("");
+    resetFeedback();
+    try {
+      const payload = {
+        filename: file.name,
+        content_type: file.type,
+        content_base64: await fileToBase64(file),
+        source: fileSource,
+        auto_index: true,
+        user_id: "frontend-docs",
+      };
+      await parseOrThrow(
+        await fetch(`${API_BASE}/v1/rag/workflow/upload-and-index`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      );
+      setMessage(`附件上传并入库完成：${file.name}`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "附件上传失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function uploadTextAndIndex() {
+    setLoading(true);
+    resetFeedback();
     try {
       await parseOrThrow(
         await fetch(`${API_BASE}/v1/docs/upload`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ doc_id: docId.trim(), filename: filename.trim(), content, source })
-        })
+          body: JSON.stringify({
+            doc_id: docId.trim(),
+            filename: filename.trim(),
+            content,
+            source,
+          }),
+        }),
       );
       await parseOrThrow(await fetch(`${API_BASE}/v1/docs/${encodeURIComponent(docId.trim())}/index`, { method: "POST" }));
-      setMessage(`文档 ${docId} 上传并索引完成`);
+      setMessage(`文本上传并索引完成：${docId}`);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "上传失败");
+      setError(e instanceof Error ? e.message : "文本上传失败");
     } finally {
       setLoading(false);
     }
@@ -78,14 +142,14 @@ export default function DocsCenterPage() {
 
   async function reviewAction(targetDocId: string, action: "approve" | "reject") {
     setLoading(true);
-    setError("");
+    resetFeedback();
     try {
       await parseOrThrow(
         await fetch(`${API_BASE}/v1/docs/${encodeURIComponent(targetDocId)}/review/${action}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ comment: reviewComment })
-        })
+          body: JSON.stringify({ comment: reviewComment }),
+        }),
       );
       setMessage(`文档 ${targetDocId} 已${action === "approve" ? "通过" : "驳回"}复核`);
       await load();
@@ -103,7 +167,7 @@ export default function DocsCenterPage() {
       title: "解析置信度",
       dataIndex: "parse_confidence",
       key: "parse_confidence",
-      render: (v: number | undefined) => (typeof v === "number" ? v.toFixed(2) : "-")
+      render: (v: number | undefined) => (typeof v === "number" ? v.toFixed(2) : "-"),
     },
     {
       title: "状态",
@@ -113,26 +177,51 @@ export default function DocsCenterPage() {
           <Tag color={row.needs_review ? "orange" : "green"}>{row.needs_review ? "待复核" : "可用"}</Tag>
           {row.review_status ? <Tag>{row.review_status}</Tag> : null}
         </Space>
-      )
+      ),
     },
-    { title: "更新时间", dataIndex: "updated_at", key: "updated_at" }
+    { title: "创建时间", dataIndex: "created_at", key: "created_at" },
   ];
 
   return (
-    <main className="container">
+    <main className="container shell-fade-in">
       <Card className="premium-card">
-        <Space direction="vertical" style={{ width: "100%" }} size={12}>
-          <Title level={2} style={{ margin: 0 }}>文档知识库管理台</Title>
-          <Text type="secondary">覆盖接口：`/v1/docs/upload`、`/v1/docs/{`doc_id`}/index`、`/v1/docs`、`/v1/docs/review-queue`、`/review/approve|reject`</Text>
-          <Button type="primary" loading={loading} onClick={load}>刷新列表与复核队列</Button>
+        <Space direction="vertical" style={{ width: "100%" }} size={10}>
+          <Title level={2} style={{ margin: 0 }}>文档知识中心</Title>
+          <Text type="secondary">覆盖接口：`/v1/rag/workflow/upload-and-index`、`/v1/docs/*`、`/v1/docs/review-queue`。</Text>
+          <Space wrap>
+            <Button type="primary" loading={loading} onClick={load}>刷新列表与复核队列</Button>
+          </Space>
+        </Space>
+      </Card>
 
+      <Card className="premium-card" style={{ marginTop: 12 }} title="附件上传（推荐）">
+        <Space direction="vertical" style={{ width: "100%" }} size={10}>
+          <input
+            type="file"
+            onChange={(e) => {
+              const next = e.target.files?.[0] ?? null;
+              setFile(next);
+            }}
+          />
+          <Space wrap>
+            <Input value={fileSource} onChange={(e) => setFileSource(e.target.value)} placeholder="source" style={{ width: 180 }} />
+            <Button loading={loading} type="primary" onClick={uploadFileToRag}>上传并入库</Button>
+          </Space>
+          <Text style={{ color: "#64748b" }}>
+            当前文件：{file ? `${file.name} (${(file.size / 1024).toFixed(1)} KB)` : "未选择"}
+          </Text>
+        </Space>
+      </Card>
+
+      <Card className="premium-card" style={{ marginTop: 12 }} title="文本上传（兼容旧流程）">
+        <Space direction="vertical" style={{ width: "100%" }} size={10}>
           <Space.Compact block>
             <Input value={docId} onChange={(e) => setDocId(e.target.value)} placeholder="doc_id" />
             <Input value={filename} onChange={(e) => setFilename(e.target.value)} placeholder="filename" />
             <Input value={source} onChange={(e) => setSource(e.target.value)} placeholder="source" />
-            <Button loading={loading} onClick={uploadAndIndex}>上传并索引</Button>
+            <Button loading={loading} onClick={uploadTextAndIndex}>上传并索引</Button>
           </Space.Compact>
-          <Input.TextArea rows={4} value={content} onChange={(e) => setContent(e.target.value)} placeholder="文档内容（demo文本）" />
+          <Input.TextArea rows={4} value={content} onChange={(e) => setContent(e.target.value)} placeholder="文档内容" />
           <Input value={reviewComment} onChange={(e) => setReviewComment(e.target.value)} placeholder="复核备注" />
         </Space>
       </Card>
@@ -157,8 +246,8 @@ export default function DocsCenterPage() {
                   <Button size="small" type="primary" onClick={() => reviewAction(row.doc_id, "approve")}>通过</Button>
                   <Button size="small" danger onClick={() => reviewAction(row.doc_id, "reject")}>驳回</Button>
                 </Space>
-              )
-            }
+              ),
+            },
           ]}
           dataSource={queue}
           pagination={false}

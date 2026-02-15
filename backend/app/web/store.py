@@ -214,6 +214,30 @@ class WebStore:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS rag_upload_asset (
+                upload_id TEXT PRIMARY KEY,
+                doc_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_url TEXT NOT NULL DEFAULT '',
+                file_sha256 TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                content_type TEXT NOT NULL DEFAULT '',
+                stock_codes_json TEXT NOT NULL DEFAULT '[]',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                parse_note TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'uploaded',
+                created_by TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS rag_ops_meta (
+                meta_key TEXT PRIMARY KEY,
+                meta_value TEXT NOT NULL DEFAULT '',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS deep_think_session (
                 session_id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
@@ -345,6 +369,9 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_rag_qa_memory_stock_retrieval ON rag_qa_memory(stock_code, retrieval_enabled, created_at);
             CREATE INDEX IF NOT EXISTS idx_rag_qa_feedback_memory ON rag_qa_feedback(memory_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_rag_retrieval_trace_trace_id ON rag_retrieval_trace(trace_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_rag_upload_asset_created_at ON rag_upload_asset(created_at);
+            CREATE INDEX IF NOT EXISTS idx_rag_upload_asset_doc_status ON rag_upload_asset(doc_id, status, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_rag_upload_asset_sha ON rag_upload_asset(file_sha256, updated_at);
             CREATE INDEX IF NOT EXISTS idx_deep_think_round_session ON deep_think_round(session_id, round_no);
             CREATE INDEX IF NOT EXISTS idx_deep_think_opinion_round ON deep_think_opinion(round_id);
             CREATE INDEX IF NOT EXISTS idx_deep_think_event_session ON deep_think_event(session_id, round_no, event_seq);

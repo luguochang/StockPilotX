@@ -104,3 +104,37 @@
     - `/v1/deep-think/sessions` + `/v2/deep-think/sessions/{id}/rounds/stream` (verified `round_started` -> `done`)
 - API smoke result:
   - `SMOKE_OK`
+
+---
+
+## Batch-9 (Completed)
+
+### Scope
+- Implement RAG dual-mode product UX in frontend:
+  - `business` mode: upload, dashboard, latest uploads list.
+  - `ops` mode: keep source/chunk/memory/trace governance panels.
+- Implement backend upload workflow APIs for attachment-style ingestion:
+  - `GET /v1/rag/dashboard`
+  - `GET /v1/rag/uploads`
+  - `POST /v1/rag/uploads`
+  - `POST /v1/rag/workflow/upload-and-index`
+- Add upload-asset persistence (`rag_upload_asset`) and ops metadata (`rag_ops_meta`), plus dedupe by file hash.
+- Add docs-center attachment upload path to reuse the same RAG workflow chain.
+
+### Key Files
+- `backend/app/http_api.py`
+- `backend/app/service.py`
+- `backend/app/web/service.py`
+- `backend/app/web/store.py`
+- `frontend/app/rag-center/page.tsx`
+- `frontend/app/docs-center/page.tsx`
+- `tests/test_service.py`
+- `tests/test_http_api.py`
+
+### Self-test Evidence
+- Backend tests:
+  - `.\\.venv\\Scripts\\python.exe -m pytest tests/test_service.py tests/test_http_api.py -q`
+  - Result: `43 passed in 58.09s`
+- Frontend build:
+  - `cd frontend && npm run -s build`
+  - Result: `Compiled successfully`, route `/rag-center` and `/docs-center` generated.
