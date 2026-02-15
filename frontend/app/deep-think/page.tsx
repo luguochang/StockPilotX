@@ -100,6 +100,20 @@ type DeepThinkSession = {
   rounds: DeepThinkRound[];
 };
 type DeepThinkStreamEvent = { event: string; data: Record<string, any>; emitted_at: string };
+type DeepThinkEventArchiveSnapshot = {
+  session_id: string;
+  round_id: string;
+  count: number;
+  events: Array<{
+    session_id: string;
+    round_id: string;
+    round_no: number;
+    event_seq: number;
+    event: string;
+    data: Record<string, any>;
+    created_at: string;
+  }>;
+};
 
 function CountUp({ value, suffix = "" }: { value: number; suffix?: string }) {
   const [display, setDisplay] = useState(0);
@@ -153,6 +167,8 @@ export default function DeepThinkPage() {
   const [deepError, setDeepError] = useState("");
   const [deepStreamEvents, setDeepStreamEvents] = useState<DeepThinkStreamEvent[]>([]);
   const [deepLastA2ATask, setDeepLastA2ATask] = useState<{ task_id: string; status: string; agent_id: string } | null>(null);
+  const [deepArchiveLoading, setDeepArchiveLoading] = useState(false);
+  const [deepArchiveCount, setDeepArchiveCount] = useState(0);
 
   function formatDeepPercent(used: number, limit: number): number {
     const safeLimit = Number(limit) <= 0 ? 1 : Number(limit);
@@ -386,6 +402,34 @@ export default function DeepThinkPage() {
     return body as DeepThinkSession;
   }
 
+  async function loadDeepThinkEventArchive(sessionId: string, roundId = "", limit = 220) {
+    if (!sessionId) return;
+    setDeepArchiveLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (roundId) params.set("round_id", roundId);
+      params.set("limit", String(limit));
+      const qs = params.toString();
+      const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${sessionId}/events${qs ? `?${qs}` : ""}`);
+      const body = await resp.json();
+      if (!resp.ok) throw new Error(body?.detail ?? `HTTP ${resp.status}`);
+      const payload = body as DeepThinkEventArchiveSnapshot;
+      const rows = Array.isArray(payload.events) ? payload.events : [];
+      setDeepArchiveCount(Number(payload.count ?? rows.length));
+      setDeepStreamEvents(
+        rows.map((row) => ({
+          event: String(row.event ?? "message"),
+          data: (row.data ?? {}) as Record<string, any>,
+          emitted_at: String(row.created_at ?? "")
+        }))
+      );
+    } catch (e) {
+      setDeepError(e instanceof Error ? e.message : "加载 DeepThink 事件存档失败");
+    } finally {
+      setDeepArchiveLoading(false);
+    }
+  }
+
   async function startDeepThinkSession() {
     setDeepLoading(true);
     setDeepError("");
@@ -395,6 +439,8 @@ export default function DeepThinkPage() {
       setDeepSession(created);
       setDeepLastA2ATask(null);
       setDeepStreamEvents([]);
+      setDeepArchiveCount(0);
+      await loadDeepThinkEventArchive(created.session_id);
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "创建 DeepThink 会话失败");
     } finally {
@@ -410,7 +456,10 @@ export default function DeepThinkPage() {
       const resp = await fetch(`${API_BASE}/v1/deep-think/sessions/${deepSession.session_id}`);
       const body = await resp.json();
       if (!resp.ok) throw new Error(body?.detail ?? `HTTP ${resp.status}`);
-      setDeepSession(body as DeepThinkSession);
+      const loaded = body as DeepThinkSession;
+      setDeepSession(loaded);
+      const latest = loaded.rounds?.length ? loaded.rounds[loaded.rounds.length - 1] : null;
+      await loadDeepThinkEventArchive(loaded.session_id, String(latest?.round_id ?? ""));
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "刷新 DeepThink 会话失败");
     } finally {
@@ -428,6 +477,7 @@ export default function DeepThinkPage() {
         throw new Error(detail || `HTTP ${resp.status}`);
       }
       await readSSEAndConsume(resp, (eventName, payload) => appendDeepEvent(eventName, payload));
+      await loadDeepThinkEventArchive(sessionId);
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "回放 DeepThink 事件流失败");
     } finally {
@@ -649,6 +699,59 @@ export default function DeepThinkPage() {
     risk_tags: (opinion.risk_tags ?? []).join(", "),
     reason: opinion.reason
   }));
+  const deepOpinionDiffRows = useMemo(() => {
+    if (deepRounds.length < 2) return [];
+    const prevRound = deepRounds[deepRounds.length - 2];
+    const currRound = deepRounds[deepRounds.length - 1];
+    const prevByAgent = new Map((prevRound.opinions ?? []).map((x) => [x.agent_id, x]));
+    const currByAgent = new Map((currRound.opinions ?? []).map((x) => [x.agent_id, x]));
+    const agents = Array.from(new Set([...Array.from(prevByAgent.keys()), ...Array.from(currByAgent.keys())]));
+    return agents.map((agentId) => {
+      const prev = prevByAgent.get(agentId);
+      const curr = currByAgent.get(agentId);
+      const prevSignal = String(prev?.signal ?? "-");
+      const currSignal = String(curr?.signal ?? "-");
+      const prevConfidence = Number(prev?.confidence ?? 0);
+      const currConfidence = Number(curr?.confidence ?? 0);
+      const deltaConfidence = Number((currConfidence - prevConfidence).toFixed(4));
+      let changeType = "unchanged";
+      if (prevSignal !== currSignal) changeType = "signal_changed";
+      else if (Math.abs(deltaConfidence) >= 0.08) changeType = "confidence_shift";
+      return {
+        key: `${currRound.round_id}-${agentId}`,
+        agent_id: agentId,
+        prev_signal: prevSignal,
+        curr_signal: currSignal,
+        prev_confidence: prevConfidence,
+        curr_confidence: currConfidence,
+        delta_confidence: deltaConfidence,
+        change_type: changeType
+      };
+    });
+  }, [deepRounds]);
+  const deepConflictDrillRows = useMemo(() => {
+    if (!latestDeepRound) return [];
+    const consensusSignal = String(latestDeepRound.consensus_signal ?? "hold");
+    const sources = latestDeepRound.conflict_sources ?? [];
+    const needRiskVeto = sources.includes("risk_veto");
+    const needComplianceVeto = sources.includes("compliance_veto");
+    return (latestDeepRound.opinions ?? [])
+      .filter((opinion) => {
+        if (String(opinion.signal) !== consensusSignal) return true;
+        if (needRiskVeto && opinion.agent_id === "risk_agent") return true;
+        if (needComplianceVeto && opinion.agent_id === "compliance_agent") return true;
+        return false;
+      })
+      .map((opinion) => ({
+        key: `${latestDeepRound.round_id}-conflict-${opinion.agent_id}`,
+        agent_id: opinion.agent_id,
+        signal: opinion.signal,
+        confidence: Number(opinion.confidence ?? 0),
+        evidence_ids: (opinion.evidence_ids ?? []).join(", "),
+        risk_tags: (opinion.risk_tags ?? []).join(", "),
+        reason: opinion.reason
+      }));
+  }, [latestDeepRound]);
   const deepTokenPercent = latestBudget ? formatDeepPercent(latestBudget.used.token_used, latestBudget.limit.token_budget) : 0;
   const deepTimePercent = latestBudget ? formatDeepPercent(latestBudget.used.time_used_ms, latestBudget.limit.time_budget_ms) : 0;
   const deepToolPercent = latestBudget ? formatDeepPercent(latestBudget.used.tool_calls_used, latestBudget.limit.tool_call_budget) : 0;
@@ -908,6 +1011,13 @@ export default function DeepThinkPage() {
                   <Button onClick={refreshDeepThinkSession} disabled={!deepSession?.session_id || deepLoading}>
                     刷新会话
                   </Button>
+                  <Button
+                    onClick={() => loadDeepThinkEventArchive(deepSession?.session_id ?? "", String(latestDeepRound?.round_id ?? ""))}
+                    disabled={!deepSession?.session_id}
+                    loading={deepArchiveLoading}
+                  >
+                    加载会话存档
+                  </Button>
                   <Button onClick={() => replayDeepThinkStream(deepSession?.session_id ?? "")} disabled={!deepSession?.session_id} loading={deepStreaming}>
                     回放最新轮次流
                   </Button>
@@ -916,6 +1026,7 @@ export default function DeepThinkPage() {
                   <Tag color={deepSession ? "blue" : "default"}>session: {deepSession?.session_id ?? "未创建"}</Tag>
                   <Tag color={deepSession?.status === "completed" ? "green" : "processing"}>status: {deepSession?.status ?? "idle"}</Tag>
                   <Tag>round: {deepSession?.current_round ?? 0}/{deepSession?.max_rounds ?? 0}</Tag>
+                  <Tag color={deepArchiveCount > 0 ? "cyan" : "default"}>archive_events: {deepArchiveCount}</Tag>
                   {latestDeepRound?.replan_triggered ? <Tag color="orange">replan_triggered</Tag> : null}
                   {latestDeepRound?.stop_reason ? <Tag color="red">{latestDeepRound.stop_reason}</Tag> : null}
                 </Space>
@@ -1018,6 +1129,71 @@ export default function DeepThinkPage() {
                     width: 104,
                     render: (v: number) => v.toFixed(3)
                   }
+                ]}
+              />
+            </Card>
+
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>跨轮次观点差分</span>} style={{ marginTop: 12 }}>
+              <Table
+                size="small"
+                pagination={false}
+                locale={{ emptyText: "至少执行两轮后可查看差分" }}
+                dataSource={deepOpinionDiffRows}
+                columns={[
+                  { title: "Agent", dataIndex: "agent_id", key: "agent_id", width: 120 },
+                  {
+                    title: "Signal",
+                    key: "signal_diff",
+                    width: 160,
+                    render: (_: unknown, row: any) => (
+                      <Text style={{ color: "#334155" }}>{row.prev_signal} → {row.curr_signal}</Text>
+                    )
+                  },
+                  {
+                    title: "ΔConf",
+                    dataIndex: "delta_confidence",
+                    key: "delta_confidence",
+                    width: 92,
+                    render: (v: number) => (
+                      <Text style={{ color: v > 0 ? "#059669" : v < 0 ? "#dc2626" : "#475569" }}>{v.toFixed(4)}</Text>
+                    )
+                  },
+                  {
+                    title: "Type",
+                    dataIndex: "change_type",
+                    key: "change_type",
+                    width: 120,
+                    render: (v: string) => (
+                      <Tag color={v === "signal_changed" ? "red" : v === "confidence_shift" ? "gold" : "blue"}>{v}</Tag>
+                    )
+                  }
+                ]}
+              />
+            </Card>
+
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>冲突源下钻（证据视角）</span>} style={{ marginTop: 12 }}>
+              <Table
+                size="small"
+                pagination={false}
+                locale={{ emptyText: "暂无冲突观点可下钻" }}
+                dataSource={deepConflictDrillRows}
+                columns={[
+                  { title: "Agent", dataIndex: "agent_id", key: "agent_id", width: 118 },
+                  {
+                    title: "Signal",
+                    dataIndex: "signal",
+                    key: "signal",
+                    width: 84,
+                    render: (v: string) => <Tag color={v === "buy" ? "green" : v === "reduce" ? "red" : "blue"}>{v}</Tag>
+                  },
+                  {
+                    title: "Confidence",
+                    dataIndex: "confidence",
+                    key: "confidence",
+                    width: 100,
+                    render: (v: number) => v.toFixed(3)
+                  },
+                  { title: "Evidence IDs", dataIndex: "evidence_ids", key: "evidence_ids" }
                 ]}
               />
             </Card>

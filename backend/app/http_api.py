@@ -112,6 +112,13 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/v1/deep-think/sessions/{session_id}/events")
+    def deep_think_events(session_id: str, round_id: str = "", limit: int = 200):
+        result = svc.deep_think_list_events(session_id, round_id=round_id.strip() or None, limit=limit)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result)
+        return result
+
     @app.post("/v1/report/generate")
     def report_generate(payload: dict):
         return svc.report_generate(payload)

@@ -1150,6 +1150,14 @@ class AShareAgentService:
                     "stop_reason": stop_reason,
                 },
             )
+        latest_round = snapshot.get("rounds", [])[-1] if snapshot.get("rounds") else {}
+        if latest_round:
+            self.web.deep_think_replace_round_events(
+                session_id=session_id,
+                round_id=str(latest_round.get("round_id", round_id)),
+                round_no=int(latest_round.get("round_no", round_no)),
+                events=self._build_deep_think_round_events(session_id, latest_round),
+            )
         return snapshot
 
     def deep_think_get_session(self, session_id: str) -> dict[str, Any]:
@@ -1157,6 +1165,65 @@ class AShareAgentService:
         if not session:
             return {"error": "not_found", "session_id": session_id}
         return session
+
+    def _build_deep_think_round_events(self, session_id: str, latest: dict[str, Any]) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = [
+            {
+                "event": "round_started",
+                "data": {
+                    "session_id": session_id,
+                    "round_id": latest.get("round_id"),
+                    "round_no": latest.get("round_no"),
+                    "task_graph": latest.get("task_graph", []),
+                },
+            }
+        ]
+        budget_usage = latest.get("budget_usage", {})
+        if bool(budget_usage.get("warn")):
+            events.append({"event": "budget_warning", "data": budget_usage})
+
+        for opinion in latest.get("opinions", []):
+            reason = str(opinion.get("reason", ""))
+            pivot = max(1, min(len(reason), len(reason) // 2))
+            events.append(
+                {
+                    "event": "agent_opinion_delta",
+                    "data": {"agent": opinion.get("agent_id"), "delta": reason[:pivot]},
+                }
+            )
+            events.append({"event": "agent_opinion_final", "data": opinion})
+            if str(opinion.get("agent_id")) == "critic_agent":
+                events.append(
+                    {
+                        "event": "critic_feedback",
+                        "data": {"reason": reason, "round_id": latest.get("round_id")},
+                    }
+                )
+
+        events.append(
+            {
+                "event": "arbitration_final",
+                "data": {
+                    "consensus_signal": latest.get("consensus_signal"),
+                    "disagreement_score": latest.get("disagreement_score"),
+                    "conflict_sources": latest.get("conflict_sources", []),
+                    "counter_view": latest.get("counter_view", ""),
+                },
+            }
+        )
+        if bool(latest.get("replan_triggered", False)):
+            events.append(
+                {
+                    "event": "replan_triggered",
+                    "data": {
+                        "round_id": latest.get("round_id"),
+                        "task_graph": latest.get("task_graph", []),
+                        "reason": "disagreement_above_threshold",
+                    },
+                }
+            )
+        events.append({"event": "done", "data": {"ok": True, "session_id": session_id}})
+        return events
 
     def deep_think_stream_events(self, session_id: str):
         session = self.web.deep_think_get_session(session_id)
@@ -1168,48 +1235,42 @@ class AShareAgentService:
             yield {"event": "done", "data": {"ok": False, "error": "no_rounds", "session_id": session_id}}
             return
         latest = rounds[-1]
-        yield {
-            "event": "round_started",
-            "data": {
-                "session_id": session_id,
-                "round_id": latest.get("round_id"),
-                "round_no": latest.get("round_no"),
-                "task_graph": latest.get("task_graph", []),
-            },
-        }
-        budget_usage = latest.get("budget_usage", {})
-        if bool(budget_usage.get("warn")):
-            yield {"event": "budget_warning", "data": budget_usage}
-        for opinion in latest.get("opinions", []):
-            reason = str(opinion.get("reason", ""))
-            pivot = max(1, min(len(reason), len(reason) // 2))
-            yield {
-                "event": "agent_opinion_delta",
-                "data": {"agent": opinion.get("agent_id"), "delta": reason[:pivot]},
-            }
-            yield {"event": "agent_opinion_final", "data": opinion}
-            if str(opinion.get("agent_id")) == "critic_agent":
-                yield {"event": "critic_feedback", "data": {"reason": reason, "round_id": latest.get("round_id")}}
+        round_id = str(latest.get("round_id", ""))
+        round_no = int(latest.get("round_no", 0))
+        events = self.web.deep_think_list_events(session_id=session_id, round_id=round_id, limit=400)
+        if not events:
+            generated = self._build_deep_think_round_events(session_id, latest)
+            self.web.deep_think_replace_round_events(
+                session_id=session_id,
+                round_id=round_id,
+                round_no=round_no,
+                events=generated,
+            )
+            events = self.web.deep_think_list_events(session_id=session_id, round_id=round_id, limit=400)
+        for item in events:
+            yield {"event": str(item.get("event", "message")), "data": item.get("data", {})}
 
-        yield {
-            "event": "arbitration_final",
-            "data": {
-                "consensus_signal": latest.get("consensus_signal"),
-                "disagreement_score": latest.get("disagreement_score"),
-                "conflict_sources": latest.get("conflict_sources", []),
-                "counter_view": latest.get("counter_view", ""),
-            },
-            }
-        if bool(latest.get("replan_triggered", False)):
-            yield {
-                "event": "replan_triggered",
-                "data": {
-                    "round_id": latest.get("round_id"),
-                    "task_graph": latest.get("task_graph", []),
-                    "reason": "disagreement_above_threshold",
-                },
-            }
-        yield {"event": "done", "data": {"ok": True, "session_id": session_id}}
+    def deep_think_list_events(
+        self,
+        session_id: str,
+        *,
+        round_id: str | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        session = self.web.deep_think_get_session(session_id)
+        if not session:
+            return {"error": "not_found", "session_id": session_id}
+        events = self.web.deep_think_list_events(
+            session_id=session_id,
+            round_id=(round_id or None),
+            limit=max(1, min(2000, int(limit))),
+        )
+        return {
+            "session_id": session_id,
+            "round_id": (round_id or ""),
+            "count": len(events),
+            "events": events,
+        }
 
     def a2a_agent_cards(self) -> list[dict[str, Any]]:
         return self.web.list_agent_cards()

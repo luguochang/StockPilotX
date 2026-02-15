@@ -120,6 +120,11 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("agent_opinion_final", names)
         self.assertIn("arbitration_final", names)
         self.assertEqual(names[-1], "done")
+        events_snapshot = self.svc.deep_think_list_events(session_id)
+        self.assertGreater(events_snapshot["count"], 0)
+        stored_names = [str(x.get("event", "")) for x in events_snapshot["events"]]
+        self.assertIn("round_started", stored_names)
+        self.assertIn("done", stored_names)
         latest_round = updated["rounds"][-1]
         has_optional_event = any(name in names for name in ("budget_warning", "replan_triggered"))
         if latest_round.get("replan_triggered") or latest_round.get("budget_usage", {}).get("warn"):

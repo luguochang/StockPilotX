@@ -86,3 +86,10 @@
 - Added frontend A2A dispatch action (`/v1/a2a/tasks`) to trigger supervisor-led next round from UI.
 - Added DeepThink stream replay panel for SSE event review and latest round trace visibility.
 - Validation kept green: backend `63 passed`; frontend build passed; frontend typecheck passed.
+
+## Round-I Update (2026-02-15)
+- Added persisted DeepThink event archive with query API: `/v1/deep-think/sessions/{session_id}/events`.
+- Added backend event snapshot storage/replay path (`deep_think_event`) with fallback regeneration for historical rounds.
+- Added frontend archive controls (`加载会话存档` + `archive_events` counter) for audit-friendly replay.
+- Added frontend round-to-round opinion diff panel and conflict drill-down table (including `evidence_ids`).
+- Validation kept green: targeted backend tests `27 passed`; full backend regression `63 passed`; frontend build + typecheck passed.

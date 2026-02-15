@@ -55,6 +55,7 @@
 | AGT-010 | S8,S12,S17.11 | 内部 A2A 适配层（agent card + task lifecycle） | [x] | `/v1/a2a/agent-cards` 与 `/v1/a2a/tasks` 可完成卡片发现与任务状态流转 | 新增 `agent_card_registry/a2a_task` 表与应用服务流程；`tests/test_service.py::test_a2a_task_lifecycle` 与 `tests/test_http_api.py::test_deep_think_and_a2a` 覆盖；`pytest` 61/61 通过（2026-02-15） |
 | AGT-011 | S8,S17.7,S17.11 | DeepThink 任务规划（task graph）与重规划触发 | [x] | 每轮输出 `task_graph`，分歧超阈值可触发 `replan_triggered` | 新增 `_deep_plan_tasks` 与 `replan_triggered` 事件流；新增 `tests/test_service.py::test_deep_think_session_and_round` 与 `tests/test_http_api.py::test_deep_think_and_a2a` 增强；`pytest` 63/63 通过（2026-02-15） |
 | AGT-012 | S8,S15,S17.6 | DeepThink 预算治理（budget usage + stop reason） | [x] | 每轮输出 `budget_usage`，超预算时 `stop_reason=DEEP_BUDGET_EXCEEDED` | 新增 `_deep_budget_snapshot` 与 round 字段 `budget_usage/stop_reason`；新增 `tests/test_service.py::test_deep_think_budget_exceeded_stop` 与 `tests/test_http_api.py::test_deep_think_budget_exceeded`；`pytest` 63/63 通过（2026-02-15） |
+| AGT-013 | S8,S12,S17.7 | DeepThink 事件存档与可回放接口（Round-I） | [x] | 轮次事件可持久化并通过 API 查询回放 | 新增 `deep_think_event` 表与 `deep_think_replace_round_events/deep_think_list_events`；新增 `/v1/deep-think/sessions/{session_id}/events`；`tests/test_service.py` 与 `tests/test_http_api.py` 增强；`pytest` 27/27 通过（2026-02-15） |
 | GOV-004 | S1,S16 | 每轮交付文档化与可追溯规范 | [x] | 每轮必须有独立 md 记录设计、改动、验证、风险与后续建议 | 新增 `docs/rounds/README.md` 与 `docs/rounds/2026-02-15/round-E-deepthink-a2a-mvp.md`（2026-02-15） |
 | PROMPT-001 | S7 | Prompt 三层模板运行时装配 | [x] | system/policy/task 全链路启用 | 新增 `backend/app/prompt/runtime.py` 并在 `service/workflow` 接入；`tests/test_prompt_engineering.py` 通过（2026-02-13） |
 | PROMPT-002 | S7,S10 | `prompt_eval_result` 回写与发布门禁 | [x] | 不达阈值禁止进入 stable | `prompt_registry` 增加 `prompt_eval_result` 表、release gate；`evals_run` 自动回写；`tests/test_prompt_persistence.py` 通过（2026-02-13） |
@@ -64,6 +65,7 @@
 | FRONT-003 | S4,S12 | 首页导航化与 DeepThink 独立页面拆分 | [x] | 首页仅展示系统介绍与模块跳转，深度分析迁移到 `/deep-think` | 新增 `frontend/app/deep-think/page.tsx`，重构 `frontend/app/page.tsx` 为导航首页；更新 `frontend/app/layout.tsx` 导航；`npm run build` 通过（2026-02-15） |
 | FRONT-004 | S14,S15 | 前端构建与类型检查稳定化（Round-G） | [x] | 本轮改造后 `build` 与 `tsc` 均通过 | 更新 `frontend/tsconfig.json` 并完成 `npm run build`、`npx tsc --noEmit`（2026-02-15） |
 | FRONT-005 | S4,S12,S15,S17.7 | DeepThink 轮次可视化与治理看板（Round-H） | [x] | `/deep-think` 可展示 round timeline、conflict_sources 可视化、budget usage、replan/stop reason 与 SSE 回放 | 增强 `frontend/app/deep-think/page.tsx` 并接入 `/v1/deep-think/*` + `/v1/a2a/tasks`；`pytest` 63/63、`npm run build`、`npx tsc --noEmit` 通过（2026-02-15） |
+| FRONT-006 | S4,S12,S15,S17.7 | DeepThink 跨轮差分与冲突下钻（Round-I） | [x] | `/deep-think` 可展示跨轮观点差分、冲突证据下钻与会话事件存档加载 | 增强 `frontend/app/deep-think/page.tsx`，新增 `deepOpinionDiffRows/deepConflictDrillRows/loadDeepThinkEventArchive` 与归档状态；`npm run build`、`npx tsc --noEmit` 通过（2026-02-15） |
 | OPS-001 | S14,S15 | 上线前工程化检查（SLO/Runbook/回滚） | [x] | 检查项完成并可审计 | 新增 `docs/ops-runbook.md`（SLO、告警、回滚、发布前检查）；`tests/test_project_assets.py` 校验存在（2026-02-13） |
 
 ## 4.1 完整 Web 应用扩展清单（新增）
@@ -299,5 +301,20 @@
   - key output: `63 passed in 28.77s`
   - command: `cd frontend && npm run build`
   - key output: `build passed (route /deep-think generated)`
+  - command: `cd frontend && npx tsc --noEmit`
+  - key output: `typecheck passed`
+
+### 2026-02-15 (Round-I)
+- Completed:
+  - [AGT-013] DeepThink 轮次事件存档落地：新增 `deep_think_event` 持久化与 `/v1/deep-think/sessions/{session_id}/events` 查询接口。
+  - [FRONT-006] `/deep-think` 新增跨轮次观点差分、冲突源下钻（evidence IDs）与会话存档加载能力。
+  - [GOV-004] 本轮交付文档化：新增 `docs/rounds/2026-02-15/round-I-deepthink-diff-drilldown-archive.md` 与专栏记录 `docs/agent-column/13-Round-I-DeepThink跨轮差分与事件存档实现记录.md`。
+- Evidence:
+  - command: `.\.venv\Scripts\python -m pytest -q tests/test_service.py tests/test_http_api.py`
+  - key output: `27 passed in 26.05s`
+  - command: `.\.venv\Scripts\python -m pytest -q`
+  - key output: `63 passed in 36.52s`
+  - command: `cd frontend && npm run build`
+  - key output: `build passed (/deep-think generated)`
   - command: `cd frontend && npx tsc --noEmit`
   - key output: `typecheck passed`

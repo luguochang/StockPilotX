@@ -315,6 +315,11 @@ class HttpApiTestCase(unittest.TestCase):
             self.assertTrue("event: budget_warning" in stream_text or "event: replan_triggered" in stream_text)
         self.assertIn("event: done", stream_text)
 
+        c3b, events_snapshot = self._get(f"/v1/deep-think/sessions/{session_id}/events?limit=120")
+        self.assertEqual(c3b, 200)
+        self.assertGreater(events_snapshot["count"], 0)
+        self.assertTrue(any(str(x.get("event")) == "round_started" for x in events_snapshot["events"]))
+
         c4, cards = self._get("/v1/a2a/agent-cards")
         self.assertEqual(c4, 200)
         self.assertTrue(any(card.get("agent_id") == "supervisor_agent" for card in cards))

@@ -447,6 +447,76 @@ class WebAppService:
         )
         return self.deep_think_get_session(session_id)
 
+    def deep_think_replace_round_events(
+        self,
+        *,
+        session_id: str,
+        round_id: str,
+        round_no: int,
+        events: list[dict[str, Any]],
+    ) -> None:
+        self.store.execute(
+            """
+            DELETE FROM deep_think_event
+            WHERE session_id = ? AND round_id = ?
+            """,
+            (session_id, round_id),
+        )
+        for idx, item in enumerate(events, start=1):
+            event_name = str(item.get("event", "message"))
+            data = item.get("data", {})
+            self.store.execute(
+                """
+                INSERT INTO deep_think_event
+                (session_id, round_id, round_no, event_seq, event_name, data_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    round_id,
+                    round_no,
+                    idx,
+                    event_name,
+                    json.dumps(data, ensure_ascii=False),
+                ),
+            )
+
+    def deep_think_list_events(
+        self,
+        *,
+        session_id: str,
+        round_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(2000, int(limit)))
+        if round_id:
+            rows = self.store.query_all(
+                """
+                SELECT session_id, round_id, round_no, event_seq, event_name, data_json, created_at
+                FROM deep_think_event
+                WHERE session_id = ? AND round_id = ?
+                ORDER BY round_no ASC, event_seq ASC, id ASC
+                LIMIT ?
+                """,
+                (session_id, round_id, safe_limit),
+            )
+        else:
+            rows = self.store.query_all(
+                """
+                SELECT session_id, round_id, round_no, event_seq, event_name, data_json, created_at
+                FROM deep_think_event
+                WHERE session_id = ?
+                ORDER BY round_no ASC, event_seq ASC, id ASC
+                LIMIT ?
+                """,
+                (session_id, safe_limit),
+            )
+        for row in rows:
+            row["data"] = self._json_loads_or(row.get("data_json"), {})
+            row.pop("data_json", None)
+            row["event"] = row.pop("event_name", "message")
+        return rows
+
     def register_agent_card(
         self,
         *,

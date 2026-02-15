@@ -92,6 +92,15 @@
 | S17.7 | Deep Agents 多轮治理信号（conflict/budget/replan）可视化 | FRONT-005 | [x] |
 | S16 | 实施治理文档与轮次记录完整可追溯 | GOV-004 | [x] |
 
+## 3.6 DeepThink 差分/下钻/事件存档映射（2026-02-15 Round-I）
+| Spec Ref | 要求摘要 | Task ID | 状态 |
+|---|---|---|---|
+| S8 | Deep Agents 多轮裁决过程可复盘 | AGT-013 | [x] |
+| S12 | DeepThink 事件查询契约与前端消费闭环 | AGT-013, FRONT-006 | [x] |
+| S15 | 可验证交付（pytest + build + typecheck） | AGT-013, FRONT-006 | [x] |
+| S17.7 | Deep Agents 轮次差分与冲突证据视图增强 | FRONT-006 | [x] |
+| S16 | 实施治理文档与轮次追踪完整可审计 | GOV-004 | [x] |
+
 ## 4. Prompt 文档映射
 | Spec Ref | 要求摘要 | Task ID | 状态 |
 |---|---|---|---|
