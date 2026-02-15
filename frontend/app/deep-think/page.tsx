@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import ReactECharts from "echarts-for-react";
-import { Alert, Button, Card, Col, Collapse, Input, InputNumber, List, Progress, Row, Segmented, Select, Space, Statistic, Table, Tag, Timeline, Typography } from "antd";
+import { Alert, Button, Card, Col, Input, InputNumber, List, Popover, Progress, Row, Segmented, Select, Space, Statistic, Table, Tag, Timeline, Typography } from "antd";
 import MediaCarousel from "../components/MediaCarousel";
 import StockSelectorModal from "../components/StockSelectorModal";
 
@@ -1868,32 +1868,28 @@ export default function DeepThinkPage() {
                       </Card>
                     ) : null}
                     {deepAgentRoleRows.length ? (
-                      <Card size="small">
-                        {/* 角色说明默认折叠，避免分析模式被长文本占满，用户按需展开查看。 */}
-                        <Collapse
-                          ghost
-                          items={[
-                            {
-                              key: "agent-role-guide",
-                              label: (
-                                <span style={{ color: "#0f172a" }}>
-                                  Agent 角色说明（点击展开，{deepAgentRoleRows.length}个角色）
-                                </span>
-                              ),
-                              children: (
-                                <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                                  {deepAgentRoleRows.map((row) => (
-                                    <Space key={`agent-role-${row.id}`} direction="vertical" size={0} style={{ width: "100%" }}>
-                                      <Text style={{ color: "#0f172a" }}>{row.name}</Text>
-                                      <Text style={{ color: "#64748b" }}>{row.role}</Text>
-                                    </Space>
-                                  ))}
+                      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                        {/* 角色说明改为 Popover：默认不占版面，业务用户按需点击查看。 */}
+                        <Popover
+                          trigger="click"
+                          placement="bottomRight"
+                          overlayStyle={{ maxWidth: 420 }}
+                          content={(
+                            <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                              {deepAgentRoleRows.map((row) => (
+                                <Space key={`agent-role-${row.id}`} direction="vertical" size={0} style={{ width: "100%" }}>
+                                  <Text style={{ color: "#0f172a" }}>{row.name}</Text>
+                                  <Text style={{ color: "#64748b" }}>{row.role}</Text>
                                 </Space>
-                              ),
-                            },
-                          ]}
-                        />
-                      </Card>
+                              ))}
+                            </Space>
+                          )}
+                        >
+                          <Button size="small" type="text" style={{ color: "#475569", paddingInline: 6 }}>
+                            ? 角色说明（{deepAgentRoleRows.length}）
+                          </Button>
+                        </Popover>
+                      </div>
                     ) : null}
                     {deepLatestBusinessSummary ? (
                       <Card size="small" title={<span style={{ color: "#0f172a" }}>业务融合结论</span>}>

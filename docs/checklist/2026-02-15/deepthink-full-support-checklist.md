@@ -75,3 +75,8 @@
 - [x] Compress role description area in analysis mode (default-collapsed)
 - [x] Keep full role details available via animated expand/collapse
 - [x] Rebuild frontend to verify rendering and type/lint pipeline
+
+## Batch K - Agent Role Popover Lite Interaction
+- [x] Replace role collapse panel with compact `?` popover trigger in analysis mode
+- [x] Keep complete role glossary in popover body
+- [x] Rebuild frontend to verify UI/compile pipeline

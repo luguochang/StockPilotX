@@ -81,3 +81,14 @@
   - `npm run -s build` (workdir `frontend`) passed.
 - Docs:
   - Added `docs/rounds/2026-02-15/round-T-deepthink-agent-role-collapsible.md`.
+
+## 2026-02-15T14:20:00Z - Round-U Agent Role Popover (Option 1)
+- User confirmed option 1 (`?` + popover).
+- Frontend change:
+  - Replaced the collapse section with right-aligned `? 角色说明` popover trigger.
+  - Popover content keeps full agent role descriptions.
+  - Removed `Collapse` dependency and switched to `Popover`.
+- Verification:
+  - `npm run -s build` (workdir `frontend`) passed.
+- Docs:
+  - Added `docs/rounds/2026-02-15/round-U-deepthink-agent-role-popover.md`.

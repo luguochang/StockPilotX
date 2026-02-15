@@ -48,3 +48,9 @@
 - [x] Keep full role details available on demand (no information loss).
 - [x] Validate with frontend production build.
 - [x] Add Round-T doc and commit.
+
+## Batch U - Agent Role Popover (Option 1)
+- [x] Replace collapse card with compact `?` trigger + click popover.
+- [x] Keep full role details in popover content.
+- [x] Validate with frontend production build.
+- [x] Add Round-U doc and commit.

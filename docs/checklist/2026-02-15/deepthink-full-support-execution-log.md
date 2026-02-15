@@ -137,3 +137,11 @@
   - Preserved complete role information for on-demand viewing.
 - Validation:
   - `npm run -s build` (workdir `frontend`) passed.
+
+## 2026-02-15T14:20:00Z - Batch K (Role Popover Lite UX)
+- User selected option 1: compact `?` entry.
+- Frontend update:
+  - Replaced collapse role panel with right-aligned `? 角色说明` popover trigger.
+  - Popover keeps full role definitions, while default layout remains compact.
+- Validation:
+  - `npm run -s build` (workdir `frontend`) passed.
