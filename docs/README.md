@@ -17,28 +17,37 @@ This directory keeps project documentation organized by **artifact type** and **
 
 ## Current Layout
 - Specs:
+  - `docs/specs/README.md`
   - `docs/specs/a-share-agent-system-executable-spec.md`
   - `docs/specs/a-share-agent-system-tech-solution.md`
   - `docs/specs/free-data-source-implementation.md`
   - `docs/specs/prompt-engineering-spec.md`
 - Templates:
+  - `docs/templates/README.md`
   - `docs/templates/prompt-test-cases-template.md`
 - Governance:
+  - `docs/governance/README.md`
   - `docs/governance/implementation-checklist.md`
   - `docs/governance/spec-traceability-matrix.md`
   - `docs/governance/global-constraints.md`
 - Operations:
+  - `docs/operations/README.md`
   - `docs/operations/ops-runbook.md`
 - Reports:
+  - `docs/reports/README.md`
   - `docs/reports/2026-02-14/`
   - `docs/reports/2026-02-15/`
 - Optimization:
+  - `docs/optimization/README.md`
   - `docs/optimization/2026-02-15/`
 - Round records:
+  - `docs/rounds/README.md`
   - `docs/rounds/2026-02-15/`
 - Summaries:
+  - `docs/summaries/README.md`
   - `docs/summaries/deepagent/2026-02-15/`
 - References:
+  - `docs/references/README.md`
   - `docs/references/`
 
 ## Naming Conventions
