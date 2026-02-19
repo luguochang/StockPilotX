@@ -383,6 +383,254 @@ class WebAppService:
         )
         return {"status": "ok"}
 
+    # ----------------- Portfolio -----------------
+    def portfolio_create(
+        self,
+        token: str,
+        *,
+        portfolio_name: str,
+        initial_capital: float,
+        description: str = "",
+    ) -> dict[str, Any]:
+        me = self.auth_me(token)
+        name = str(portfolio_name or "").strip()
+        if not name:
+            raise ValueError("portfolio_name is required")
+        capital = float(initial_capital or 0.0)
+        if capital <= 0:
+            raise ValueError("initial_capital must be > 0")
+        cur = self.store.execute(
+            """
+            INSERT INTO portfolio
+            (user_id, tenant_id, portfolio_name, description, initial_capital, current_value, total_profit_loss, total_profit_loss_pct)
+            VALUES (?, ?, ?, ?, ?, ?, 0, 0)
+            """,
+            (me["user_id"], me["tenant_id"], name, str(description or "").strip(), capital, capital),
+        )
+        return {"status": "ok", "portfolio_id": int(cur.lastrowid), "portfolio_name": name, "initial_capital": capital}
+
+    def portfolio_list(self, token: str) -> list[dict[str, Any]]:
+        me = self.auth_me(token)
+        return self.store.query_all(
+            """
+            SELECT id AS portfolio_id, portfolio_name, description, initial_capital, current_value,
+                   total_profit_loss, total_profit_loss_pct, created_at, updated_at
+            FROM portfolio
+            WHERE user_id = ? AND tenant_id = ?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (me["user_id"], me["tenant_id"]),
+        )
+
+    def _portfolio_ensure_owned(self, token: str, portfolio_id: int) -> dict[str, Any]:
+        me = self.auth_me(token)
+        row = self.store.query_one(
+            "SELECT * FROM portfolio WHERE id = ? AND user_id = ? AND tenant_id = ?",
+            (int(portfolio_id), me["user_id"], me["tenant_id"]),
+        )
+        if not row:
+            raise ValueError("portfolio not found")
+        return row
+
+    def portfolio_add_transaction(
+        self,
+        token: str,
+        *,
+        portfolio_id: int,
+        stock_code: str,
+        transaction_type: str,
+        quantity: float,
+        price: float,
+        fee: float = 0.0,
+        transaction_date: str = "",
+        notes: str = "",
+    ) -> dict[str, Any]:
+        _ = self._portfolio_ensure_owned(token, portfolio_id)
+        side = str(transaction_type or "").strip().lower()
+        if side not in {"buy", "sell"}:
+            raise ValueError("transaction_type must be buy or sell")
+        code = str(stock_code or "").strip().upper()
+        if not code:
+            raise ValueError("stock_code is required")
+        qty = float(quantity or 0.0)
+        px = float(price or 0.0)
+        fee_value = max(0.0, float(fee or 0.0))
+        if qty <= 0 or px <= 0:
+            raise ValueError("quantity and price must be > 0")
+        # amount is cash impact: buy negative, sell positive.
+        gross = qty * px
+        amount = -(gross + fee_value) if side == "buy" else (gross - fee_value)
+
+        position = self.store.query_one(
+            "SELECT id, quantity, avg_cost, current_price FROM portfolio_position WHERE portfolio_id = ? AND stock_code = ?",
+            (int(portfolio_id), code),
+        )
+        if side == "buy":
+            if position:
+                old_qty = float(position.get("quantity", 0.0) or 0.0)
+                old_cost = float(position.get("avg_cost", 0.0) or 0.0)
+                new_qty = old_qty + qty
+                new_cost = ((old_qty * old_cost) + (qty * px)) / new_qty
+                self.store.execute(
+                    """
+                    UPDATE portfolio_position
+                    SET quantity = ?, avg_cost = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (new_qty, new_cost, int(position["id"])),
+                )
+            else:
+                self.store.execute(
+                    """
+                    INSERT INTO portfolio_position (portfolio_id, stock_code, quantity, avg_cost, current_price, market_value)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (int(portfolio_id), code, qty, px, px, qty * px),
+                )
+        else:
+            if not position:
+                raise ValueError("position not found for sell")
+            old_qty = float(position.get("quantity", 0.0) or 0.0)
+            if qty > old_qty + 1e-9:
+                raise ValueError("sell quantity exceeds current position")
+            new_qty = old_qty - qty
+            if new_qty <= 1e-9:
+                self.store.execute(
+                    "DELETE FROM portfolio_position WHERE id = ?",
+                    (int(position["id"]),),
+                )
+            else:
+                self.store.execute(
+                    """
+                    UPDATE portfolio_position
+                    SET quantity = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (new_qty, int(position["id"])),
+                )
+
+        tx_date = str(transaction_date or "").strip() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cur = self.store.execute(
+            """
+            INSERT INTO portfolio_transaction
+            (portfolio_id, stock_code, transaction_type, quantity, price, fee, amount, notes, transaction_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (int(portfolio_id), code, side, qty, px, fee_value, amount, str(notes or "").strip()[:400], tx_date),
+        )
+        return {"status": "ok", "transaction_id": int(cur.lastrowid), "portfolio_id": int(portfolio_id)}
+
+    def portfolio_positions(self, token: str, *, portfolio_id: int) -> list[dict[str, Any]]:
+        _ = self._portfolio_ensure_owned(token, portfolio_id)
+        return self.store.query_all(
+            """
+            SELECT id AS position_id, stock_code, quantity, avg_cost, current_price, market_value,
+                   profit_loss, profit_loss_pct, weight, updated_at
+            FROM portfolio_position
+            WHERE portfolio_id = ?
+            ORDER BY market_value DESC, stock_code ASC
+            """,
+            (int(portfolio_id),),
+        )
+
+    def portfolio_transactions(self, token: str, *, portfolio_id: int, limit: int = 200) -> list[dict[str, Any]]:
+        _ = self._portfolio_ensure_owned(token, portfolio_id)
+        safe_limit = max(1, min(2000, int(limit)))
+        return self.store.query_all(
+            """
+            SELECT id AS transaction_id, stock_code, transaction_type, quantity, price, fee, amount, notes, transaction_date, created_at
+            FROM portfolio_transaction
+            WHERE portfolio_id = ?
+            ORDER BY transaction_date DESC, id DESC
+            LIMIT ?
+            """,
+            (int(portfolio_id), safe_limit),
+        )
+
+    def portfolio_revalue(self, token: str, *, portfolio_id: int, price_map: dict[str, float] | None = None) -> dict[str, Any]:
+        portfolio = self._portfolio_ensure_owned(token, portfolio_id)
+        prices = {str(k).strip().upper(): float(v) for k, v in (price_map or {}).items() if str(k).strip()}
+        positions = self.store.query_all(
+            "SELECT id, stock_code, quantity, avg_cost, current_price FROM portfolio_position WHERE portfolio_id = ?",
+            (int(portfolio_id),),
+        )
+        total_mv = 0.0
+        total_cost = 0.0
+        for row in positions:
+            code = str(row.get("stock_code", "")).upper()
+            qty = float(row.get("quantity", 0.0) or 0.0)
+            avg_cost = float(row.get("avg_cost", 0.0) or 0.0)
+            current_price = float(prices.get(code, float(row.get("current_price", 0.0) or avg_cost)))
+            mv = qty * current_price
+            pnl = (current_price - avg_cost) * qty
+            pnl_pct = ((current_price / avg_cost - 1.0) * 100.0) if avg_cost > 0 else 0.0
+            total_mv += mv
+            total_cost += qty * avg_cost
+            self.store.execute(
+                """
+                UPDATE portfolio_position
+                SET current_price = ?, market_value = ?, profit_loss = ?, profit_loss_pct = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (current_price, mv, pnl, pnl_pct, int(row["id"])),
+            )
+
+        # Compute cash from signed transaction amount.
+        tx_row = self.store.query_one(
+            "SELECT COALESCE(SUM(amount), 0) AS cash_delta FROM portfolio_transaction WHERE portfolio_id = ?",
+            (int(portfolio_id),),
+        ) or {"cash_delta": 0}
+        initial = float(portfolio.get("initial_capital", 0.0) or 0.0)
+        cash = initial + float(tx_row.get("cash_delta", 0.0) or 0.0)
+        current_value = cash + total_mv
+        pnl_total = current_value - initial
+        pnl_pct_total = ((current_value / initial - 1.0) * 100.0) if initial > 0 else 0.0
+        self.store.execute(
+            """
+            UPDATE portfolio
+            SET current_value = ?, total_profit_loss = ?, total_profit_loss_pct = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (current_value, pnl_total, pnl_pct_total, int(portfolio_id)),
+        )
+        if total_mv > 0:
+            self.store.execute(
+                """
+                UPDATE portfolio_position
+                SET weight = market_value / ?
+                WHERE portfolio_id = ?
+                """,
+                (total_mv, int(portfolio_id)),
+            )
+        else:
+            self.store.execute("UPDATE portfolio_position SET weight = 0 WHERE portfolio_id = ?", (int(portfolio_id),))
+        updated = self._portfolio_ensure_owned(token, portfolio_id)
+        return {
+            "portfolio_id": int(portfolio_id),
+            "initial_capital": initial,
+            "cash": cash,
+            "market_value": total_mv,
+            "current_value": float(updated.get("current_value", 0.0) or 0.0),
+            "total_profit_loss": float(updated.get("total_profit_loss", 0.0) or 0.0),
+            "total_profit_loss_pct": float(updated.get("total_profit_loss_pct", 0.0) or 0.0),
+        }
+
+    def portfolio_summary(self, token: str, *, portfolio_id: int, price_map: dict[str, float] | None = None) -> dict[str, Any]:
+        _ = self.portfolio_revalue(token, portfolio_id=portfolio_id, price_map=price_map)
+        portfolio = self._portfolio_ensure_owned(token, portfolio_id)
+        positions = self.portfolio_positions(token, portfolio_id=portfolio_id)
+        return {
+            "portfolio_id": int(portfolio_id),
+            "portfolio_name": str(portfolio.get("portfolio_name", "")),
+            "description": str(portfolio.get("description", "")),
+            "initial_capital": float(portfolio.get("initial_capital", 0.0) or 0.0),
+            "current_value": float(portfolio.get("current_value", 0.0) or 0.0),
+            "total_profit_loss": float(portfolio.get("total_profit_loss", 0.0) or 0.0),
+            "total_profit_loss_pct": float(portfolio.get("total_profit_loss_pct", 0.0) or 0.0),
+            "positions": positions,
+            "position_count": len(positions),
+        }
+
     # ----------------- Reports -----------------
     def save_report_index(
         self,

@@ -229,6 +229,24 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("history", data)
         self.assertGreater(len(data["history"]), 30)
 
+    def test_portfolio_lifecycle(self) -> None:
+        created = self.svc.portfolio_create(
+            "",
+            {"portfolio_name": "core", "initial_capital": 100000, "description": "phase2 test"},
+        )
+        pid = int(created["portfolio_id"])
+        self.assertGreater(pid, 0)
+        _ = self.svc.portfolio_add_transaction(
+            "",
+            pid,
+            {"stock_code": "SH600000", "transaction_type": "buy", "quantity": 100, "price": 10.0, "fee": 1.0},
+        )
+        summary = self.svc.portfolio_summary("", pid)
+        self.assertEqual(int(summary.get("portfolio_id", 0)), pid)
+        self.assertGreaterEqual(int(summary.get("position_count", 0)), 1)
+        tx = self.svc.portfolio_transactions("", pid, limit=20)
+        self.assertGreaterEqual(len(tx), 1)
+
     def test_query_repeated_calls_do_not_hit_global_model_limit(self) -> None:
         # 回归：预算计数应按请求重置，连续请求不应在第9次后失败。
         for idx in range(12):

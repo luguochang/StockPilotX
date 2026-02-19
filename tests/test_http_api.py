@@ -436,6 +436,35 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("realtime", body)
         self.assertIn("history", body)
 
+    def test_portfolio_endpoints(self) -> None:
+        c1, created = self._post(
+            "/v1/portfolio",
+            {"portfolio_name": "api-core", "initial_capital": 80000, "description": "api-test"},
+        )
+        self.assertEqual(c1, 200)
+        pid = int(created["portfolio_id"])
+        self.assertGreater(pid, 0)
+
+        c2, _tx = self._post(
+            f"/v1/portfolio/{pid}/transactions",
+            {"stock_code": "SH600000", "transaction_type": "buy", "quantity": 100, "price": 9.8, "fee": 1},
+        )
+        self.assertEqual(c2, 200)
+
+        c3, summary = self._get(f"/v1/portfolio/{pid}")
+        self.assertEqual(c3, 200)
+        self.assertEqual(int(summary.get("portfolio_id", 0)), pid)
+        self.assertGreaterEqual(int(summary.get("position_count", 0)), 1)
+
+        c4, tx_rows = self._get(f"/v1/portfolio/{pid}/transactions?limit=20")
+        self.assertEqual(c4, 200)
+        self.assertTrue(isinstance(tx_rows, list))
+        self.assertGreaterEqual(len(tx_rows), 1)
+
+        c5, rows = self._get("/v1/portfolio")
+        self.assertEqual(c5, 200)
+        self.assertTrue(any(int(x.get("portfolio_id", 0)) == pid for x in rows))
+
     def test_ops_capabilities(self) -> None:
         code, body = self._get("/v1/ops/capabilities")
         self.assertEqual(code, 200)

@@ -524,6 +524,47 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    # ---------------- WEB-010 Portfolio Manager ----------------
+    @app.post("/v1/portfolio")
+    def portfolio_create(payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.portfolio_create(token, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/portfolio")
+    def portfolio_list(authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.portfolio_list(token)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.post("/v1/portfolio/{portfolio_id}/transactions")
+    def portfolio_add_transaction(portfolio_id: int, payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.portfolio_add_transaction(token, portfolio_id, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/portfolio/{portfolio_id}")
+    def portfolio_summary(portfolio_id: int, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.portfolio_summary(token, portfolio_id)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/portfolio/{portfolio_id}/transactions")
+    def portfolio_transactions(portfolio_id: int, limit: int = 200, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.portfolio_transactions(token, portfolio_id, limit=limit)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     # ---------------- WEB-003 Report Center ----------------
     @app.get("/v1/reports")
     def reports_list(authorization: str | None = Header(default=None)):

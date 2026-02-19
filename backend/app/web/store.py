@@ -122,6 +122,49 @@ class WebStore:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS portfolio (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                tenant_id INTEGER NOT NULL,
+                portfolio_name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                initial_capital REAL NOT NULL,
+                current_value REAL NOT NULL DEFAULT 0,
+                total_profit_loss REAL NOT NULL DEFAULT 0,
+                total_profit_loss_pct REAL NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS portfolio_position (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                portfolio_id INTEGER NOT NULL,
+                stock_code TEXT NOT NULL,
+                quantity REAL NOT NULL DEFAULT 0,
+                avg_cost REAL NOT NULL DEFAULT 0,
+                current_price REAL NOT NULL DEFAULT 0,
+                market_value REAL NOT NULL DEFAULT 0,
+                profit_loss REAL NOT NULL DEFAULT 0,
+                profit_loss_pct REAL NOT NULL DEFAULT 0,
+                weight REAL NOT NULL DEFAULT 0,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(portfolio_id, stock_code)
+            );
+
+            CREATE TABLE IF NOT EXISTS portfolio_transaction (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                portfolio_id INTEGER NOT NULL,
+                stock_code TEXT NOT NULL,
+                transaction_type TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                price REAL NOT NULL,
+                fee REAL NOT NULL DEFAULT 0,
+                amount REAL NOT NULL,
+                notes TEXT NOT NULL DEFAULT '',
+                transaction_date DATETIME NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS doc_index (
                 doc_id TEXT PRIMARY KEY,
                 user_id INTEGER,
@@ -427,6 +470,9 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_watchlist_pool_stock_pool ON watchlist_pool_stock(pool_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_watchlist_pool_stock_code ON watchlist_pool_stock(stock_code);
             CREATE INDEX IF NOT EXISTS idx_query_history_user_created ON query_history(user_id, tenant_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_portfolio_user_created ON portfolio(user_id, tenant_id, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_portfolio_position_pid ON portfolio_position(portfolio_id, market_value);
+            CREATE INDEX IF NOT EXISTS idx_portfolio_tx_pid_date ON portfolio_transaction(portfolio_id, transaction_date);
             CREATE INDEX IF NOT EXISTS idx_doc_pipeline_run_doc_created ON doc_pipeline_run(doc_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_doc_pipeline_run_stage_status ON doc_pipeline_run(stage, status, created_at);
             CREATE INDEX IF NOT EXISTS idx_stock_industry_map_code ON stock_universe_industry_map(stock_code);

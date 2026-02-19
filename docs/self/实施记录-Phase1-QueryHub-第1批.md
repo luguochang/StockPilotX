@@ -402,3 +402,70 @@
 - [x] 流式事件携带维度面板
 - [x] 服务层/API 层测试
 - [x] 回归测试通过
+
+## 第9批增量（Phase2 - Portfolio Manager 第1批）
+
+### 新增能力
+
+1. 组合/持仓/交易表结构
+- `backend/app/web/store.py`
+  - 新增：
+    - `portfolio`
+    - `portfolio_position`
+    - `portfolio_transaction`
+  - 新增索引：
+    - `idx_portfolio_user_created`
+    - `idx_portfolio_position_pid`
+    - `idx_portfolio_tx_pid_date`
+
+2. Portfolio 领域服务
+- `backend/app/web/service.py`
+  - 新增：
+    - `portfolio_create`
+    - `portfolio_list`
+    - `portfolio_add_transaction`
+    - `portfolio_positions`
+    - `portfolio_transactions`
+    - `portfolio_revalue`
+    - `portfolio_summary`
+
+3. 应用服务层接入
+- `backend/app/service.py`
+  - 新增：
+    - `portfolio_create`
+    - `portfolio_list`
+    - `portfolio_add_transaction`
+    - `portfolio_summary`
+    - `portfolio_transactions`
+  - 新增 `_portfolio_price_map`：组合估值时自动刷新行情并回填价格。
+
+4. API 路由
+- `backend/app/http_api.py`
+  - `POST /v1/portfolio`
+  - `GET /v1/portfolio`
+  - `POST /v1/portfolio/{portfolio_id}/transactions`
+  - `GET /v1/portfolio/{portfolio_id}`
+  - `GET /v1/portfolio/{portfolio_id}/transactions`
+
+### 第9批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python -m pytest -q tests/test_service.py -k "test_portfolio_lifecycle"
+.\.venv\Scripts\python -m pytest -q tests/test_http_api.py -k "test_portfolio_endpoints"
+.\.venv\Scripts\python -m pytest -q tests -k "web or api or query or docs or portfolio"
+```
+
+结果：
+- 1 passed, 31 deselected
+- 1 passed, 21 deselected
+- 33 passed, 57 deselected
+
+### 第9批 Checklist
+
+- [x] Portfolio 表结构
+- [x] 交易驱动持仓更新
+- [x] 组合估值与收益汇总
+- [x] Portfolio API 路由
+- [x] 服务层/API 层测试
+- [x] 回归测试通过
