@@ -32,4 +32,5 @@ Scope: Stabilize report async lifecycle, simplify journal UX, and repair backend
 
 ## Commit Record
 
-- [ ] Commit hash: (to fill after commit)
+- [x] Commit hash: 39d5c14
+
