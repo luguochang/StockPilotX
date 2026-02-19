@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 from backend.app.stock.universe_sync import AShareUniverseSyncService
@@ -104,6 +105,15 @@ class WebAppService:
             (username, action, int(success), detail),
         )
 
+    def _normalize_pool_name(self, value: str) -> str:
+        name = str(value or "").strip()
+        if not name:
+            return ""
+        # Some terminals/clients may downgrade non-ASCII input into '?'.
+        if set(name) == {"?"}:
+            return "Unnamed Pool"
+        return name
+
     def require_role(self, token: str, allowed: set[str]) -> dict[str, Any]:
         if self.auth_bypass:
             return self.auth_me(token)
@@ -136,6 +146,111 @@ class WebAppService:
         )
         return {"status": "ok", "stock_code": stock_code.upper()}
 
+    def watchlist_pool_list(self, token: str) -> list[dict[str, Any]]:
+        me = self.auth_me(token)
+        pools = self.store.query_all(
+            """
+            SELECT pool_id, pool_name, description, is_default, created_at, updated_at
+            FROM watchlist_pool
+            WHERE user_id = ? AND tenant_id = ?
+            ORDER BY is_default DESC, updated_at DESC
+            """,
+            (me["user_id"], me["tenant_id"]),
+        )
+        for row in pools:
+            cnt = self.store.query_one("SELECT COUNT(1) AS cnt FROM watchlist_pool_stock WHERE pool_id = ?", (row["pool_id"],))
+            row["stock_count"] = int((cnt or {}).get("cnt", 0))
+            row["is_default"] = bool(int(row.get("is_default", 0)))
+        return pools
+
+    def watchlist_pool_create(self, token: str, pool_name: str, description: str = "", is_default: bool = False) -> dict[str, Any]:
+        me = self.auth_me(token)
+        name = self._normalize_pool_name(pool_name)
+        if not name:
+            raise ValueError("pool_name is required")
+        pool_id = str(uuid.uuid4())
+        if is_default:
+            self.store.execute(
+                "UPDATE watchlist_pool SET is_default = 0, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND tenant_id = ?",
+                (me["user_id"], me["tenant_id"]),
+            )
+        self.store.execute(
+            """
+            INSERT INTO watchlist_pool (pool_id, user_id, tenant_id, pool_name, description, is_default)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (pool_id, me["user_id"], me["tenant_id"], name, str(description or "").strip(), int(bool(is_default))),
+        )
+        return {"status": "ok", "pool_id": pool_id, "pool_name": name}
+
+    def watchlist_pool_add_stock(
+        self,
+        token: str,
+        pool_id: str,
+        stock_code: str,
+        source_filters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        me = self.auth_me(token)
+        pool = self.store.query_one(
+            "SELECT pool_id FROM watchlist_pool WHERE pool_id = ? AND user_id = ? AND tenant_id = ?",
+            (pool_id, me["user_id"], me["tenant_id"]),
+        )
+        if not pool:
+            raise ValueError("pool not found")
+        normalized = str(stock_code or "").strip().upper()
+        if not normalized:
+            raise ValueError("stock_code is required")
+        self.store.execute(
+            """
+            INSERT OR IGNORE INTO watchlist_pool_stock (pool_id, stock_code, source_filters_json)
+            VALUES (?, ?, ?)
+            """,
+            (pool_id, normalized, json.dumps(source_filters or {}, ensure_ascii=False)),
+        )
+        self.store.execute("UPDATE watchlist_pool SET updated_at = CURRENT_TIMESTAMP WHERE pool_id = ?", (pool_id,))
+        return {"status": "ok", "pool_id": pool_id, "stock_code": normalized}
+
+    def watchlist_pool_stocks(self, token: str, pool_id: str) -> list[dict[str, Any]]:
+        me = self.auth_me(token)
+        pool = self.store.query_one(
+            "SELECT pool_id FROM watchlist_pool WHERE pool_id = ? AND user_id = ? AND tenant_id = ?",
+            (pool_id, me["user_id"], me["tenant_id"]),
+        )
+        if not pool:
+            raise ValueError("pool not found")
+        rows = self.store.query_all(
+            """
+            SELECT p.stock_code, p.source_filters_json, p.created_at,
+                   u.stock_name, u.exchange, u.exchange_name, u.market_tier, u.listing_board, u.board_code,
+                   u.industry_l1, u.industry_l2, u.industry_l3
+            FROM watchlist_pool_stock p
+            LEFT JOIN stock_universe u ON u.stock_code = p.stock_code
+            WHERE p.pool_id = ?
+            ORDER BY p.created_at DESC
+            """,
+            (pool_id,),
+        )
+        for row in rows:
+            row["source_filters"] = self._json_loads_or(row.get("source_filters_json", "{}"), {})
+        return rows
+
+    def watchlist_pool_codes(self, token: str, pool_id: str) -> list[str]:
+        rows = self.watchlist_pool_stocks(token, pool_id)
+        return [str(row.get("stock_code", "")).upper() for row in rows if str(row.get("stock_code", "")).strip()]
+
+    def watchlist_pool_delete_stock(self, token: str, pool_id: str, stock_code: str) -> dict[str, Any]:
+        me = self.auth_me(token)
+        pool = self.store.query_one(
+            "SELECT pool_id FROM watchlist_pool WHERE pool_id = ? AND user_id = ? AND tenant_id = ?",
+            (pool_id, me["user_id"], me["tenant_id"]),
+        )
+        if not pool:
+            raise ValueError("pool not found")
+        normalized = str(stock_code or "").strip().upper()
+        self.store.execute("DELETE FROM watchlist_pool_stock WHERE pool_id = ? AND stock_code = ?", (pool_id, normalized))
+        self.store.execute("UPDATE watchlist_pool SET updated_at = CURRENT_TIMESTAMP WHERE pool_id = ?", (pool_id,))
+        return {"status": "ok", "pool_id": pool_id, "stock_code": normalized}
+
     def dashboard_overview(self, token: str) -> dict[str, Any]:
         me = self.auth_me(token)
         watchlist = self.watchlist_list(token)
@@ -160,14 +275,92 @@ class WebAppService:
             "open_alert_count": open_alerts,
         }
 
-    # ----------------- Reports -----------------
-    def save_report_index(self, *, report_id: str, user_id: int | None, tenant_id: int | None, stock_code: str, report_type: str, markdown: str) -> None:
+    # ----------------- Query Hub -----------------
+    def query_history_add(
+        self,
+        token: str,
+        *,
+        question: str,
+        stock_codes: list[str],
+        trace_id: str,
+        intent: str,
+        cache_hit: bool,
+        latency_ms: int,
+        summary: str = "",
+        error: str = "",
+    ) -> dict[str, Any]:
+        """Persist one Query Hub execution record for audit and user history view."""
+        me = self.auth_me(token)
         self.store.execute(
             """
-            INSERT OR REPLACE INTO report_index (report_id, user_id, tenant_id, stock_code, report_type)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO query_history
+            (user_id, tenant_id, question, stock_codes_json, trace_id, intent, cache_hit, latency_ms, summary, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (report_id, user_id, tenant_id, stock_code, report_type),
+            (
+                me["user_id"],
+                me["tenant_id"],
+                str(question or "").strip()[:1000],
+                json.dumps([str(x).strip().upper() for x in stock_codes if str(x).strip()], ensure_ascii=False),
+                str(trace_id or "").strip()[:120],
+                str(intent or "").strip()[:64],
+                int(bool(cache_hit)),
+                max(0, int(latency_ms)),
+                str(summary or "").strip()[:400],
+                str(error or "").strip()[:300],
+            ),
+        )
+        return {"status": "ok"}
+
+    def query_history_list(self, token: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """List latest query records for current user."""
+        me = self.auth_me(token)
+        safe_limit = max(1, min(200, int(limit)))
+        rows = self.store.query_all(
+            """
+            SELECT id, question, stock_codes_json, trace_id, intent, cache_hit, latency_ms, summary, error, created_at
+            FROM query_history
+            WHERE user_id = ? AND tenant_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (me["user_id"], me["tenant_id"], safe_limit),
+        )
+        for row in rows:
+            row["stock_codes"] = self._json_loads_or(row.get("stock_codes_json"), [])
+            row.pop("stock_codes_json", None)
+            row["cache_hit"] = bool(int(row.get("cache_hit", 0) or 0))
+        return rows
+
+    def query_history_clear(self, token: str) -> dict[str, Any]:
+        """Delete current user's query history."""
+        me = self.auth_me(token)
+        self.store.execute(
+            "DELETE FROM query_history WHERE user_id = ? AND tenant_id = ?",
+            (me["user_id"], me["tenant_id"]),
+        )
+        return {"status": "ok"}
+
+    # ----------------- Reports -----------------
+    def save_report_index(
+        self,
+        *,
+        report_id: str,
+        user_id: int | None,
+        tenant_id: int | None,
+        stock_code: str,
+        report_type: str,
+        markdown: str,
+        run_id: str = "",
+        pool_snapshot_id: str = "",
+        template_id: str = "",
+    ) -> None:
+        self.store.execute(
+            """
+            INSERT OR REPLACE INTO report_index (report_id, user_id, tenant_id, stock_code, report_type, run_id, pool_snapshot_id, template_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (report_id, user_id, tenant_id, stock_code, report_type, run_id, pool_snapshot_id, template_id),
         )
         existing = self.store.query_one("SELECT MAX(version) AS v FROM report_version WHERE report_id = ?", (report_id,))
         next_version = int(existing["v"] or 0) + 1
@@ -180,7 +373,7 @@ class WebAppService:
         me = self.auth_me(token)
         return self.store.query_all(
             """
-            SELECT report_id, stock_code, report_type, created_at
+            SELECT report_id, stock_code, report_type, run_id, pool_snapshot_id, template_id, created_at
             FROM report_index
             WHERE user_id = ? AND tenant_id = ?
             ORDER BY created_at DESC
@@ -1601,6 +1794,8 @@ class WebAppService:
         market_tier: str = "",
         listing_board: str = "",
         industry_l1: str = "",
+        industry_l2: str = "",
+        industry_l3: str = "",
         limit: int = 30,
     ) -> list[dict[str, Any]]:
         _ = self.auth_me(token)
@@ -1610,6 +1805,8 @@ class WebAppService:
             market_tier=market_tier,
             listing_board=listing_board,
             industry_l1=industry_l1,
+            industry_l2=industry_l2,
+            industry_l3=industry_l3,
             limit=limit,
         )
 

@@ -34,6 +34,8 @@ from backend.app.observability.tracing import TraceStore
 from backend.app.prompt.registry import PromptRegistry
 from backend.app.prompt.runtime import PromptRuntime
 from backend.app.predict.service import PredictionService, PredictionStore
+from backend.app.query.comparator import QueryComparator
+from backend.app.query.optimizer import QueryOptimizer
 from backend.app.rag.evaluation import RetrievalEvaluator, default_retrieval_dataset
 from backend.app.rag.graphrag import GraphRAGService
 from backend.app.rag.embedding_provider import EmbeddingProvider, EmbeddingRuntimeConfig
@@ -106,6 +108,8 @@ class AShareAgentService:
             store=PredictionStore(),
             history_service=self.ingestion.history_service,
         )
+        # Query Hub optimizer: in-memory cache + timeout guard.
+        self.query_optimizer = QueryOptimizer(cache_size=300, ttl_seconds=180, timeout_seconds=30)
         self.scheduler = LocalJobScheduler()
         self._register_default_jobs()
 
@@ -827,98 +831,174 @@ class AShareAgentService:
         }
 
     def query(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """执行问答主链路并返回标准化响应。"""
+        """Execute query pipeline with cache and history persistence."""
         started_at = time.perf_counter()
         req = QueryRequest(**payload)
-        selected_runtime = self._select_runtime(str(payload.get("workflow_runtime", "")))
+        runtime_name = str(payload.get("workflow_runtime", ""))
+        selected_runtime = self._select_runtime(runtime_name)
+        cache_ctx = {"runtime": selected_runtime.runtime_name, "mode": str(payload.get("mode", ""))}
 
-        # 真实数据优先：每次查询先尝试刷新一次行情与公告，再进入检索。
-        if req.stock_codes:
+        cached = self.query_optimizer.get_cached(req.question, req.stock_codes, cache_ctx)
+        if cached is not None:
+            latency_ms = int((time.perf_counter() - started_at) * 1000)
+            cached["cache_hit"] = True
             try:
-                quote_refresh = [c for c in req.stock_codes if self._needs_quote_refresh(c)]
-                ann_refresh = [c for c in req.stock_codes if self._needs_announcement_refresh(c)]
-                hist_refresh = [c for c in req.stock_codes if self._needs_history_refresh(c)]
-                if quote_refresh:
-                    self.ingest_market_daily(quote_refresh)
-                if ann_refresh:
-                    self.ingest_announcements(ann_refresh)
-                if hist_refresh:
-                    self.ingestion.ingest_history_daily(hist_refresh, limit=260)
+                self.web.query_history_add(
+                    "",
+                    question=req.question,
+                    stock_codes=req.stock_codes,
+                    trace_id=str(cached.get("trace_id", "")),
+                    intent=str(cached.get("intent", "")),
+                    cache_hit=True,
+                    latency_ms=latency_ms,
+                    summary=str(cached.get("answer", ""))[:160],
+                )
             except Exception:
-                # 摄取失败时不阻断问答，交由检索层使用已有数据继续降级运行。
+                # Query history must never block the main response.
                 pass
+            return cached
 
-        # 基于最新摄取数据动态构建检索语料，避免固定示例语料导致输出雷同。
-        self.workflow.retriever = self._build_runtime_retriever(req.stock_codes)
-        enriched_question = self._augment_question_with_history_context(req.question, req.stock_codes)
-        regime_context = self._build_a_share_regime_context(req.stock_codes)
+        def _run_pipeline() -> dict[str, Any]:
+            # Real data first: refresh quote/announcement/history before retrieval.
+            if req.stock_codes:
+                try:
+                    quote_refresh = [c for c in req.stock_codes if self._needs_quote_refresh(c)]
+                    ann_refresh = [c for c in req.stock_codes if self._needs_announcement_refresh(c)]
+                    hist_refresh = [c for c in req.stock_codes if self._needs_history_refresh(c)]
+                    if quote_refresh:
+                        self.ingest_market_daily(quote_refresh)
+                    if ann_refresh:
+                        self.ingest_announcements(ann_refresh)
+                    if hist_refresh:
+                        self.ingestion.ingest_history_daily(hist_refresh, limit=260)
+                except Exception:
+                    # Keep query available even when data refresh partially fails.
+                    pass
 
-        trace_id = self.traces.new_trace()
-        state = AgentState(
-            user_id=req.user_id,
-            # 仅增强模型输入上下文，输出层仍使用用户原始问题文案。
-            question=enriched_question,
-            stock_codes=req.stock_codes,
-            market_regime_context=regime_context,
-            trace_id=trace_id,
-        )
+            self.workflow.retriever = self._build_runtime_retriever(req.stock_codes)
+            enriched_question = self._augment_question_with_history_context(req.question, req.stock_codes)
+            regime_context = self._build_a_share_regime_context(req.stock_codes)
+            trace_id = self.traces.new_trace()
+            state = AgentState(
+                user_id=req.user_id,
+                question=enriched_question,
+                stock_codes=req.stock_codes,
+                market_regime_context=regime_context,
+                trace_id=trace_id,
+            )
 
-        memory_hint = self.memory.list_memory(req.user_id, limit=3)
-        runtime_result = selected_runtime.run(state, memory_hint=memory_hint)
-        state = runtime_result.state
-        state.analysis["workflow_runtime"] = runtime_result.runtime
-        self.traces.emit(trace_id, "workflow_runtime", {"runtime": runtime_result.runtime})
-        answer, merged_citations = self._build_evidence_rich_answer(
-            req.question,
-            req.stock_codes,
-            state.report,
-            state.citations,
-            regime_context=regime_context,
-        )
-        analysis_brief = self._build_analysis_brief(req.stock_codes, merged_citations, regime_context=regime_context)
-        state.report = answer
-        state.citations = merged_citations
+            memory_hint = self.memory.list_memory(req.user_id, limit=3)
+            runtime_result = selected_runtime.run(state, memory_hint=memory_hint)
+            state = runtime_result.state
+            state.analysis["workflow_runtime"] = runtime_result.runtime
+            self.traces.emit(trace_id, "workflow_runtime", {"runtime": runtime_result.runtime})
+            answer, merged_citations = self._build_evidence_rich_answer(
+                req.question,
+                req.stock_codes,
+                state.report,
+                state.citations,
+                regime_context=regime_context,
+            )
+            analysis_brief = self._build_analysis_brief(req.stock_codes, merged_citations, regime_context=regime_context)
+            state.report = answer
+            state.citations = merged_citations
+            self.memory.add_memory(
+                req.user_id,
+                "task",
+                {
+                    "question": req.question,
+                    "summary": state.analysis.get("summary", ""),
+                    "risk_flags": state.risk_flags,
+                    "mode": state.mode,
+                },
+            )
+            self._record_rag_eval_case(req.question, state.evidence_pack, state.citations)
+            self._persist_query_knowledge_memory(
+                user_id=req.user_id,
+                question=req.question,
+                stock_codes=req.stock_codes,
+                state=state,
+                query_type="query",
+            )
 
-        # 写入任务记忆，便于后续对话复用
-        self.memory.add_memory(
-            req.user_id,
-            "task",
-            {
-                "question": req.question,
-                "summary": state.analysis.get("summary", ""),
-                "risk_flags": state.risk_flags,
-                "mode": state.mode,
-            },
-        )
-        self._record_rag_eval_case(req.question, state.evidence_pack, state.citations)
-        latency_ms = int((time.perf_counter() - started_at) * 1000)
-        self._record_rag_retrieval_trace(
-            trace_id=trace_id,
-            query_text=req.question,
-            query_type="query",
-            evidence_pack=state.evidence_pack,
-            citations=state.citations,
-            latency_ms=latency_ms,
-        )
-        self._persist_query_knowledge_memory(
-            user_id=req.user_id,
-            question=req.question,
-            stock_codes=req.stock_codes,
-            state=state,
-            query_type="query",
-        )
+            resp = QueryResponse(
+                trace_id=trace_id,
+                intent=state.intent,  # type: ignore[arg-type]
+                answer=state.report,
+                citations=[Citation(**c) for c in state.citations],
+                risk_flags=state.risk_flags,
+                mode=state.mode,  # type: ignore[arg-type]
+                workflow_runtime=runtime_result.runtime,
+                analysis_brief=analysis_brief,
+            )
+            body = resp.model_dump(mode="json")
+            body["cache_hit"] = False
 
-        resp = QueryResponse(
-            trace_id=trace_id,
-            intent=state.intent,  # type: ignore[arg-type]
-            answer=state.report,
-            citations=[Citation(**c) for c in state.citations],
-            risk_flags=state.risk_flags,
-            mode=state.mode,  # type: ignore[arg-type]
-            workflow_runtime=runtime_result.runtime,
-            analysis_brief=analysis_brief,
-        )
-        return resp.model_dump(mode="json")
+            latency_ms = int((time.perf_counter() - started_at) * 1000)
+            self._record_rag_retrieval_trace(
+                trace_id=trace_id,
+                query_text=req.question,
+                query_type="query",
+                evidence_pack=state.evidence_pack,
+                citations=state.citations,
+                latency_ms=latency_ms,
+            )
+            try:
+                self.web.query_history_add(
+                    "",
+                    question=req.question,
+                    stock_codes=req.stock_codes,
+                    trace_id=trace_id,
+                    intent=str(body.get("intent", "")),
+                    cache_hit=False,
+                    latency_ms=latency_ms,
+                    summary=str(body.get("answer", ""))[:160],
+                )
+            except Exception:
+                pass
+            return body
+
+        result = self.query_optimizer.run_with_timeout(_run_pipeline)
+        self.query_optimizer.set_cached(req.question, req.stock_codes, result, cache_ctx)
+        return result
+
+    def query_compare(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run same question against multiple stocks and return comparison payload."""
+        user_id = str(payload.get("user_id", "")).strip() or "anonymous"
+        question = str(payload.get("question", "")).strip()
+        stock_codes = [str(x).strip().upper() for x in list(payload.get("stock_codes", [])) if str(x).strip()]
+        unique_codes = list(dict.fromkeys(stock_codes))
+        if len(unique_codes) < 2:
+            raise ValueError("query_compare requires at least 2 stock_codes")
+
+        per_stock: list[dict[str, Any]] = []
+        for code in unique_codes:
+            row = self.query(
+                {
+                    "user_id": user_id,
+                    "question": question,
+                    "stock_codes": [code],
+                    "workflow_runtime": payload.get("workflow_runtime", ""),
+                }
+            )
+            per_stock.append(
+                {
+                    "stock_code": code,
+                    "answer": row.get("answer", ""),
+                    "citations": row.get("citations", []),
+                    "risk_flags": row.get("risk_flags", []),
+                    "analysis_brief": row.get("analysis_brief", {}),
+                    "cache_hit": bool(row.get("cache_hit", False)),
+                }
+            )
+
+        return QueryComparator.build(question=question, rows=per_stock)
+
+    def query_history_list(self, token: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        return self.web.query_history_list(token, limit=limit)
+
+    def query_history_clear(self, token: str) -> dict[str, Any]:
+        return self.web.query_history_clear(token)
 
     def query_stream_events(self, payload: dict[str, Any], chunk_size: int = 80):
         """以事件流形式输出问答结果，便于前端逐段渲染。"""
@@ -2019,6 +2099,9 @@ class AShareAgentService:
     def report_generate(self, payload: dict[str, Any]) -> dict[str, Any]:
         """基于问答结果生成报告并缓存。"""
         req = ReportRequest(**payload)
+        run_id = str(payload.get("run_id", "")).strip()
+        pool_snapshot_id = str(payload.get("pool_snapshot_id", "")).strip()
+        template_id = str(payload.get("template_id", "default")).strip() or "default"
         query_result = self.query(
             {
                 "user_id": req.user_id,
@@ -2027,17 +2110,43 @@ class AShareAgentService:
             }
         )
         report_id = str(uuid.uuid4())
+        evidence_refs = [
+            {
+                "source_id": str(c.get("source_id", "")),
+                "source_url": str(c.get("source_url", "")),
+                "reliability_score": float(c.get("reliability_score", 0.0)),
+                "excerpt": str(c.get("excerpt", ""))[:240],
+            }
+            for c in query_result["citations"]
+        ]
+        report_sections = [
+            {"section_id": "summary", "title": "结论摘要", "content": str(query_result["answer"])[:800]},
+            {
+                "section_id": "evidence",
+                "title": "证据清单",
+                "content": "\n".join(f"- {x['source_id']}: {x['excerpt']}" for x in evidence_refs[:8]),
+            },
+            {"section_id": "risk", "title": "风险与反证", "content": "需结合估值、流动性、政策扰动进行反证校验。"},
+            {"section_id": "action", "title": "操作建议", "content": "建议分批验证信号稳定性，避免一次性重仓。"},
+        ]
         markdown = (
             f"# {req.stock_code} 分析报告\n\n"
             f"## 结论\n{query_result['answer']}\n\n"
             f"## 证据\n"
             + "\n".join(f"- {c['source_id']}: {c['excerpt']}" for c in query_result["citations"])
+            + "\n\n## 风险与反证\n需结合估值、流动性、政策扰动进行反证校验。"
+            + "\n\n## 操作建议\n建议分批验证信号稳定性，避免一次性重仓。"
         )
         self._reports[report_id] = {
             "report_id": report_id,
             "trace_id": query_result["trace_id"],
             "markdown": markdown,
             "citations": query_result["citations"],
+            "run_id": run_id,
+            "pool_snapshot_id": pool_snapshot_id,
+            "template_id": template_id,
+            "evidence_refs": evidence_refs,
+            "report_sections": report_sections,
         }
         user_id = None
         tenant_id = None
@@ -2056,14 +2165,22 @@ class AShareAgentService:
             stock_code=req.stock_code,
             report_type=req.report_type,
             markdown=markdown,
+            run_id=run_id,
+            pool_snapshot_id=pool_snapshot_id,
+            template_id=template_id,
         )
         resp = ReportResponse(
             report_id=report_id,
             trace_id=query_result["trace_id"],
             markdown=markdown,
             citations=[Citation(**c) for c in query_result["citations"]],
-        )
-        return resp.model_dump(mode="json")
+        ).model_dump(mode="json")
+        resp["run_id"] = run_id
+        resp["pool_snapshot_id"] = pool_snapshot_id
+        resp["template_id"] = template_id
+        resp["evidence_refs"] = evidence_refs
+        resp["report_sections"] = report_sections
+        return resp
 
     def report_get(self, report_id: str) -> dict[str, Any]:
         """按 ID 查询报告。"""
@@ -2405,9 +2522,69 @@ class AShareAgentService:
     def predict_run(self, payload: dict[str, Any]) -> dict[str, Any]:
         """执行量化预测任务。"""
         stock_codes = payload.get("stock_codes", [])
+        pool_id = str(payload.get("pool_id", "")).strip()
+        token = str(payload.get("token", "")).strip()
+        if pool_id:
+            stock_codes = self.web.watchlist_pool_codes(token, pool_id)
         horizons = payload.get("horizons") or ["5d", "20d"]
         as_of_date = payload.get("as_of_date")
-        return self.prediction.run_prediction(stock_codes=stock_codes, horizons=horizons, as_of_date=as_of_date)
+        result = self.prediction.run_prediction(stock_codes=stock_codes, horizons=horizons, as_of_date=as_of_date)
+        if pool_id:
+            result["pool_id"] = pool_id
+        result["segment_metrics"] = self._predict_segment_metrics(result.get("results", []))
+        return result
+
+    def _predict_segment_metrics(self, items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        if not items:
+            return {"exchange": [], "market_tier": [], "industry_l1": []}
+        codes = [str(x.get("stock_code", "")).strip().upper() for x in items if str(x.get("stock_code", "")).strip()]
+        if not codes:
+            return {"exchange": [], "market_tier": [], "industry_l1": []}
+        placeholders = ",".join(["?"] * len(codes))
+        rows = self.web.store.query_all(
+            f"""
+            SELECT stock_code, exchange, market_tier, industry_l1
+            FROM stock_universe
+            WHERE stock_code IN ({placeholders})
+            """,
+            tuple(codes),
+        )
+        by_code = {str(row.get("stock_code", "")).upper(): row for row in rows}
+        buckets: dict[str, dict[str, dict[str, float]]] = {
+            "exchange": {},
+            "market_tier": {},
+            "industry_l1": {},
+        }
+        for item in items:
+            code = str(item.get("stock_code", "")).upper()
+            seg = by_code.get(code, {})
+            horizons = list(item.get("horizons", []))
+            if not horizons:
+                continue
+            avg_excess = sum(float(h.get("expected_excess_return", 0.0)) for h in horizons) / max(1, len(horizons))
+            avg_up = sum(float(h.get("up_probability", 0.0)) for h in horizons) / max(1, len(horizons))
+            for key in ("exchange", "market_tier", "industry_l1"):
+                label = str(seg.get(key, "")).strip() or "UNKNOWN"
+                bucket = buckets[key].setdefault(label, {"count": 0.0, "avg_expected_excess_return": 0.0, "avg_up_probability": 0.0})
+                bucket["count"] += 1
+                bucket["avg_expected_excess_return"] += avg_excess
+                bucket["avg_up_probability"] += avg_up
+        out: dict[str, list[dict[str, Any]]] = {"exchange": [], "market_tier": [], "industry_l1": []}
+        for key, groups in buckets.items():
+            rows_out: list[dict[str, Any]] = []
+            for label, acc in groups.items():
+                cnt = max(1, int(acc["count"]))
+                rows_out.append(
+                    {
+                        "segment": label,
+                        "count": cnt,
+                        "avg_expected_excess_return": round(acc["avg_expected_excess_return"] / cnt, 6),
+                        "avg_up_probability": round(acc["avg_up_probability"] / cnt, 6),
+                    }
+                )
+            rows_out.sort(key=lambda x: x["segment"])
+            out[key] = rows_out
+        return out
 
     def predict_get(self, run_id: str) -> dict[str, Any]:
         """查询预测任务详情。"""
@@ -2467,6 +2644,31 @@ class AShareAgentService:
 
     def watchlist_delete(self, token: str, stock_code: str) -> dict[str, Any]:
         return self.web.watchlist_delete(token, stock_code)
+
+    def watchlist_pool_list(self, token: str) -> list[dict[str, Any]]:
+        return self.web.watchlist_pool_list(token)
+
+    def watchlist_pool_create(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.web.watchlist_pool_create(
+            token,
+            pool_name=str(payload.get("pool_name", "")),
+            description=str(payload.get("description", "")),
+            is_default=bool(payload.get("is_default", False)),
+        )
+
+    def watchlist_pool_add_stock(self, token: str, pool_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.web.watchlist_pool_add_stock(
+            token,
+            pool_id=pool_id,
+            stock_code=str(payload.get("stock_code", "")),
+            source_filters=payload.get("source_filters", {}),
+        )
+
+    def watchlist_pool_stocks(self, token: str, pool_id: str) -> list[dict[str, Any]]:
+        return self.web.watchlist_pool_stocks(token, pool_id)
+
+    def watchlist_pool_delete_stock(self, token: str, pool_id: str, stock_code: str) -> dict[str, Any]:
+        return self.web.watchlist_pool_delete_stock(token, pool_id, stock_code)
 
     def dashboard_overview(self, token: str) -> dict[str, Any]:
         return self.web.dashboard_overview(token)
@@ -4319,6 +4521,8 @@ class AShareAgentService:
         market_tier: str = "",
         listing_board: str = "",
         industry_l1: str = "",
+        industry_l2: str = "",
+        industry_l3: str = "",
         limit: int = 30,
     ) -> list[dict[str, Any]]:
         return self.web.stock_universe_search(
@@ -4328,6 +4532,8 @@ class AShareAgentService:
             market_tier=market_tier,
             listing_board=listing_board,
             industry_l1=industry_l1,
+            industry_l2=industry_l2,
+            industry_l3=industry_l3,
             limit=limit,
         )
 

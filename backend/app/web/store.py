@@ -17,6 +17,8 @@ class WebStore:
 
     def _init_schema(self) -> None:
         with self._lock:
+            # 兼容历史库：老版本 stock_universe 缺少分层字段时，先补列再执行索引创建。
+            self._pre_migrate_legacy_schema()
             self.conn.executescript(
                 """
             CREATE TABLE IF NOT EXISTS user (
@@ -57,6 +59,26 @@ class WebStore:
                 UNIQUE(user_id, tenant_id, stock_code)
             );
 
+            CREATE TABLE IF NOT EXISTS watchlist_pool (
+                pool_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                tenant_id INTEGER NOT NULL,
+                pool_name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS watchlist_pool_stock (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pool_id TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                source_filters_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(pool_id, stock_code)
+            );
+
             CREATE TABLE IF NOT EXISTS dashboard_pref (
                 user_id INTEGER NOT NULL,
                 tenant_id INTEGER NOT NULL,
@@ -65,12 +87,30 @@ class WebStore:
                 PRIMARY KEY(user_id, tenant_id, key)
             );
 
+            CREATE TABLE IF NOT EXISTS query_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                tenant_id INTEGER NOT NULL,
+                question TEXT NOT NULL,
+                stock_codes_json TEXT NOT NULL DEFAULT '[]',
+                trace_id TEXT NOT NULL DEFAULT '',
+                intent TEXT NOT NULL DEFAULT '',
+                cache_hit INTEGER NOT NULL DEFAULT 0,
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                summary TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS report_index (
                 report_id TEXT PRIMARY KEY,
                 user_id INTEGER,
                 tenant_id INTEGER,
                 stock_code TEXT NOT NULL,
                 report_type TEXT NOT NULL,
+                run_id TEXT NOT NULL DEFAULT '',
+                pool_snapshot_id TEXT NOT NULL DEFAULT '',
+                template_id TEXT NOT NULL DEFAULT '',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -130,9 +170,14 @@ class WebStore:
                 stock_code TEXT PRIMARY KEY,
                 stock_name TEXT NOT NULL,
                 exchange TEXT NOT NULL,
+                exchange_name TEXT NOT NULL DEFAULT '',
                 market_tier TEXT NOT NULL DEFAULT '',
                 listing_board TEXT NOT NULL,
+                board_code TEXT NOT NULL DEFAULT '',
                 industry_l1 TEXT NOT NULL DEFAULT '',
+                industry_l2 TEXT NOT NULL DEFAULT '',
+                industry_l3 TEXT NOT NULL DEFAULT '',
+                is_active INTEGER NOT NULL DEFAULT 1,
                 source TEXT NOT NULL DEFAULT '',
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
@@ -362,6 +407,12 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_stock_universe_tier ON stock_universe(market_tier);
             CREATE INDEX IF NOT EXISTS idx_stock_universe_board ON stock_universe(listing_board);
             CREATE INDEX IF NOT EXISTS idx_stock_universe_industry ON stock_universe(industry_l1);
+            CREATE INDEX IF NOT EXISTS idx_stock_universe_industry_l2 ON stock_universe(industry_l2);
+            CREATE INDEX IF NOT EXISTS idx_stock_universe_industry_l3 ON stock_universe(industry_l3);
+            CREATE INDEX IF NOT EXISTS idx_watchlist_pool_user ON watchlist_pool(user_id, tenant_id, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_watchlist_pool_stock_pool ON watchlist_pool_stock(pool_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_watchlist_pool_stock_code ON watchlist_pool_stock(stock_code);
+            CREATE INDEX IF NOT EXISTS idx_query_history_user_created ON query_history(user_id, tenant_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_stock_industry_map_code ON stock_universe_industry_map(stock_code);
             CREATE INDEX IF NOT EXISTS idx_stock_industry_map_l1 ON stock_universe_industry_map(industry_l1);
             CREATE INDEX IF NOT EXISTS idx_rag_doc_chunk_doc_status ON rag_doc_chunk(doc_id, effective_status, chunk_no);
@@ -386,6 +437,14 @@ class WebStore:
             )
             # 兼容历史库：补齐新增列
             self._ensure_column("stock_universe", "market_tier", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("stock_universe", "exchange_name", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("stock_universe", "board_code", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("stock_universe", "industry_l2", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("stock_universe", "industry_l3", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("stock_universe", "is_active", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column("report_index", "run_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("report_index", "pool_snapshot_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("report_index", "template_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("deep_think_round", "task_graph", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column("deep_think_round", "replan_triggered", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("deep_think_round", "stop_reason", "TEXT NOT NULL DEFAULT ''")
@@ -393,6 +452,23 @@ class WebStore:
             self._ensure_column("deep_think_export_task", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("deep_think_export_task", "max_attempts", "INTEGER NOT NULL DEFAULT 2")
             self.conn.commit()
+
+    def _table_exists(self, table: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            (table,),
+        ).fetchone()
+        return row is not None
+
+    def _pre_migrate_legacy_schema(self) -> None:
+        if not self._table_exists("stock_universe"):
+            return
+        self._ensure_column("stock_universe", "market_tier", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("stock_universe", "exchange_name", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("stock_universe", "board_code", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("stock_universe", "industry_l2", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("stock_universe", "industry_l3", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("stock_universe", "is_active", "INTEGER NOT NULL DEFAULT 1")
 
     def _ensure_column(self, table: str, column: str, sql_type: str) -> None:
         cols = self.conn.execute(f"PRAGMA table_info({table})").fetchall()

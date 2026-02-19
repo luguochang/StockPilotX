@@ -62,6 +62,29 @@ def create_app() -> FastAPI:
     def query(payload: dict):
         return svc.query(payload)
 
+    @app.post("/v1/query/compare")
+    def query_compare(payload: dict):
+        try:
+            return svc.query_compare(payload)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+
+    @app.get("/v1/query/history")
+    def query_history(limit: int = 50, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.query_history_list(token, limit=limit)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.delete("/v1/query/history")
+    def query_history_clear(authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.query_history_clear(token)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     @app.post("/v1/query/stream")
     def query_stream(payload: dict):
         """SSE 流式接口：按阶段推送问答内容，前端可实时渲染。"""
@@ -338,7 +361,11 @@ def create_app() -> FastAPI:
 
     # ---------------- Prediction APIs ----------------
     @app.post("/v1/predict/run")
-    def predict_run(payload: dict):
+    def predict_run(payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        if token and not str(payload.get("token", "")).strip():
+            payload = dict(payload)
+            payload["token"] = token
         return svc.predict_run(payload)
 
     @app.get("/v1/predict/evals/latest")
@@ -412,6 +439,46 @@ def create_app() -> FastAPI:
         token = _extract_bearer_token(authorization)
         try:
             return svc.watchlist_delete(token, stock_code)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/watchlist/pools")
+    def watchlist_pool_list(authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.watchlist_pool_list(token)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.post("/v1/watchlist/pools")
+    def watchlist_pool_create(payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.watchlist_pool_create(token, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/watchlist/pools/{pool_id}/stocks")
+    def watchlist_pool_stocks(pool_id: str, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.watchlist_pool_stocks(token, pool_id)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.post("/v1/watchlist/pools/{pool_id}/stocks")
+    def watchlist_pool_add_stock(pool_id: str, payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.watchlist_pool_add_stock(token, pool_id, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.delete("/v1/watchlist/pools/{pool_id}/stocks/{stock_code}")
+    def watchlist_pool_delete_stock(pool_id: str, stock_code: str, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.watchlist_pool_delete_stock(token, pool_id, stock_code)
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
@@ -750,6 +817,8 @@ def create_app() -> FastAPI:
         market_tier: str = "",
         listing_board: str = "",
         industry_l1: str = "",
+        industry_l2: str = "",
+        industry_l3: str = "",
         limit: int = 30,
     ):
         token = _extract_optional_bearer_token(authorization)
@@ -761,6 +830,8 @@ def create_app() -> FastAPI:
                 market_tier=market_tier,
                 listing_board=listing_board,
                 industry_l1=industry_l1,
+                industry_l2=industry_l2,
+                industry_l3=industry_l3,
                 limit=limit,
             )
         except Exception as ex:  # noqa: BLE001

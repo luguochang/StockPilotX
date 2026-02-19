@@ -112,6 +112,45 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(code2, 200)
         self.assertEqual(body2["workflow_runtime"], "direct")
 
+    def test_query_cache_compare_and_history(self) -> None:
+        req = {
+            "user_id": "api-u-cache",
+            "question": "query cache smoke for SH600000",
+            "stock_codes": ["SH600000"],
+        }
+        c1, body1 = self._post("/v1/query", req)
+        self.assertEqual(c1, 200)
+        self.assertFalse(bool(body1.get("cache_hit", True)))
+
+        c2, body2 = self._post("/v1/query", req)
+        self.assertEqual(c2, 200)
+        self.assertTrue(bool(body2.get("cache_hit", False)))
+
+        c3, compared = self._post(
+            "/v1/query/compare",
+            {
+                "user_id": "api-u-compare",
+                "question": "compare SH600000 vs SZ000001",
+                "stock_codes": ["SH600000", "SZ000001"],
+            },
+        )
+        self.assertEqual(c3, 200)
+        self.assertEqual(int(compared.get("count", 0)), 2)
+        self.assertGreaterEqual(len(compared.get("items", [])), 2)
+
+        c4, history_rows = self._get("/v1/query/history?limit=20")
+        self.assertEqual(c4, 200)
+        self.assertTrue(isinstance(history_rows, list))
+        self.assertGreaterEqual(len(history_rows), 1)
+
+        clear_req = urllib.request.Request(self.base_url + "/v1/query/history", method="DELETE")
+        with urllib.request.urlopen(clear_req, timeout=8) as resp:
+            self.assertEqual(resp.status, 200)
+
+        c5, history_after = self._get("/v1/query/history?limit=20")
+        self.assertEqual(c5, 200)
+        self.assertEqual(len(history_after), 0)
+
     def test_query_stream(self) -> None:
         body = json.dumps(
             {
