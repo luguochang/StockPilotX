@@ -6,6 +6,7 @@ import {
   Button,
   Card,
   Col,
+  Collapse,
   Input,
   InputNumber,
   Progress,
@@ -18,7 +19,6 @@ import {
   Tag,
   Typography,
 } from "antd";
-import type { ColumnsType } from "antd/es/table";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
 const { Title, Text, Paragraph } = Typography;
@@ -26,90 +26,7 @@ const { Title, Text, Paragraph } = Typography;
 type RagMode = "business" | "ops";
 type RagOpsTab = "source" | "chunk" | "memory" | "trace";
 type ChunkStatus = "active" | "review" | "rejected" | "archived";
-
-type RagSourcePolicy = {
-  source: string;
-  auto_approve: boolean;
-  trust_score: number;
-  enabled: boolean;
-  updated_at?: string;
-};
-
-type RagDocChunk = {
-  chunk_id: string;
-  doc_id: string;
-  chunk_no: number;
-  source: string;
-  source_url: string;
-  effective_status: string;
-  quality_score: number;
-  stock_codes: string[];
-  industry_tags: string[];
-  updated_at?: string;
-};
-
-type RagQAMemory = {
-  memory_id: string;
-  user_id: string;
-  stock_code: string;
-  query_text: string;
-  summary_text: string;
-  risk_flags: string[];
-  intent: string;
-  quality_score: number;
-  retrieval_enabled: boolean;
-  created_at?: string;
-};
-
-type RagTraceItem = {
-  id: number;
-  trace_id: string;
-  query_text: string;
-  query_type: string;
-  retrieved_ids: string[];
-  selected_ids: string[];
-  latency_ms: number;
-  created_at?: string;
-};
-
-type RagTraceResponse = {
-  trace_id: string;
-  count: number;
-  items: RagTraceItem[];
-};
-
-type RagDashboardSummary = {
-  doc_total: number;
-  active_chunks: number;
-  review_pending: number;
-  qa_memory_total: number;
-  retrieval_hit_rate_7d: number;
-  retrieval_trace_count_7d: number;
-  last_reindex_at: string;
-};
-
-type RagUploadAsset = {
-  upload_id: string;
-  doc_id: string;
-  filename: string;
-  source: string;
-  file_size: number;
-  content_type: string;
-  status: string;
-  parse_note: string;
-  created_at?: string;
-  updated_at?: string;
-};
-
-type RagUploadWorkflowResponse = {
-  status: string;
-  result?: {
-    status?: string;
-    dedupe_hit?: boolean;
-    upload_id?: string;
-    doc_id?: string;
-  };
-};
+type RagUploadPreset = "financial_report" | "announcement" | "research" | "meeting_note" | "custom";
 
 const CHUNK_STATUS_OPTIONS: Array<{ label: string; value: ChunkStatus }> = [
   { label: "active", value: "active" },
@@ -118,29 +35,58 @@ const CHUNK_STATUS_OPTIONS: Array<{ label: string; value: ChunkStatus }> = [
   { label: "archived", value: "archived" },
 ];
 
+const SOURCE_OPTIONS = [
+  { label: "user_upload", value: "user_upload" },
+  { label: "cninfo", value: "cninfo" },
+  { label: "eastmoney", value: "eastmoney" },
+  { label: "research", value: "research" },
+];
+
+// 业务模式预设：用于降低输入复杂度，默认给出来源与标签。
+const PRESET_CONFIG: Record<RagUploadPreset, { label: string; source: string; tags: string[]; hint: string }> = {
+  financial_report: { label: "财报", source: "eastmoney", tags: ["财报"], hint: "适合财报、业绩快报和财务附注。" },
+  announcement: { label: "公告", source: "cninfo", tags: ["公告"], hint: "适合公告、问询函、回复函和重大事项披露。" },
+  research: { label: "研报", source: "research", tags: ["研报"], hint: "适合券商研报、行业点评和策略报告。" },
+  meeting_note: { label: "会议纪要", source: "user_upload", tags: ["会议纪要"], hint: "适合路演纪要、电话会纪要和调研摘要。" },
+  custom: { label: "自定义", source: "user_upload", tags: [], hint: "保留完整自定义能力，可手动配置来源和标签。" },
+};
+
+function parseCommaValues(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0);
+}
+
 export default function RagCenterPage() {
   const [mode, setMode] = useState<RagMode>("business");
+  const [tab, setTab] = useState<RagOpsTab>("source");
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
-  const [dashboard, setDashboard] = useState<RagDashboardSummary | null>(null);
-  const [uploadRows, setUploadRows] = useState<RagUploadAsset[]>([]);
+  const [dashboard, setDashboard] = useState<Record<string, any> | null>(null);
+  const [uploadRows, setUploadRows] = useState<Record<string, any>[]>([]);
+  const [sourceRows, setSourceRows] = useState<Record<string, any>[]>([]);
+  const [chunkRows, setChunkRows] = useState<Record<string, any>[]>([]);
+  const [memoryRows, setMemoryRows] = useState<Record<string, any>[]>([]);
+  const [traceRows, setTraceRows] = useState<Record<string, any>[]>([]);
+  const [traceCount, setTraceCount] = useState(0);
+
   const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadPreset, setUploadPreset] = useState<RagUploadPreset>("financial_report");
   const [uploadSource, setUploadSource] = useState("user_upload");
   const [uploadStockCodes, setUploadStockCodes] = useState("");
   const [uploadTags, setUploadTags] = useState("");
   const [uploadAutoIndex, setUploadAutoIndex] = useState(true);
+  const [showUploadAdvanced, setShowUploadAdvanced] = useState(false);
 
-  const [tab, setTab] = useState<RagOpsTab>("source");
-  const [sourceRows, setSourceRows] = useState<RagSourcePolicy[]>([]);
   const [editSource, setEditSource] = useState("user_upload");
   const [editAutoApprove, setEditAutoApprove] = useState(false);
   const [editTrustScore, setEditTrustScore] = useState(0.7);
   const [editEnabled, setEditEnabled] = useState(true);
 
-  const [chunkRows, setChunkRows] = useState<RagDocChunk[]>([]);
   const [chunkDocId, setChunkDocId] = useState("");
   const [chunkSource, setChunkSource] = useState("");
   const [chunkStatusFilter, setChunkStatusFilter] = useState("");
@@ -148,21 +94,25 @@ export default function RagCenterPage() {
   const [chunkLimit, setChunkLimit] = useState(40);
   const [chunkActionStatus, setChunkActionStatus] = useState<ChunkStatus>("review");
 
-  const [memoryRows, setMemoryRows] = useState<RagQAMemory[]>([]);
   const [memoryStockCode, setMemoryStockCode] = useState("");
   const [memoryLimit, setMemoryLimit] = useState(40);
   const [memoryRetrievalEnabled, setMemoryRetrievalEnabled] = useState<number>(-1);
 
-  const [traceRows, setTraceRows] = useState<RagTraceItem[]>([]);
   const [traceId, setTraceId] = useState("");
   const [traceLimit, setTraceLimit] = useState(50);
-  const [traceCount, setTraceCount] = useState(0);
 
-  // 页面首次进入时先拉取业务看板，避免用户看到空白状态。
   useEffect(() => {
     refreshBusiness().catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 当用户切换到非 custom 预设时，同步默认来源与标签，避免重复填写。
+  useEffect(() => {
+    if (uploadPreset === "custom") return;
+    const preset = PRESET_CONFIG[uploadPreset];
+    setUploadSource(preset.source);
+    setUploadTags(preset.tags.join(","));
+  }, [uploadPreset]);
 
   async function parseOrThrow(resp: Response) {
     const body = await resp.json();
@@ -186,9 +136,7 @@ export default function RagCenterPage() {
         }
         const bytes = new Uint8Array(value);
         let binary = "";
-        for (let i = 0; i < bytes.length; i += 1) {
-          binary += String.fromCharCode(bytes[i]);
-        }
+        for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
         resolve(btoa(binary));
       };
       reader.onerror = () => reject(new Error("文件读取失败"));
@@ -196,30 +144,17 @@ export default function RagCenterPage() {
     });
   }
 
-  function parseCommaValues(raw: string): string[] {
-    return raw
-      .split(",")
-      .map((x) => x.trim())
-      .filter((x) => x.length > 0);
-  }
-
-  async function loadBusinessDashboard() {
-    const resp = await fetch(`${API_BASE}/v1/rag/dashboard`);
-    const body = (await parseOrThrow(resp)) as RagDashboardSummary;
-    setDashboard(body);
-  }
-
-  async function loadBusinessUploads() {
-    const resp = await fetch(`${API_BASE}/v1/rag/uploads?limit=30`);
-    const body = (await parseOrThrow(resp)) as RagUploadAsset[];
-    setUploadRows(Array.isArray(body) ? body : []);
-  }
-
   async function refreshBusiness() {
     setLoading(true);
     resetFeedback();
     try {
-      await Promise.all([loadBusinessDashboard(), loadBusinessUploads()]);
+      // 业务模式只依赖看板和上传记录，保证刷新速度与稳定性。
+      const [dashboardResp, uploadsResp] = await Promise.all([
+        fetch(`${API_BASE}/v1/rag/dashboard`),
+        fetch(`${API_BASE}/v1/rag/uploads?limit=30`),
+      ]);
+      setDashboard((await parseOrThrow(dashboardResp)) as Record<string, any>);
+      setUploadRows(((await parseOrThrow(uploadsResp)) as Record<string, any>[]) ?? []);
       setMessage("RAG 业务看板已刷新");
     } catch (e) {
       setError(e instanceof Error ? e.message : "刷新业务看板失败");
@@ -237,13 +172,16 @@ export default function RagCenterPage() {
     resetFeedback();
     try {
       const contentBase64 = await fileToBase64(uploadFile);
+      const preset = PRESET_CONFIG[uploadPreset];
+      const normalizedTags = parseCommaValues(uploadTags);
       const payload = {
         filename: uploadFile.name,
         content_type: uploadFile.type,
         content_base64: contentBase64,
-        source: uploadSource,
+        source: uploadSource || preset.source,
         stock_codes: parseCommaValues(uploadStockCodes).map((x) => x.toUpperCase()),
-        tags: parseCommaValues(uploadTags),
+        // 若用户未填标签则自动退回预设标签，保证检索可用元数据。
+        tags: normalizedTags.length ? normalizedTags : preset.tags,
         auto_index: uploadAutoIndex,
         user_id: "frontend-rag",
       };
@@ -252,29 +190,27 @@ export default function RagCenterPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const body = (await parseOrThrow(resp)) as RagUploadWorkflowResponse;
-      const dedupeHit = Boolean(body?.result?.dedupe_hit);
-      if (dedupeHit) {
+      const body = (await parseOrThrow(resp)) as Record<string, any>;
+      if (Boolean(body?.result?.dedupe_hit)) {
         setMessage(`检测到重复文件，已复用既有资产：${String(body?.result?.doc_id ?? "-")}`);
       } else {
         setMessage(`上传并入库完成：${String(body?.result?.doc_id ?? "-")}`);
       }
-      await Promise.all([loadBusinessDashboard(), loadBusinessUploads()]);
+      await refreshBusiness();
     } catch (e) {
       setError(e instanceof Error ? e.message : "上传失败");
     } finally {
       setUploading(false);
     }
   }
-
   async function loadSourcePolicy() {
     setLoading(true);
     resetFeedback();
     try {
       const resp = await fetch(`${API_BASE}/v1/rag/source-policy`);
-      const rows = (await parseOrThrow(resp)) as RagSourcePolicy[];
+      const rows = (await parseOrThrow(resp)) as Record<string, any>[];
       setSourceRows(rows);
-      setMessage(`来源策略已加载，共 ${rows.length} 条。`);
+      setMessage(`来源策略已加载，共 ${rows.length} 条`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "加载来源策略失败");
     } finally {
@@ -291,11 +227,7 @@ export default function RagCenterPage() {
       const resp = await fetch(`${API_BASE}/v1/rag/source-policy/${encodeURIComponent(source)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          auto_approve: editAutoApprove,
-          trust_score: Number(editTrustScore),
-          enabled: editEnabled,
-        }),
+        body: JSON.stringify({ auto_approve: editAutoApprove, trust_score: Number(editTrustScore), enabled: editEnabled }),
       });
       await parseOrThrow(resp);
       await loadSourcePolicy();
@@ -318,9 +250,9 @@ export default function RagCenterPage() {
       if (chunkStockCode.trim()) params.set("stock_code", chunkStockCode.trim().toUpperCase());
       params.set("limit", String(Math.max(1, Math.min(200, chunkLimit))));
       const resp = await fetch(`${API_BASE}/v1/rag/docs/chunks?${params.toString()}`);
-      const rows = (await parseOrThrow(resp)) as RagDocChunk[];
+      const rows = (await parseOrThrow(resp)) as Record<string, any>[];
       setChunkRows(rows);
-      setMessage(`文档资产已加载，共 ${rows.length} 条。`);
+      setMessage(`文档资产已加载，共 ${rows.length} 条`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "加载文档资产失败");
     } finally {
@@ -356,9 +288,9 @@ export default function RagCenterPage() {
       if (memoryRetrievalEnabled >= 0) params.set("retrieval_enabled", String(memoryRetrievalEnabled));
       params.set("limit", String(Math.max(1, Math.min(200, memoryLimit))));
       const resp = await fetch(`${API_BASE}/v1/rag/qa-memory?${params.toString()}`);
-      const rows = (await parseOrThrow(resp)) as RagQAMemory[];
+      const rows = (await parseOrThrow(resp)) as Record<string, any>[];
       setMemoryRows(rows);
-      setMessage(`共享问答语料已加载，共 ${rows.length} 条。`);
+      setMessage(`共享问答语料已加载，共 ${rows.length} 条`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "加载共享问答语料失败");
     } finally {
@@ -393,11 +325,11 @@ export default function RagCenterPage() {
       if (traceId.trim()) params.set("trace_id", traceId.trim());
       params.set("limit", String(Math.max(1, Math.min(300, traceLimit))));
       const resp = await fetch(`${API_BASE}/v1/ops/rag/retrieval-trace?${params.toString()}`);
-      const body = (await parseOrThrow(resp)) as RagTraceResponse;
-      const rows = Array.isArray(body.items) ? body.items : [];
+      const body = (await parseOrThrow(resp)) as Record<string, any>;
+      const rows = (body.items ?? []) as Record<string, any>[];
       setTraceRows(rows);
       setTraceCount(Number(body.count ?? rows.length));
-      setMessage(`检索追踪已加载，共 ${Number(body.count ?? rows.length)} 条。`);
+      setMessage(`检索追踪已加载，共 ${Number(body.count ?? rows.length)} 条`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "加载检索追踪失败");
     } finally {
@@ -416,7 +348,7 @@ export default function RagCenterPage() {
       });
       const body = await parseOrThrow(resp);
       setMessage(`索引重建完成：backend=${String(body.index_backend ?? "-")} count=${String(body.indexed_count ?? "-")}`);
-      await loadBusinessDashboard();
+      await refreshBusiness();
     } catch (e) {
       setError(e instanceof Error ? e.message : "重建索引失败");
     } finally {
@@ -424,118 +356,46 @@ export default function RagCenterPage() {
     }
   }
 
-  const sourceColumns: ColumnsType<RagSourcePolicy> = [
+  const sourceColumns: any[] = [
     { title: "Source", dataIndex: "source", key: "source", width: 220 },
-    {
-      title: "Auto Approve",
-      dataIndex: "auto_approve",
-      key: "auto_approve",
-      width: 130,
-      render: (v: boolean) => <Tag color={v ? "green" : "orange"}>{String(Boolean(v))}</Tag>,
-    },
-    {
-      title: "Trust",
-      dataIndex: "trust_score",
-      key: "trust_score",
-      width: 100,
-      render: (v: number) => Number(v ?? 0).toFixed(2),
-    },
-    {
-      title: "Enabled",
-      dataIndex: "enabled",
-      key: "enabled",
-      width: 110,
-      render: (v: boolean) => <Tag color={v ? "green" : "red"}>{String(Boolean(v))}</Tag>,
-    },
+    { title: "Auto Approve", dataIndex: "auto_approve", key: "auto_approve", width: 130, render: (v: boolean) => <Tag color={v ? "green" : "orange"}>{String(Boolean(v))}</Tag> },
+    { title: "Trust", dataIndex: "trust_score", key: "trust_score", width: 100, render: (v: number) => Number(v ?? 0).toFixed(2) },
+    { title: "Enabled", dataIndex: "enabled", key: "enabled", width: 110, render: (v: boolean) => <Tag color={v ? "green" : "red"}>{String(Boolean(v))}</Tag> },
     { title: "Updated", dataIndex: "updated_at", key: "updated_at" },
   ];
 
-  const chunkColumns: ColumnsType<RagDocChunk> = [
+  const chunkColumns: any[] = [
     { title: "Chunk ID", dataIndex: "chunk_id", key: "chunk_id", width: 220 },
     { title: "Doc ID", dataIndex: "doc_id", key: "doc_id", width: 150 },
     { title: "No", dataIndex: "chunk_no", key: "chunk_no", width: 70 },
     { title: "Source", dataIndex: "source", key: "source", width: 120 },
-    {
-      title: "Status",
-      dataIndex: "effective_status",
-      key: "effective_status",
-      width: 120,
-      render: (v: string) => <Tag color={v === "active" ? "green" : v === "review" ? "gold" : v === "rejected" ? "red" : "default"}>{v}</Tag>,
-    },
-    {
-      title: "Quality",
-      dataIndex: "quality_score",
-      key: "quality_score",
-      width: 90,
-      render: (v: number) => Number(v ?? 0).toFixed(2),
-    },
-    {
-      title: "Stocks",
-      dataIndex: "stock_codes",
-      key: "stock_codes",
-      render: (v: string[]) => <Text style={{ color: "#475569" }}>{Array.isArray(v) ? v.join(", ") : ""}</Text>,
-    },
+    { title: "Status", dataIndex: "effective_status", key: "effective_status", width: 120, render: (v: string) => <Tag color={v === "active" ? "green" : v === "review" ? "gold" : v === "rejected" ? "red" : "default"}>{v}</Tag> },
+    { title: "Quality", dataIndex: "quality_score", key: "quality_score", width: 90, render: (v: number) => Number(v ?? 0).toFixed(2) },
+    { title: "Stocks", dataIndex: "stock_codes", key: "stock_codes", render: (v: string[]) => <Text style={{ color: "#475569" }}>{Array.isArray(v) ? v.join(", ") : ""}</Text> },
   ];
 
-  const memoryColumns: ColumnsType<RagQAMemory> = [
+  const memoryColumns: any[] = [
     { title: "Memory ID", dataIndex: "memory_id", key: "memory_id", width: 220 },
     { title: "Stock", dataIndex: "stock_code", key: "stock_code", width: 100 },
     { title: "Intent", dataIndex: "intent", key: "intent", width: 96 },
-    {
-      title: "Quality",
-      dataIndex: "quality_score",
-      key: "quality_score",
-      width: 96,
-      render: (v: number) => Number(v ?? 0).toFixed(2),
-    },
-    {
-      title: "Retrieval",
-      dataIndex: "retrieval_enabled",
-      key: "retrieval_enabled",
-      width: 110,
-      render: (v: boolean) => <Tag color={v ? "green" : "orange"}>{String(Boolean(v))}</Tag>,
-    },
-    {
-      title: "Summary",
-      dataIndex: "summary_text",
-      key: "summary_text",
-      render: (v: string) => <Text style={{ color: "#334155" }}>{String(v ?? "").slice(0, 120)}</Text>,
-    },
+    { title: "Quality", dataIndex: "quality_score", key: "quality_score", width: 96, render: (v: number) => Number(v ?? 0).toFixed(2) },
+    { title: "Retrieval", dataIndex: "retrieval_enabled", key: "retrieval_enabled", width: 110, render: (v: boolean) => <Tag color={v ? "green" : "orange"}>{String(Boolean(v))}</Tag> },
+    { title: "Summary", dataIndex: "summary_text", key: "summary_text", render: (v: string) => <Text style={{ color: "#334155" }}>{String(v ?? "").slice(0, 120)}</Text> },
   ];
 
-  const traceColumns: ColumnsType<RagTraceItem> = [
+  const traceColumns: any[] = [
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
     { title: "Trace ID", dataIndex: "trace_id", key: "trace_id", width: 220 },
     { title: "Type", dataIndex: "query_type", key: "query_type", width: 120 },
     { title: "Latency(ms)", dataIndex: "latency_ms", key: "latency_ms", width: 120 },
-    {
-      title: "Retrieved -> Selected",
-      key: "selected",
-      render: (_, row) => (
-        <Text style={{ color: "#334155" }}>
-          {(row.retrieved_ids ?? []).slice(0, 3).join(", ")} {"->"} {(row.selected_ids ?? []).slice(0, 3).join(", ")}
-        </Text>
-      ),
-    },
+    { title: "Retrieved -> Selected", key: "selected", render: (_: unknown, row: any) => <Text style={{ color: "#334155" }}>{(row.retrieved_ids ?? []).slice(0, 3).join(", ")} {"->"} {(row.selected_ids ?? []).slice(0, 3).join(", ")}</Text> },
   ];
 
-  const uploadColumns: ColumnsType<RagUploadAsset> = [
+  const uploadColumns: any[] = [
     { title: "文件", dataIndex: "filename", key: "filename", width: 220 },
     { title: "来源", dataIndex: "source", key: "source", width: 110 },
-    {
-      title: "状态",
-      dataIndex: "status",
-      key: "status",
-      width: 120,
-      render: (v: string) => <Tag color={v === "active" ? "green" : v === "review" ? "gold" : v === "rejected" ? "red" : "blue"}>{v}</Tag>,
-    },
-    {
-      title: "大小",
-      dataIndex: "file_size",
-      key: "file_size",
-      width: 110,
-      render: (v: number) => `${(Number(v ?? 0) / 1024).toFixed(1)} KB`,
-    },
+    { title: "状态", dataIndex: "status", key: "status", width: 120, render: (v: string) => <Tag color={v === "active" ? "green" : v === "review" ? "gold" : v === "rejected" ? "red" : "blue"}>{v}</Tag> },
+    { title: "大小", dataIndex: "file_size", key: "file_size", width: 110, render: (v: number) => `${(Number(v ?? 0) / 1024).toFixed(1)} KB` },
     { title: "Doc ID", dataIndex: "doc_id", key: "doc_id", width: 170 },
     { title: "更新时间", dataIndex: "updated_at", key: "updated_at" },
   ];
@@ -551,9 +411,9 @@ export default function RagCenterPage() {
     <main className="container shell-fade-in">
       <Card className="premium-card">
         <Space direction="vertical" style={{ width: "100%" }} size={8}>
-          <Title level={2} style={{ margin: 0 }}>RAG 运营台</Title>
+          <Title level={2} style={{ margin: 0 }}>RAG 语料中心</Title>
           <Paragraph style={{ margin: 0, color: "#475569", maxWidth: 920 }}>
-            业务模式面向研究用户，关注“上传-入库-可检索”；运维模式保留全量治理能力与排障操作。
+            默认提供业务模式：只保留上传入库主流程。运维模式保留完整治理能力，按需切换。
           </Paragraph>
           <Segmented
             value={mode}
@@ -571,19 +431,108 @@ export default function RagCenterPage() {
 
       {mode === "business" ? (
         <>
-          <Card className="premium-card" style={{ marginTop: 10 }}>
-            <Space direction="vertical" style={{ width: "100%" }} size={10}>
+          <Card className="premium-card" style={{ marginTop: 10 }} title="快速上传（业务入口）">
+            <Space direction="vertical" style={{ width: "100%" }} size={12}>
+              <Text style={{ color: "#64748b" }}>
+                步骤：选择资料类型 → 选择文件 → 点击“上传并生效”。默认无需填写复杂参数。
+              </Text>
+
               <Space wrap>
-                <Button type="primary" onClick={refreshBusiness} loading={loading}>刷新业务看板</Button>
-                <Button onClick={runReindex} loading={loading}>重建向量索引</Button>
-                <Text style={{ color: "#64748b" }}>
-                  最近重建：{dashboard?.last_reindex_at || "-"}
-                </Text>
+                <Text style={{ color: "#334155" }}>资料类型</Text>
+                <Segmented
+                  value={uploadPreset}
+                  onChange={(v) => setUploadPreset(v as RagUploadPreset)}
+                  options={[
+                    { label: "财报", value: "financial_report" },
+                    { label: "公告", value: "announcement" },
+                    { label: "研报", value: "research" },
+                    { label: "会议纪要", value: "meeting_note" },
+                    { label: "自定义", value: "custom" },
+                  ]}
+                />
               </Space>
+
+              <Alert
+                type="info"
+                showIcon
+                message={`当前类型：${PRESET_CONFIG[uploadPreset].label}`}
+                description={PRESET_CONFIG[uploadPreset].hint}
+              />
+
+              <input
+                type="file"
+                onChange={(e) => {
+                  const file = e.target.files?.[0] ?? null;
+                  setUploadFile(file);
+                }}
+              />
+
+              <Space wrap>
+                <Tag color={uploadFile ? "green" : "default"}>{uploadFile ? "文件已就绪" : "请先选择文件"}</Tag>
+                <Tag>来源：{uploadSource || "-"}</Tag>
+                <Tag>自动索引：{String(uploadAutoIndex)}</Tag>
+              </Space>
+
+              <Space wrap>
+                <Button type="primary" onClick={submitBusinessUpload} loading={uploading} disabled={!uploadFile}>
+                  上传并生效
+                </Button>
+                <Button onClick={refreshBusiness} loading={loading}>刷新看板</Button>
+                <Button onClick={runReindex} loading={loading}>重建向量索引</Button>
+              </Space>
+
+              <Text style={{ color: "#475569" }}>
+                当前文件：{uploadFile ? `${uploadFile.name} (${(uploadFile.size / 1024).toFixed(1)} KB)` : "未选择"}
+              </Text>
+
+              <Collapse
+                size="small"
+                activeKey={showUploadAdvanced ? ["upload-advanced"] : []}
+                onChange={(keys) => setShowUploadAdvanced(Array.isArray(keys) && keys.length > 0)}
+                items={[
+                  {
+                    key: "upload-advanced",
+                    label: "高级设置（可选）",
+                    children: (
+                      <Space direction="vertical" style={{ width: "100%" }} size={10}>
+                        <Space wrap>
+                          <Text>来源</Text>
+                          <Select
+                            value={uploadSource}
+                            onChange={setUploadSource}
+                            style={{ width: 180 }}
+                            options={SOURCE_OPTIONS}
+                          />
+                          <Text>自动索引</Text>
+                          <Switch checked={uploadAutoIndex} onChange={setUploadAutoIndex} />
+                        </Space>
+                        <Input
+                          value={uploadStockCodes}
+                          onChange={(e) => setUploadStockCodes(e.target.value)}
+                          placeholder="关联股票（可选，逗号分隔，例如 SH600000,SZ000001）"
+                        />
+                        <Input
+                          value={uploadTags}
+                          onChange={(e) => setUploadTags(e.target.value)}
+                          placeholder="标签（可选，逗号分隔，例如 财报,季报,业绩）"
+                        />
+                      </Space>
+                    ),
+                  },
+                ]}
+              />
+            </Space>
+          </Card>
+
+          <Card className="premium-card" style={{ marginTop: 10 }} title="业务看板">
+            <Space direction="vertical" style={{ width: "100%" }} size={10}>
+              <Text style={{ color: "#64748b" }}>
+                最近重建：{dashboard?.last_reindex_at || "-"}
+              </Text>
               <Row gutter={[12, 12]}>
                 <Col xs={24} md={8} xl={4}><Card size="small" title="文档总数">{Number(dashboard?.doc_total ?? 0)}</Card></Col>
                 <Col xs={24} md={8} xl={4}><Card size="small" title="活跃Chunk">{Number(dashboard?.active_chunks ?? 0)}</Card></Col>
-                <Col xs={24} md={8} xl={4}><Card size="small" title="待审核">{Number(dashboard?.review_pending ?? 0)}</Card></Col>
+                <Col xs={24} md={8} xl={4}><Card size="small" title="待治理">{Number(dashboard?.review_pending ?? 0)}</Card></Col>
                 <Col xs={24} md={8} xl={4}><Card size="small" title="QA记忆">{Number(dashboard?.qa_memory_total ?? 0)}</Card></Col>
                 <Col xs={24} md={8} xl={8}>
                   <Card size="small" title="7日检索命中率">
@@ -592,51 +541,6 @@ export default function RagCenterPage() {
                   </Card>
                 </Col>
               </Row>
-            </Space>
-          </Card>
-
-          <Card className="premium-card" style={{ marginTop: 10 }} title="附件上传（业务入口）">
-            <Space direction="vertical" style={{ width: "100%" }} size={10}>
-              <Text style={{ color: "#64748b" }}>
-                上传后会自动执行：解析、分块、入库、状态判定。无需手工填写 doc_id/chunk 参数。
-              </Text>
-              <input
-                type="file"
-                onChange={(e) => {
-                  const file = e.target.files?.[0] ?? null;
-                  setUploadFile(file);
-                }}
-              />
-              <Space wrap>
-                <Select
-                  value={uploadSource}
-                  onChange={setUploadSource}
-                  style={{ width: 180 }}
-                  options={[
-                    { label: "user_upload", value: "user_upload" },
-                    { label: "cninfo", value: "cninfo" },
-                    { label: "eastmoney", value: "eastmoney" },
-                  ]}
-                />
-                <Input
-                  style={{ width: 300 }}
-                  value={uploadStockCodes}
-                  onChange={(e) => setUploadStockCodes(e.target.value)}
-                  placeholder="关联股票(逗号分隔，如 SH600000,SZ000001)"
-                />
-                <Input
-                  style={{ width: 260 }}
-                  value={uploadTags}
-                  onChange={(e) => setUploadTags(e.target.value)}
-                  placeholder="标签(逗号分隔，如 财报,会议纪要)"
-                />
-                <Text>自动索引</Text>
-                <Switch checked={uploadAutoIndex} onChange={setUploadAutoIndex} />
-                <Button type="primary" onClick={submitBusinessUpload} loading={uploading}>上传并入库</Button>
-              </Space>
-              <Text style={{ color: "#475569" }}>
-                当前文件：{uploadFile ? `${uploadFile.name} (${(uploadFile.size / 1024).toFixed(1)} KB)` : "未选择"}
-              </Text>
             </Space>
           </Card>
 
@@ -689,14 +593,7 @@ export default function RagCenterPage() {
                 <Space wrap>
                   <Input value={chunkDocId} onChange={(e) => setChunkDocId(e.target.value)} placeholder="doc_id" style={{ width: 180 }} />
                   <Input value={chunkSource} onChange={(e) => setChunkSource(e.target.value)} placeholder="source" style={{ width: 140 }} />
-                  <Select
-                    value={chunkStatusFilter || undefined}
-                    onChange={(v) => setChunkStatusFilter(v || "")}
-                    allowClear
-                    placeholder="status"
-                    style={{ width: 170 }}
-                    options={CHUNK_STATUS_OPTIONS}
-                  />
+                  <Select value={chunkStatusFilter || undefined} onChange={(v) => setChunkStatusFilter(v || "")} allowClear placeholder="status" style={{ width: 170 }} options={CHUNK_STATUS_OPTIONS} />
                   <Input value={chunkStockCode} onChange={(e) => setChunkStockCode(e.target.value)} placeholder="stock_code" style={{ width: 150 }} />
                   <InputNumber min={1} max={200} value={chunkLimit} onChange={(v) => setChunkLimit(Number(v ?? 40))} />
                   <Button onClick={loadChunks} loading={loading}>查询</Button>
@@ -704,7 +601,7 @@ export default function RagCenterPage() {
                 <Space wrap>
                   <Text>行内动作</Text>
                   <Select value={chunkActionStatus} onChange={(v) => setChunkActionStatus(v as ChunkStatus)} style={{ width: 160 }} options={CHUNK_STATUS_OPTIONS} />
-                  <Text style={{ color: "#64748b" }}>点击某行“应用”按钮，会将该行状态更新为当前动作。</Text>
+                  <Text style={{ color: "#64748b" }}>点击某行“应用”后，会将该 chunk 更新为当前目标状态。</Text>
                 </Space>
                 <Table
                   rowKey="chunk_id"
@@ -714,7 +611,7 @@ export default function RagCenterPage() {
                       title: "操作",
                       key: "actions",
                       width: 100,
-                      render: (_, row) => (
+                      render: (_: unknown, row: any) => (
                         <Button size="small" onClick={() => setChunkStatus(row.chunk_id, chunkActionStatus)} loading={loading}>应用</Button>
                       ),
                     },
@@ -751,7 +648,7 @@ export default function RagCenterPage() {
                       title: "开关",
                       key: "switch",
                       width: 100,
-                      render: (_, row) => <Switch checked={Boolean(row.retrieval_enabled)} onChange={(checked) => toggleMemory(row.memory_id, checked)} />,
+                      render: (_: unknown, row: any) => <Switch checked={Boolean(row.retrieval_enabled)} onChange={(checked) => toggleMemory(row.memory_id, checked)} />,
                     },
                   ]}
                   dataSource={memoryRows}
@@ -771,7 +668,7 @@ export default function RagCenterPage() {
                   <Button type="primary" onClick={runReindex} loading={loading}>重建向量索引</Button>
                 </Space>
                 <Text style={{ color: "#64748b" }}>trace_count: {traceCount}</Text>
-                <Table rowKey={(row) => String(row.id)} columns={traceColumns} dataSource={traceRows} pagination={false} />
+                <Table rowKey={(row: any) => String(row.id)} columns={traceColumns} dataSource={traceRows} pagination={false} />
               </Space>
             </Card>
           ) : null}
