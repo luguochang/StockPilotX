@@ -8,11 +8,11 @@
 
 ## A. 全局执行约束（每轮都必须满足）
 
-- [ ] 完成当轮代码实现（含必要注释，解释关键逻辑与用途）
-- [ ] 完成当轮自测（记录命令与结果）
-- [ ] 完成当轮技术文档（记录设计、改动、风险）
-- [ ] 更新本 checklist 的状态与证据字段
-- [ ] 完成独立 commit（一轮一个 commit）
+- [x] 完成当轮代码实现（含必要注释，解释关键逻辑与用途）
+- [x] 完成当轮自测（记录命令与结果）
+- [x] 完成当轮技术文档（记录设计、改动、风险）
+- [x] 更新本 checklist 的状态与证据字段
+- [x] 完成独立 commit（一轮一个 commit）
 
 ---
 
@@ -132,18 +132,21 @@
 
 ## ROUND-AH：回归与交付收口
 
-- [ ] 全链路回归（ingest -> query/deepthink -> rag）
-- [ ] 整理兼容性与风险清单
-- [ ] 输出最终交付文档与运维说明
-- [ ] 确认 checklist 全部完成并补全证据
-- [ ] 提交最终收口 commit（round-AH）
+- [x] 全链路回归（ingest -> query/deepthink -> rag）
+- [x] 整理兼容性与风险清单
+- [x] 输出最终交付文档与运维说明
+- [x] 确认 checklist 全部完成并补全证据
+- [x] 提交最终收口 commit（round-AH）
 
 证据记录：
 
 - 自测命令：
-- 自测结果：
-- 技术文档路径：
-- Commit Hash：
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "query_basic or query_stream or deep_think_v2_stream_round or rag_upload_workflow_and_dashboard or ingest_endpoints or datasource_ops_catalog_health_fetch_logs"`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "query_stream or deep_think_v2_round_stream or rag_asset_management_endpoints or datasource_management_endpoints or ingest_market_daily"`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_datasource_intel_adapters.py tests/test_ingestion_extended_sources.py tests/test_datasources_factory.py`
+- 自测结果：`6 passed` + `5 passed` + `21 passed`
+- 技术文档路径：`docs/sources/2026-02-19/round-AH-delivery-closure-and-regression.md`
+- Commit Hash：见本轮 round-AH commit
 
 ---
 
@@ -180,3 +183,4 @@ npx tsc --noEmit
 3. `2026-02-19 | ROUND-AE | 完成 financial 双源迁移、摄取落库、Query/DeepThink 财务证据接入 | hash: 见本轮 round-AE commit | doc: docs/sources/2026-02-19/round-AE-financial-adapters-and-ingestion.md`
 4. `2026-02-19 | ROUND-AF | 完成 news/research/macro/fund 迁移、自动 RAG 入索引、ingest API 与回归测试 | hash: 见本轮 round-AF commit | doc: docs/sources/2026-02-19/round-AF-news-research-macro-fund-rag.md`
 5. `2026-02-19 | ROUND-AG | 完成 datasources 管理 API（sources/health/fetch/logs）、健康聚合与告警策略接入 | hash: 见本轮 round-AG commit | doc: docs/sources/2026-02-19/round-AG-datasource-management-api-and-observability.md`
+6. `2026-02-19 | ROUND-AH | 完成全链路回归、风险清单与最终交付文档收口 | hash: 见本轮 round-AH commit | doc: docs/sources/2026-02-19/round-AH-delivery-closure-and-regression.md`
