@@ -6,6 +6,9 @@ import ReactECharts from "echarts-for-react";
 import { Alert, Button, Card, Col, Input, InputNumber, List, Popover, Progress, Row, Segmented, Select, Space, Statistic, Table, Tag, Timeline, Typography } from "antd";
 import MediaCarousel from "../components/MediaCarousel";
 import StockSelectorModal from "../components/StockSelectorModal";
+import { validatePromptQuality } from "../lib/analysis/guardrails";
+import { composeStructuredQuestion } from "../lib/analysis/template-compose";
+import { ANALYSIS_TEMPLATES, type AnalysisTemplateId, type HorizonOption, type PositionStateOption, type RiskProfileOption } from "../lib/analysis/template-config";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
 // 默认开启 V2 真流式；设置 NEXT_PUBLIC_DEEPTHINK_V2_STREAM=0 可临时回退 V1。
@@ -241,6 +244,7 @@ type IntelReviewSnapshot = {
 
 type DeepConsoleMode = "analysis" | "engineering";
 type DeepRoundStageKey = "idle" | "planning" | "data_refresh" | "intel_search" | "debate" | "arbitration" | "persist" | "done";
+type DeepThinkWorkspace = "business" | "console";
 
 const DEEP_ROUND_STAGE_ORDER: DeepRoundStageKey[] = ["idle", "planning", "data_refresh", "intel_search", "debate", "arbitration", "persist", "done"];
 const DEEP_ROUND_STAGE_LABEL: Record<DeepRoundStageKey, string> = {
@@ -354,9 +358,32 @@ function CountUp({ value, suffix = "" }: { value: number; suffix?: string }) {
 }
 
 export default function DeepThinkPage() {
+  const [workspace, setWorkspace] = useState<DeepThinkWorkspace>("business");
+  useEffect(() => {
+    // Client-side URL parsing keeps app router page typed as standard Page component.
+    const params = new URLSearchParams(window.location.search);
+    setWorkspace(params.get("workspace") === "console" ? "console" : "business");
+  }, []);
+  const isConsoleWorkspace = workspace === "console";
   const [stockCode, setStockCode] = useState("SH600000");
   const [compareCode, setCompareCode] = useState("SZ000001");
-  const [question, setQuestion] = useState("请结合实时数据与历史趋势，给出可验证的交易观察结论");
+  const [question, setQuestion] = useState(
+    composeStructuredQuestion({
+      templateId: "mid_term_trend_risk",
+      stockCode: "SH600000",
+      horizon: "30d",
+      riskProfile: "neutral",
+      positionState: "flat",
+    }),
+  );
+  // 模板优先：默认引导用户通过固定模板构建问题，减少自由输入导致的低质量请求。
+  const [questionInputMode, setQuestionInputMode] = useState<"template" | "free">("template");
+  const [selectedTemplateId, setSelectedTemplateId] = useState<AnalysisTemplateId>("mid_term_trend_risk");
+  const [selectedHorizon, setSelectedHorizon] = useState<HorizonOption>("30d");
+  const [selectedRiskProfile, setSelectedRiskProfile] = useState<RiskProfileOption>("neutral");
+  const [selectedPositionState, setSelectedPositionState] = useState<PositionStateOption>("flat");
+  const [promptQualityScore, setPromptQualityScore] = useState(100);
+  const [promptGuardrailWarnings, setPromptGuardrailWarnings] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<QueryResponse | null>(null);
@@ -386,8 +413,6 @@ export default function DeepThinkPage() {
   // query/stream 在后端落库后会发 knowledge_persisted，前端据此显示“已沉淀共享语料”反馈。
   const [knowledgePersistedTraceId, setKnowledgePersistedTraceId] = useState("");
   const [deepSession, setDeepSession] = useState<DeepThinkSession | null>(null);
-  // 默认给业务用户分析视角；工程筛选项收纳到 engineering 模式减少认知负担。
-  const [deepConsoleMode, setDeepConsoleMode] = useState<DeepConsoleMode>("analysis");
   const [deepLoading, setDeepLoading] = useState(false);
   const [deepStreaming, setDeepStreaming] = useState(false);
   const [deepError, setDeepError] = useState("");
@@ -414,6 +439,30 @@ export default function DeepThinkPage() {
   // 股票切换后提示：明确告知 DeepThink 数据已按标的隔离重置。
   const [deepStockSwitchNotice, setDeepStockSwitchNotice] = useState("");
   const deepTrackedStockRef = useRef(stockCode);
+  const effectiveConsoleMode: DeepConsoleMode = isConsoleWorkspace ? "engineering" : "analysis";
+
+  useEffect(() => {
+    if (questionInputMode !== "template") return;
+    // 模板槽位变化时自动重组问题，保证默认输入具备可执行语义。
+    const next = composeStructuredQuestion({
+      templateId: selectedTemplateId,
+      stockCode,
+      horizon: selectedHorizon,
+      riskProfile: selectedRiskProfile,
+      positionState: selectedPositionState,
+    });
+    setQuestion(next);
+  }, [questionInputMode, selectedTemplateId, selectedHorizon, selectedRiskProfile, selectedPositionState, stockCode]);
+
+  useEffect(() => {
+    const guard = validatePromptQuality({
+      stockCode,
+      question,
+      horizon: selectedHorizon,
+    });
+    setPromptQualityScore(guard.score);
+    setPromptGuardrailWarnings([...guard.errors, ...guard.warnings, ...guard.suggestions].slice(0, 4));
+  }, [stockCode, question, selectedHorizon]);
 
   function formatDeepPercent(used: number, limit: number): number {
     const safeLimit = Number(limit) <= 0 ? 1 : Number(limit);
@@ -604,7 +653,17 @@ export default function DeepThinkPage() {
     }
   }
 
-  async function runAnalysis() {
+  async function runAnalysis(questionOverride?: string) {
+    const submitQuestion = String(questionOverride ?? resolveComposedQuestion()).trim();
+    const guard = validatePromptQuality({
+      stockCode,
+      question: submitQuestion,
+      horizon: selectedHorizon,
+    });
+    if (guard.errors.length) {
+      setError(guard.errors.join("；"));
+      return;
+    }
     setLoading(true);
     setStreaming(true);
     setStreamSource("unknown");
@@ -619,6 +678,8 @@ export default function DeepThinkPage() {
     setError("");
     try {
       await ensureStockInUniverse([stockCode]);
+      // 提交前统一收敛为本次真实问题，确保 query/deep-think 后续链路一致。
+      setQuestion(submitQuestion);
       // 与 query stream 并行刷新业务卡片，缩短“等待后才看到业务结论”的感知延迟。
       const intelCardPromise = loadIntelCard({ code: stockCode, showLoading: false, skipUniverseCheck: true });
       // 同步请求结构化行情总览，和流式问答并行执行。
@@ -626,7 +687,7 @@ export default function DeepThinkPage() {
       const streamResp = await fetch(`${API_BASE}/v1/query/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: "frontend-user", stock_codes: [stockCode], question })
+        body: JSON.stringify({ user_id: "frontend-user", stock_codes: [stockCode], question: submitQuestion })
       });
       if (!streamResp.ok) {
         const txt = await streamResp.text();
@@ -771,13 +832,25 @@ export default function DeepThinkPage() {
     setIntelFeedbackMessage("");
   }, [stockCode]);
 
+  function resolveComposedQuestion(): string {
+    if (questionInputMode !== "template") return String(question).trim();
+    return composeStructuredQuestion({
+      templateId: selectedTemplateId,
+      stockCode,
+      horizon: selectedHorizon,
+      riskProfile: selectedRiskProfile,
+      positionState: selectedPositionState,
+    }).trim();
+  }
+
   async function createDeepThinkSessionRequest(): Promise<DeepThinkSession> {
+    const composedQuestion = resolveComposedQuestion();
     const resp = await fetch(`${API_BASE}/v1/deep-think/sessions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         user_id: "frontend-deepthink-user",
-        question,
+        question: composedQuestion,
         stock_codes: [stockCode],
         max_rounds: 3
       })
@@ -1124,9 +1197,11 @@ export default function DeepThinkPage() {
       setDeepStreamEvents([]);
       // 每次执行前清空事件过滤，避免“过滤条件隐藏实时事件”的误判。
       setDeepArchiveEventName("");
+      const composedQuestion = resolveComposedQuestion();
+      setQuestion(composedQuestion);
 
       const roundPayload = {
-        question,
+        question: composedQuestion,
         stock_codes: [stockCode],
         archive_max_events: deepArchiveLimit
       };
@@ -1701,6 +1776,25 @@ export default function DeepThinkPage() {
 
   return (
     <main className="container">
+      {isConsoleWorkspace ? (
+        <motion.section initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35 }}>
+          <Card className="premium-card" style={{ marginBottom: 8 }}>
+            <Space direction="vertical" size={6} style={{ width: "100%" }}>
+              <Tag color="processing" style={{ width: "fit-content" }}>DeepThink Console</Tag>
+              <Title level={3} style={{ margin: 0, color: "#0f172a" }}>工程控制台</Title>
+              <Text style={{ color: "#475569" }}>
+                本页仅展示轮次排障、事件存档、预算治理与导出能力。业务分析请使用主页面。
+              </Text>
+              <Space>
+                <Button href="/deep-think">返回业务分析页</Button>
+              </Space>
+            </Space>
+          </Card>
+        </motion.section>
+      ) : null}
+
+      {!isConsoleWorkspace ? (
+        <>
       <motion.section
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
@@ -1720,7 +1814,7 @@ export default function DeepThinkPage() {
             这里聚焦深度分析执行链路：多角色协商、证据追溯、流式过程可见与结果可回放。
           </Paragraph>
           <Space>
-            <Button type="primary" size="large" onClick={runAnalysis}>
+            <Button type="primary" size="large" onClick={() => runAnalysis(resolveComposedQuestion())}>
               启动深度分析
             </Button>
             <Button size="large" ghost>
@@ -1808,15 +1902,85 @@ export default function DeepThinkPage() {
           <Col xs={24} xl={14}>
             <Card className="premium-card" style={{ borderColor: "rgba(15,23,42,0.12)" }}>
               <Space direction="vertical" style={{ width: "100%" }}>
-                <Text style={{ color: "#475569" }}>输入标的和问题，触发 DeepThink 联合推理</Text>
+                <Text style={{ color: "#475569" }}>
+                  标准分析默认使用模板构建问题，减少自由输入造成的语义偏差；需要时可切换到自由输入。
+                </Text>
                 <StockSelectorModal
                   value={stockCode}
                   onChange={(next: string | string[]) => setStockCode(Array.isArray(next) ? (next[0] ?? "") : next)}
                   title="选择分析标的"
                   placeholder="请先选择要分析的股票"
                 />
+                <Segmented
+                  value={questionInputMode}
+                  onChange={(value) => setQuestionInputMode(value as "template" | "free")}
+                  options={[
+                    { label: "标准分析（模板）", value: "template" },
+                    { label: "自由输入", value: "free" },
+                  ]}
+                />
+                {questionInputMode === "template" ? (
+                  <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                    <Space wrap>
+                      {ANALYSIS_TEMPLATES.map((item) => (
+                        <Button
+                          key={item.id}
+                          size="small"
+                          type={item.id === selectedTemplateId ? "primary" : "default"}
+                          onClick={() => setSelectedTemplateId(item.id)}
+                        >
+                          {item.title}
+                        </Button>
+                      ))}
+                    </Space>
+                    <Text style={{ color: "#64748b" }}>
+                      {ANALYSIS_TEMPLATES.find((item) => item.id === selectedTemplateId)?.description ?? ""}
+                    </Text>
+                    <Space wrap>
+                      <Select
+                        style={{ width: 120 }}
+                        value={selectedHorizon}
+                        onChange={(value) => setSelectedHorizon(value as HorizonOption)}
+                        options={[
+                          { label: "7天", value: "7d" },
+                          { label: "30天", value: "30d" },
+                          { label: "90天", value: "90d" },
+                        ]}
+                      />
+                      <Select
+                        style={{ width: 140 }}
+                        value={selectedRiskProfile}
+                        onChange={(value) => setSelectedRiskProfile(value as RiskProfileOption)}
+                        options={[
+                          { label: "保守", value: "conservative" },
+                          { label: "中性", value: "neutral" },
+                          { label: "积极", value: "aggressive" },
+                        ]}
+                      />
+                      <Select
+                        style={{ width: 140 }}
+                        value={selectedPositionState}
+                        onChange={(value) => setSelectedPositionState(value as PositionStateOption)}
+                        options={[
+                          { label: "空仓", value: "flat" },
+                          { label: "已持仓", value: "holding" },
+                        ]}
+                      />
+                    </Space>
+                  </Space>
+                ) : null}
                 <TextArea rows={5} value={question} onChange={(e) => setQuestion(e.target.value)} />
-                <Button type="primary" size="large" loading={loading} onClick={runAnalysis}>开始高级分析</Button>
+                <Space wrap>
+                  <Tag color={promptQualityScore >= 80 ? "green" : promptQualityScore >= 60 ? "gold" : "red"}>
+                    输入质量分：{promptQualityScore}
+                  </Tag>
+                  {promptGuardrailWarnings.slice(0, 2).map((item, idx) => (
+                    <Tag key={`guard-${idx}`} color="blue">{item}</Tag>
+                  ))}
+                </Space>
+                <Button type="primary" size="large" loading={loading} onClick={() => runAnalysis(resolveComposedQuestion())}>
+                  开始高级分析
+                </Button>
                 {streaming ? <Text style={{ color: "#2563eb" }}>流式输出中...</Text> : null}
                 {streaming && queryProgressText ? <Text style={{ color: "#475569" }}>阶段：{queryProgressText}</Text> : null}
               </Space>
@@ -2303,6 +2467,8 @@ export default function DeepThinkPage() {
           </Col>
         </Row>
       </motion.section>
+        </>
+      ) : null}
 
       <motion.section
         initial={{ opacity: 0, y: 18 }}
@@ -2316,17 +2482,21 @@ export default function DeepThinkPage() {
             <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>DeepThink 轮次控制台</span>}>
               <Space direction="vertical" style={{ width: "100%" }}>
                 <Text style={{ color: "#475569" }}>
-                  基于后端 `/v1/deep-think/*` 接口按轮执行，分析模式关注结论交付，工程模式保留完整治理与排障能力。
+                  {isConsoleWorkspace
+                    ? "当前为工程控制台：聚焦轮次治理、事件归档、导出和排障。"
+                    : "当前为业务分析页：聚焦结论、风险与执行建议。"}
                 </Text>
-                <Segmented
-                  value={deepConsoleMode}
-                  onChange={(value) => setDeepConsoleMode(value as DeepConsoleMode)}
-                  options={[
-                    { label: "分析模式", value: "analysis" },
-                    { label: "工程模式", value: "engineering" }
-                  ]}
-                />
-                {deepConsoleMode === "analysis" ? (
+                <Space wrap>
+                  <Tag color={effectiveConsoleMode === "analysis" ? "blue" : "purple"}>
+                    当前视图：{effectiveConsoleMode === "analysis" ? "分析模式" : "工程模式"}
+                  </Tag>
+                  {isConsoleWorkspace ? (
+                    <Button href="/deep-think">返回业务分析页</Button>
+                  ) : (
+                    <Button href="/deep-think/console">进入工程控制台</Button>
+                  )}
+                </Space>
+                {effectiveConsoleMode === "analysis" ? (
                   <>
                     <Space wrap>
                       <Button onClick={startDeepThinkSession} loading={deepLoading}>
@@ -2717,7 +2887,7 @@ export default function DeepThinkPage() {
                     ) : null}
                   </>
                 )}
-                {deepConsoleMode === "analysis" ? (
+                {effectiveConsoleMode === "analysis" ? (
                   <Card size="small" title={<span style={{ color: "#0f172a" }}>如何使用这块面板</span>}>
                     <Space direction="vertical" size={4} style={{ width: "100%" }}>
                       <Text style={{ color: "#334155" }}>1. 点击“执行下一轮”，系统会自动拉取数据并推进多Agent研判。</Text>
@@ -2764,7 +2934,7 @@ export default function DeepThinkPage() {
             </Card>
 
             {/* 分析模式聚焦业务决策解释；工程模式展示全量排障与治理数据。 */}
-            {deepConsoleMode === "analysis" ? (
+            {effectiveConsoleMode === "analysis" ? (
               <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>执行过程摘要（业务视角）</span>} style={{ marginTop: 12 }}>
                 <Space direction="vertical" size={8} style={{ width: "100%" }}>
                   <Text style={{ color: "#334155" }}>
@@ -2838,7 +3008,7 @@ export default function DeepThinkPage() {
 
           <Col xs={24} xl={10}>
             {/* 右侧面板在分析模式给出可行动信息，避免业务用户被技术噪音淹没。 */}
-            {deepConsoleMode === "analysis" ? (
+            {effectiveConsoleMode === "analysis" ? (
               <>
                 <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>关键 Agent 观点（业务版）</span>}>
                   <Table
@@ -3080,6 +3250,8 @@ export default function DeepThinkPage() {
         </Row>
       </motion.section>
 
+      {!isConsoleWorkspace ? (
+        <>
       <motion.section
         initial={{ opacity: 0, y: 18 }}
         whileInView={{ opacity: 1, y: 0 }}
@@ -3219,6 +3391,8 @@ export default function DeepThinkPage() {
           </Col>
         </Row>
       </motion.section>
+        </>
+      ) : null}
     </main>
   );
 }
