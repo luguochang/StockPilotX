@@ -13,6 +13,7 @@ const navItems = [
   { href: "/deep-think", label: "DeepThink" },
   { href: "/predict", label: "预测" },
   { href: "/watchlist", label: "关注池" },
+  { href: "/journal", label: "Journal" },
   { href: "/reports", label: "报告" },
   { href: "/docs-center", label: "文档" },
   { href: "/rag-center", label: "RAG运营" },

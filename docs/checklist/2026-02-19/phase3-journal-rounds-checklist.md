@@ -28,10 +28,10 @@
 
 ## Round-AA Journal Workspace (Frontend)
 
-- [ ] 新增 Journal 页面（创建/筛选/复盘/AI复盘/洞察）
-- [ ] 更新导航入口
-- [ ] 前端构建与类型检查通过
-- [ ] Round-AA 文档与提交回填
+- [x] 新增 Journal 页面（创建/筛选/复盘/AI复盘/洞察）
+- [x] 更新导航入口
+- [x] 前端构建与类型检查通过
+- [x] Round-AA 文档与提交回填
 
 ## Round-AB Journal Quality & Ops (Backend)
 

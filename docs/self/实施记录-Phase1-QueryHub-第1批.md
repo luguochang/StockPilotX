@@ -835,3 +835,44 @@ rg -n "Community MVP|Journal -> Community|社区内容推荐" docs/checklist/202
 - [x] `journal_linked` 流事件
 - [x] 服务层/API 层测试
 - [x] 回归测试通过
+
+## 第17批增量（Phase3 - Round-AA Journal 前端工作台）
+
+### 新增能力
+
+1. Journal 前端页面
+- `frontend/app/journal/page.tsx`
+  - 日志创建
+  - 日志筛选与列表
+  - 手工复盘录入与查看
+  - AI复盘生成与查看
+  - Journal 洞察看板
+
+2. 导航入口
+- `frontend/app/layout.tsx`
+  - 顶部导航新增 `/journal`（投资日志）
+- `frontend/app/page.tsx`
+  - 首页功能卡新增“投资日志工作台”
+
+3. 交互优化
+- 使用“左操作 + 右洞察 + 下详情”的单页结构，减少跳转和输入负担。
+- 所有写操作均有成功/失败反馈，并自动刷新对应数据。
+
+### 第17批自测
+
+执行命令：
+```bash
+cd frontend
+npm run build
+npx tsc --noEmit
+```
+
+结果：
+- Next 构建通过，`/journal` 路由产物正常
+- TypeScript 检查通过（无类型错误）
+
+### 第17批 Checklist
+
+- [x] Journal 页面（创建/筛选/复盘/AI复盘/洞察）
+- [x] 导航入口接入
+- [x] 前端构建与类型检查通过

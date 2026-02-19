@@ -141,7 +141,38 @@
 
 ## Round-AA: Journal Workspace (Frontend)
 
-- 状态：pending
+### 变更摘要
+
+- 新增页面：
+  - `frontend/app/journal/page.tsx`
+  - 功能覆盖：创建日志、筛选日志、手工复盘、AI复盘、洞察看板
+- 导航更新：
+  - `frontend/app/layout.tsx` 新增 `投资日志` 入口
+  - `frontend/app/page.tsx` 首页功能卡新增 `投资日志工作台`
+- 交互优化：
+  - 采用单页“左侧操作 + 右侧洞察 + 下方详情 Tabs”结构，降低输入认知负担
+  - 关键 API 操作统一反馈成功/失败信息
+
+### 自测结果
+
+1. 命令：
+```bash
+cd frontend
+npm run build
+```
+结果：`Compiled successfully`，`/journal` 路由构建通过
+
+2. 命令：
+```bash
+cd frontend
+npx tsc --noEmit
+```
+结果：通过（无类型错误）
+
+### 提交
+
+- Commit: `feat: add journal workspace page and navigation entry`
+- Message: `代码 + 前端构建自测 + 文档已在 Round-AA 同步提交（具体哈希见 git log）`
 
 ## Round-AB: Journal Quality & Ops (Backend)
 

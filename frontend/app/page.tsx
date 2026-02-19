@@ -21,6 +21,12 @@ const featureCards = [
     tag: "量化视角",
   },
   {
+    title: "Journal Workspace",
+    desc: "Record decisions, add reflections, generate AI reflection, and review insights.",
+    href: "/journal",
+    tag: "Research Loop",
+  },
+  {
     title: "报告中心",
     desc: "生成、检索和回放报告版本，支持业务交付与归档复盘。",
     href: "/reports",
