@@ -20,20 +20,24 @@
 
 ## ROUND-AC：基础骨架与配置接入
 
-- [ ] 创建 `backend/app/datasources/` 模块结构与基类
-- [ ] 新增 `base/adapter.py`、`base/http_client.py`、`base/utils.py`
-- [ ] 在 `backend/app/config.py` 增加数据源配置项
-- [ ] 接入服务构造工厂，替换直接实例化路径（最小侵入）
-- [ ] 添加基础单测（配置与基础工具）
-- [ ] 记录技术文档（round-AC）
-- [ ] 提交 commit（round-AC）
+- [x] 创建 `backend/app/datasources/` 模块结构与基类
+- [x] 新增 `base/adapter.py`、`base/http_client.py`、`base/utils.py`
+- [x] 在 `backend/app/config.py` 增加数据源配置项
+- [x] 接入服务构造工厂，替换直接实例化路径（最小侵入）
+- [x] 添加基础单测（配置与基础工具）
+- [x] 记录技术文档（round-AC）
+- [x] 提交 commit（round-AC）
 
 证据记录：
 
 - 自测命令：
-- 自测结果：
-- 技术文档路径：
-- Commit Hash：
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_datasources_factory.py tests/test_datasource_utils.py`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_data_sources_live.py tests/test_announcements.py tests/test_ingestion_quality.py tests/test_doc_pipeline.py`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "ingest_endpoints"`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "ingest_market_daily or ingest_announcements"`
+- 自测结果：`20 passed`（含 deselected 子集）
+- 技术文档路径：`docs/sources/2026-02-19/round-AC-datasource-scaffold-and-config.md`
+- Commit Hash：`见本轮 round-AC commit`
 
 ## ROUND-AD：行情数据源迁移
 
@@ -155,5 +159,4 @@ npx tsc --noEmit
 
 > 说明：每完成一轮，在这里追加一条记录（日期、轮次、摘要、hash、文档路径）。
 
-1. 待开始
-
+1. `2026-02-19 | ROUND-AC | 完成 datasources 骨架、factory、config 接入与基础回归测试 | hash: 见本轮 round-AC commit | doc: docs/sources/2026-02-19/round-AC-datasource-scaffold-and-config.md`

@@ -67,6 +67,14 @@ class Settings:
     embedding_timeout_seconds: float = 12.0
     embedding_batch_size: int = 32
     embedding_fallback_to_local: bool = True
+    # Datasource runtime controls used by backend.app.datasources factory.
+    datasource_request_timeout_seconds: float = 2.0
+    datasource_retry_count: int = 2
+    datasource_retry_backoff_seconds: float = 0.3
+    datasource_proxy_url: str = ""
+    datasource_xueqiu_cookie: str = ""
+    datasource_tushare_token: str = ""
+    datasource_tradingview_proxy_url: str = ""
     # A-share regime controls: model "bull short, bear long" market behavior using short/mid horizon signals.
     a_share_regime_enabled: bool = True
     a_share_regime_vol_threshold: float = 0.025
@@ -124,6 +132,17 @@ class Settings:
             embedding_timeout_seconds=max(1.0, float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "12"))),
             embedding_batch_size=max(1, int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))),
             embedding_fallback_to_local=_to_bool(os.getenv("EMBEDDING_FALLBACK_TO_LOCAL"), True),
+            datasource_request_timeout_seconds=max(
+                0.1, float(os.getenv("DATASOURCE_REQUEST_TIMEOUT_SECONDS", "2.0"))
+            ),
+            datasource_retry_count=max(0, int(os.getenv("DATASOURCE_RETRY_COUNT", "2"))),
+            datasource_retry_backoff_seconds=max(
+                0.0, float(os.getenv("DATASOURCE_RETRY_BACKOFF_SECONDS", "0.3"))
+            ),
+            datasource_proxy_url=os.getenv("DATASOURCE_PROXY_URL", "").strip(),
+            datasource_xueqiu_cookie=os.getenv("DATASOURCE_XUEQIU_COOKIE", "").strip(),
+            datasource_tushare_token=os.getenv("DATASOURCE_TUSHARE_TOKEN", "").strip(),
+            datasource_tradingview_proxy_url=os.getenv("DATASOURCE_TRADINGVIEW_PROXY_URL", "").strip(),
             a_share_regime_enabled=_to_bool(os.getenv("A_SHARE_REGIME_ENABLED"), True),
             a_share_regime_vol_threshold=max(0.005, float(os.getenv("A_SHARE_REGIME_VOL_THRESHOLD", "0.025"))),
             a_share_regime_conf_discount_bear=max(

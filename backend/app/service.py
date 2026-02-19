@@ -23,9 +23,13 @@ from backend.app.capabilities import build_capability_snapshot
 from backend.app.agents.langgraph_runtime import build_workflow_runtime
 from backend.app.agents.workflow import AgentWorkflow
 from backend.app.config import Settings
+from backend.app.datasources import (
+    build_default_announcement_service,
+    build_default_history_service,
+    build_default_quote_service,
+)
 from backend.app.data.ingestion import IngestionService, IngestionStore
 from backend.app.data.scheduler import JobConfig, LocalJobScheduler
-from backend.app.data.sources import AnnouncementService, QuoteService
 from backend.app.deepthink_exporter import DeepThinkReportExporter
 from backend.app.knowledge.recommender import DocumentRecommender
 from backend.app.evals.service import EvalService
@@ -100,9 +104,10 @@ class AShareAgentService:
 
         self.ingestion_store = IngestionStore()
         self.ingestion = IngestionService(
-            # DATA-001: 真实源优先，失败后自动进入 mock 兜底回退。
-            quote_service=QuoteService.build_default(),
-            announcement_service=AnnouncementService(),
+            # Keep datasource wiring centralized to make migration incremental.
+            quote_service=build_default_quote_service(self.settings),
+            announcement_service=build_default_announcement_service(self.settings),
+            history_service=build_default_history_service(self.settings),
             store=self.ingestion_store,
         )
         self.doc_recommender = DocumentRecommender()
