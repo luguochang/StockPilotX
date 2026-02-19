@@ -223,6 +223,30 @@ class WebStore:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS alert_rule (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                tenant_id INTEGER NOT NULL,
+                rule_name TEXT NOT NULL,
+                rule_type TEXT NOT NULL,
+                stock_code TEXT NOT NULL DEFAULT '',
+                operator TEXT NOT NULL DEFAULT '',
+                target_value REAL NOT NULL DEFAULT 0,
+                event_type TEXT NOT NULL DEFAULT '',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS alert_trigger_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_id INTEGER NOT NULL,
+                stock_code TEXT NOT NULL,
+                trigger_message TEXT NOT NULL,
+                trigger_data_json TEXT NOT NULL DEFAULT '{}',
+                triggered_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS stock_universe (
                 stock_code TEXT PRIMARY KEY,
                 stock_name TEXT NOT NULL,
@@ -473,6 +497,8 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_portfolio_user_created ON portfolio(user_id, tenant_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_portfolio_position_pid ON portfolio_position(portfolio_id, market_value);
             CREATE INDEX IF NOT EXISTS idx_portfolio_tx_pid_date ON portfolio_transaction(portfolio_id, transaction_date);
+            CREATE INDEX IF NOT EXISTS idx_alert_rule_user_active ON alert_rule(user_id, tenant_id, is_active, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_alert_trigger_rule_time ON alert_trigger_log(rule_id, triggered_at);
             CREATE INDEX IF NOT EXISTS idx_doc_pipeline_run_doc_created ON doc_pipeline_run(doc_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_doc_pipeline_run_stage_status ON doc_pipeline_run(stage, status, created_at);
             CREATE INDEX IF NOT EXISTS idx_stock_industry_map_code ON stock_universe_industry_map(stock_code);

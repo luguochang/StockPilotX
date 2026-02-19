@@ -465,6 +465,38 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c5, 200)
         self.assertTrue(any(int(x.get("portfolio_id", 0)) == pid for x in rows))
 
+    def test_alert_rule_endpoints(self) -> None:
+        c1, created = self._post(
+            "/v1/alerts/rules",
+            {
+                "rule_name": "api-price-rule",
+                "rule_type": "price",
+                "stock_code": "SH600000",
+                "operator": ">",
+                "target_value": 0,
+            },
+        )
+        self.assertEqual(c1, 200)
+        rid = int(created["rule_id"])
+        self.assertGreater(rid, 0)
+
+        c2, rules = self._get("/v1/alerts/rules")
+        self.assertEqual(c2, 200)
+        self.assertTrue(any(int(x.get("rule_id", 0)) == rid for x in rules))
+
+        c3, checked = self._post("/v1/alerts/check", {})
+        self.assertEqual(c3, 200)
+        self.assertGreaterEqual(int(checked.get("checked_rules", 0)), 1)
+
+        c4, logs = self._get("/v1/alerts/logs?limit=20")
+        self.assertEqual(c4, 200)
+        self.assertTrue(isinstance(logs, list))
+        self.assertGreaterEqual(len(logs), 1)
+
+        req = urllib.request.Request(self.base_url + f"/v1/alerts/rules/{rid}", method="DELETE")
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            self.assertEqual(resp.status, 200)
+
     def test_ops_capabilities(self) -> None:
         code, body = self._get("/v1/ops/capabilities")
         self.assertEqual(code, 200)

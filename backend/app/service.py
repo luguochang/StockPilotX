@@ -4987,6 +4987,87 @@ class AShareAgentService:
     def alerts_ack(self, token: str, alert_id: int) -> dict[str, Any]:
         return self.web.alerts_ack(token, alert_id)
 
+    def alert_rule_create(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.web.alert_rule_create(token, payload)
+
+    def alert_rule_list(self, token: str) -> list[dict[str, Any]]:
+        return self.web.alert_rule_list(token)
+
+    def alert_rule_delete(self, token: str, rule_id: int) -> dict[str, Any]:
+        return self.web.alert_rule_delete(token, rule_id)
+
+    def alert_trigger_logs(self, token: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        return self.web.alert_trigger_log_list(token, limit=limit)
+
+    def alert_rule_check(self, token: str) -> dict[str, Any]:
+        rules = [r for r in self.web.alert_rule_list(token) if bool(r.get("is_active", False))]
+        stock_codes = list({str(r.get("stock_code", "")).upper() for r in rules if str(r.get("stock_code", "")).strip()})
+        if stock_codes:
+            try:
+                self.ingest_market_daily(stock_codes)
+            except Exception:
+                pass
+            try:
+                self.ingest_announcements(stock_codes)
+            except Exception:
+                pass
+        quote_map = {str(x.get("stock_code", "")).upper(): x for x in self.ingestion_store.quotes[-500:]}
+        ann_by_code: dict[str, list[dict[str, Any]]] = {}
+        for event in self.ingestion_store.announcements[-800:]:
+            code = str(event.get("stock_code", "")).upper()
+            if not code:
+                continue
+            ann_by_code.setdefault(code, []).append(event)
+
+        triggered: list[dict[str, Any]] = []
+        for rule in rules:
+            rule_id = int(rule.get("rule_id", 0) or 0)
+            code = str(rule.get("stock_code", "")).upper()
+            rule_type = str(rule.get("rule_type", "")).lower()
+            hit = False
+            trigger_data: dict[str, Any] = {}
+            if rule_type == "price":
+                quote = quote_map.get(code, {})
+                current = float(quote.get("price", 0.0) or 0.0)
+                op = str(rule.get("operator", ""))
+                target = float(rule.get("target_value", 0.0) or 0.0)
+                if op == ">" and current > target:
+                    hit = True
+                elif op == "<" and current < target:
+                    hit = True
+                elif op == ">=" and current >= target:
+                    hit = True
+                elif op == "<=" and current <= target:
+                    hit = True
+                trigger_data = {"current_price": current, "target_value": target, "operator": op}
+            elif rule_type == "event":
+                event_type = str(rule.get("event_type", "")).strip().lower()
+                events = ann_by_code.get(code, [])
+                for event in events[-20:]:
+                    title = str(event.get("title", "")).lower()
+                    etype = str(event.get("event_type", "")).lower()
+                    if not event_type or event_type in etype or event_type in title:
+                        hit = True
+                        trigger_data = {
+                            "event_type": etype,
+                            "title": str(event.get("title", "")),
+                            "event_time": str(event.get("event_time", "")),
+                        }
+                        break
+
+            if not hit:
+                continue
+            message = f"rule[{rule_id}] triggered for {code}"
+            alert_id = self.web.create_alert("rule_trigger", "medium", message)
+            self.web.alert_trigger_log_add(
+                rule_id=rule_id,
+                stock_code=code,
+                trigger_message=message,
+                trigger_data=trigger_data,
+            )
+            triggered.append({"alert_id": alert_id, "rule_id": rule_id, "stock_code": code, "message": message, "data": trigger_data})
+        return {"checked_rules": len(rules), "triggered_count": len(triggered), "items": triggered}
+
     def stock_universe_sync(self, token: str) -> dict[str, Any]:
         return self.web.stock_universe_sync(token)
 

@@ -247,6 +247,28 @@ class ServiceTestCase(unittest.TestCase):
         tx = self.svc.portfolio_transactions("", pid, limit=20)
         self.assertGreaterEqual(len(tx), 1)
 
+    def test_alert_rule_lifecycle_and_check(self) -> None:
+        rule = self.svc.alert_rule_create(
+            "",
+            {
+                "rule_name": "price > 0",
+                "rule_type": "price",
+                "stock_code": "SH600000",
+                "operator": ">",
+                "target_value": 0,
+            },
+        )
+        rid = int(rule["rule_id"])
+        self.assertGreater(rid, 0)
+        rules = self.svc.alert_rule_list("")
+        self.assertTrue(any(int(x.get("rule_id", 0)) == rid for x in rules))
+        checked = self.svc.alert_rule_check("")
+        self.assertGreaterEqual(int(checked.get("checked_rules", 0)), 1)
+        self.assertGreaterEqual(int(checked.get("triggered_count", 0)), 1)
+        logs = self.svc.alert_trigger_logs("", limit=20)
+        self.assertGreaterEqual(len(logs), 1)
+        _ = self.svc.alert_rule_delete("", rid)
+
     def test_query_repeated_calls_do_not_hit_global_model_limit(self) -> None:
         # 回归：预算计数应按请求重置，连续请求不应在第9次后失败。
         for idx in range(12):

@@ -1428,6 +1428,95 @@ class WebAppService:
         self.store.execute("INSERT INTO alert_ack (alert_id, user_id) VALUES (?, ?)", (alert_id, me["user_id"]))
         return {"status": "ok", "alert_id": alert_id}
 
+    def alert_rule_create(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        me = self.auth_me(token)
+        rule_name = str(payload.get("rule_name", "")).strip()
+        rule_type = str(payload.get("rule_type", "")).strip().lower()
+        stock_code = str(payload.get("stock_code", "")).strip().upper()
+        operator = str(payload.get("operator", "")).strip()
+        target_value = float(payload.get("target_value", 0.0) or 0.0)
+        event_type = str(payload.get("event_type", "")).strip().lower()
+        if not rule_name:
+            raise ValueError("rule_name is required")
+        if rule_type not in {"price", "event"}:
+            raise ValueError("rule_type must be price or event")
+        if not stock_code:
+            raise ValueError("stock_code is required")
+        if rule_type == "price":
+            if operator not in {">", "<", ">=", "<="}:
+                raise ValueError("operator must be one of >, <, >=, <=")
+        cur = self.store.execute(
+            """
+            INSERT INTO alert_rule
+            (user_id, tenant_id, rule_name, rule_type, stock_code, operator, target_value, event_type, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                me["user_id"],
+                me["tenant_id"],
+                rule_name,
+                rule_type,
+                stock_code,
+                operator,
+                target_value,
+                event_type,
+                int(bool(payload.get("is_active", True))),
+            ),
+        )
+        return {"status": "ok", "rule_id": int(cur.lastrowid)}
+
+    def alert_rule_list(self, token: str) -> list[dict[str, Any]]:
+        me = self.auth_me(token)
+        rows = self.store.query_all(
+            """
+            SELECT id AS rule_id, rule_name, rule_type, stock_code, operator, target_value, event_type, is_active, created_at, updated_at
+            FROM alert_rule
+            WHERE user_id = ? AND tenant_id = ?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (me["user_id"], me["tenant_id"]),
+        )
+        for row in rows:
+            row["is_active"] = bool(int(row.get("is_active", 0) or 0))
+        return rows
+
+    def alert_rule_delete(self, token: str, rule_id: int) -> dict[str, Any]:
+        me = self.auth_me(token)
+        self.store.execute(
+            "DELETE FROM alert_rule WHERE id = ? AND user_id = ? AND tenant_id = ?",
+            (int(rule_id), me["user_id"], me["tenant_id"]),
+        )
+        return {"status": "ok", "rule_id": int(rule_id)}
+
+    def alert_trigger_log_add(self, *, rule_id: int, stock_code: str, trigger_message: str, trigger_data: dict[str, Any]) -> int:
+        cur = self.store.execute(
+            """
+            INSERT INTO alert_trigger_log (rule_id, stock_code, trigger_message, trigger_data_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (int(rule_id), str(stock_code).upper(), str(trigger_message), json.dumps(trigger_data, ensure_ascii=False)),
+        )
+        return int(cur.lastrowid)
+
+    def alert_trigger_log_list(self, token: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        me = self.auth_me(token)
+        safe_limit = max(1, min(1000, int(limit)))
+        rows = self.store.query_all(
+            """
+            SELECT l.id AS alert_id, l.rule_id, l.stock_code, l.trigger_message, l.trigger_data_json, l.triggered_at
+            FROM alert_trigger_log l
+            JOIN alert_rule r ON r.id = l.rule_id
+            WHERE r.user_id = ? AND r.tenant_id = ?
+            ORDER BY l.id DESC
+            LIMIT ?
+            """,
+            (me["user_id"], me["tenant_id"], safe_limit),
+        )
+        for row in rows:
+            row["trigger_data"] = self._json_loads_or(row.get("trigger_data_json"), {})
+            row.pop("trigger_data_json", None)
+        return rows
+
     def rag_eval_add(self, *, query_text: str, positive_source_ids: list[str], predicted_source_ids: list[str]) -> None:
         self.store.execute(
             "INSERT INTO rag_eval_case (query_text, positive_source_ids, predicted_source_ids) VALUES (?, ?, ?)",

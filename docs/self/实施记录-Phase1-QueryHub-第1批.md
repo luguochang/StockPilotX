@@ -469,3 +469,66 @@
 - [x] Portfolio API 路由
 - [x] 服务层/API 层测试
 - [x] 回归测试通过
+
+## 第10批增量（Phase2 - Alert System 第1批）
+
+### 新增能力
+
+1. 预警规则与触发日志表
+- `backend/app/web/store.py`
+  - 新增：
+    - `alert_rule`
+    - `alert_trigger_log`
+  - 新增索引：
+    - `idx_alert_rule_user_active`
+    - `idx_alert_trigger_rule_time`
+
+2. 规则管理与日志服务
+- `backend/app/web/service.py`
+  - 新增：
+    - `alert_rule_create`
+    - `alert_rule_list`
+    - `alert_rule_delete`
+    - `alert_trigger_log_add`
+    - `alert_trigger_log_list`
+
+3. 规则评估引擎（应用层）
+- `backend/app/service.py`
+  - 新增：
+    - `alert_rule_check`（价格规则/事件规则）
+    - `alert_rule_create / list / delete`
+    - `alert_trigger_logs`
+  - 触发后会写：
+    - `alert_event`（现有告警中心）
+    - `alert_trigger_log`（规则触发审计）
+
+4. API 路由
+- `backend/app/http_api.py`
+  - `POST /v1/alerts/rules`
+  - `GET /v1/alerts/rules`
+  - `DELETE /v1/alerts/rules/{rule_id}`
+  - `POST /v1/alerts/check`
+  - `GET /v1/alerts/logs`
+
+### 第10批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python -m pytest -q tests/test_service.py -k "test_alert_rule_lifecycle_and_check"
+.\.venv\Scripts\python -m pytest -q tests/test_http_api.py -k "test_alert_rule_endpoints"
+.\.venv\Scripts\python -m pytest -q tests -k "web or api or query or docs or portfolio or alert"
+```
+
+结果：
+- 1 passed, 32 deselected
+- 1 passed, 22 deselected
+- 35 passed, 57 deselected
+
+### 第10批 Checklist
+
+- [x] Alert 规则表与日志表
+- [x] 价格/事件规则评估
+- [x] 告警触发日志落库
+- [x] Alert 规则 API
+- [x] 服务层/API 层测试
+- [x] 回归测试通过

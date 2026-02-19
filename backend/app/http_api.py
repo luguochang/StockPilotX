@@ -926,6 +926,46 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    @app.post("/v1/alerts/rules")
+    def alert_rule_create(payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.alert_rule_create(token, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/alerts/rules")
+    def alert_rule_list(authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.alert_rule_list(token)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.delete("/v1/alerts/rules/{rule_id}")
+    def alert_rule_delete(rule_id: int, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.alert_rule_delete(token, rule_id)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.post("/v1/alerts/check")
+    def alert_rule_check(authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.alert_rule_check(token)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/alerts/logs")
+    def alert_trigger_logs(limit: int = 100, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.alert_trigger_logs(token, limit=limit)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     # ---------------- WEB-009 Stock Universe ----------------
     @app.post("/v1/stocks/sync")
     def stocks_sync(authorization: str | None = Header(default=None)):
