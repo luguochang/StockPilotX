@@ -5696,6 +5696,8 @@ class AShareAgentService:
                         "reliability_score": round(reliability, 4),
                         "source_url": str(getattr(adapter, "source_url", "") or ""),
                         "proxy_enabled": bool(proxy_url.strip()),
+                        # Frontend uses this list to explain datasource business impact.
+                        "used_in_ui_modules": self._datasource_ui_modules(category),
                     }
                 )
         # History ingestion currently relies on HistoryService (non-adapter style), expose a synthetic row.
@@ -5707,6 +5709,7 @@ class AShareAgentService:
                 "reliability_score": 0.9,
                 "source_url": "https://push2his.eastmoney.com/",
                 "proxy_enabled": bool(str(self.settings.datasource_proxy_url or "").strip()),
+                "used_in_ui_modules": self._datasource_ui_modules("history"),
             }
         )
 
@@ -5714,6 +5717,22 @@ class AShareAgentService:
         for row in rows:
             dedup.setdefault(str(row["source_id"]), row)
         return sorted(dedup.values(), key=lambda x: (str(x.get("category", "")), str(x.get("source_id", ""))))
+
+    @staticmethod
+    def _datasource_ui_modules(category: str) -> list[str]:
+        """Map datasource category to user-facing modules for observability explainability."""
+        mapping = {
+            "quote": ["/deep-think", "/analysis-studio", "/predict", "/watchlist"],
+            "announcement": ["/deep-think", "/reports", "/analysis-studio"],
+            "financial": ["/deep-think", "/analysis-studio", "/predict"],
+            "news": ["/deep-think", "/analysis-studio", "/reports"],
+            "research": ["/deep-think", "/analysis-studio", "/reports"],
+            "macro": ["/deep-think", "/analysis-studio"],
+            "fund": ["/deep-think", "/analysis-studio"],
+            "history": ["/deep-think", "/analysis-studio", "/predict"],
+            "scheduler": ["/ops/scheduler", "/ops/health"],
+        }
+        return list(mapping.get(str(category or "").strip().lower(), []))
 
     def _append_datasource_log(
         self,
@@ -5794,6 +5813,12 @@ class AShareAgentService:
             success = int(metric.get("success", 0) or 0)
             success_rate = (float(success) / float(attempts)) if attempts > 0 else 1.0
             failure_rate = (float(failed) / float(attempts)) if attempts > 0 else 0.0
+            # When a source has never been fetched in this process lifetime, freshness is unknown.
+            last_seen_at = str(metric.get("last_seen_at", ""))
+            staleness_minutes: int | None = None
+            if last_seen_at:
+                delta = datetime.now(timezone.utc) - self._parse_time(last_seen_at)
+                staleness_minutes = max(0, int(delta.total_seconds() // 60))
             item = {
                 **source,
                 "attempts": attempts,
@@ -5801,8 +5826,14 @@ class AShareAgentService:
                 "failure_rate": round(failure_rate, 4),
                 "last_error": str(metric.get("last_error", "")),
                 "last_latency_ms": int(metric.get("last_latency_ms", 0) or 0),
-                "updated_at": str(metric.get("last_seen_at", "")),
+                "updated_at": last_seen_at,
+                "last_used_at": last_seen_at,
+                "staleness_minutes": staleness_minutes,
                 "circuit_open": False,
+                "used_in_ui_modules": source.get(
+                    "used_in_ui_modules",
+                    self._datasource_ui_modules(str(source.get("category", ""))),
+                ),
             }
             self.web.source_health_upsert(
                 source_id=source_id,
@@ -5824,6 +5855,11 @@ class AShareAgentService:
             circuit_open = bool(snapshot.get("circuit_open_until"))
             if circuit_open:
                 self.web.create_alert("scheduler_circuit_open", "high", f"{job_name} circuit open")
+            scheduler_updated_at = str(snapshot.get("last_run_at", ""))
+            scheduler_staleness: int | None = None
+            if scheduler_updated_at:
+                delta = datetime.now(timezone.utc) - self._parse_time(scheduler_updated_at)
+                scheduler_staleness = max(0, int(delta.total_seconds() // 60))
             items.append(
                 {
                     "source_id": str(job_name),
@@ -5837,8 +5873,11 @@ class AShareAgentService:
                     "failure_rate": 0.0 if snapshot.get("last_status") in ("ok", "never") else 1.0,
                     "last_error": str(snapshot.get("last_error", "")),
                     "last_latency_ms": 0,
-                    "updated_at": str(snapshot.get("last_run_at", "")),
+                    "updated_at": scheduler_updated_at,
+                    "last_used_at": scheduler_updated_at,
+                    "staleness_minutes": scheduler_staleness,
                     "circuit_open": circuit_open,
+                    "used_in_ui_modules": self._datasource_ui_modules("scheduler"),
                 }
             )
 

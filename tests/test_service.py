@@ -125,6 +125,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertGreater(int(sources.get("count", 0)), 0)
         items = sources.get("items", [])
         self.assertTrue(isinstance(items, list))
+        self.assertTrue(all(isinstance(x.get("used_in_ui_modules", []), list) for x in items))
         target = next((x for x in items if str(x.get("category", "")) == "news"), items[0])
         source_id = str(target.get("source_id", ""))
         self.assertTrue(source_id)
@@ -140,7 +141,11 @@ class ServiceTestCase(unittest.TestCase):
 
         health = self.svc.datasource_health("", limit=200)
         self.assertGreater(int(health.get("count", 0)), 0)
-        self.assertTrue(any(str(x.get("source_id", "")) == source_id for x in health.get("items", [])))
+        target_health = next((x for x in health.get("items", []) if str(x.get("source_id", "")) == source_id), None)
+        self.assertIsNotNone(target_health)
+        self.assertTrue(isinstance((target_health or {}).get("used_in_ui_modules", []), list))
+        self.assertIn("last_used_at", target_health or {})
+        self.assertIn("staleness_minutes", target_health or {})
 
     def test_doc_upload_and_index(self) -> None:
         up = self.svc.docs_upload("d1", "demo.pdf", "财报正文" * 600, "user")

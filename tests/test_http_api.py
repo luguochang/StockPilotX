@@ -298,6 +298,7 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c1, 200)
         self.assertGreater(int(sources.get("count", 0)), 0)
         self.assertTrue(isinstance(sources.get("items", []), list))
+        self.assertTrue(all(isinstance(x.get("used_in_ui_modules", []), list) for x in sources.get("items", [])))
         target = next((x for x in sources.get("items", []) if str(x.get("category", "")) == "news"), sources["items"][0])
         source_id = str(target.get("source_id", ""))
         self.assertTrue(source_id)
@@ -319,7 +320,11 @@ class HttpApiTestCase(unittest.TestCase):
         c4, health = self._get("/v1/datasources/health?limit=200")
         self.assertEqual(c4, 200)
         self.assertGreater(int(health.get("count", 0)), 0)
-        self.assertTrue(any(str(x.get("source_id", "")) == source_id for x in health.get("items", [])))
+        target_health = next((x for x in health.get("items", []) if str(x.get("source_id", "")) == source_id), None)
+        self.assertIsNotNone(target_health)
+        self.assertTrue(isinstance((target_health or {}).get("used_in_ui_modules", []), list))
+        self.assertIn("last_used_at", target_health or {})
+        self.assertIn("staleness_minutes", target_health or {})
 
     def test_docs_upload_and_index(self) -> None:
         upload_code, uploaded = self._post(
