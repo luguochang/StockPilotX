@@ -15,7 +15,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from statistics import mean
 from typing import Any
 
@@ -3317,6 +3317,334 @@ class AShareAgentService:
             "fund": fund,
             "macro": macro,
             "trend": trend,
+        }
+
+    def analysis_intel_card(self, stock_code: str, *, horizon: str = "30d", risk_profile: str = "neutral") -> dict[str, Any]:
+        """Build business-facing intel card from multi-source evidence."""
+        code = stock_code.upper().replace(".", "")
+        horizon_days_map = {"7d": 7, "30d": 30, "90d": 90}
+        if horizon not in horizon_days_map:
+            raise ValueError("horizon must be one of: 7d, 30d, 90d")
+        profile = str(risk_profile or "neutral").strip().lower()
+        if profile not in {"conservative", "neutral", "aggressive"}:
+            raise ValueError("risk_profile must be one of: conservative, neutral, aggressive")
+
+        overview = self.market_overview(code)
+        realtime = overview.get("realtime", {}) or {}
+        financial = overview.get("financial", {}) or {}
+        trend = overview.get("trend", {}) or {}
+        events = list(overview.get("events", []) or [])[-8:]
+        news = list(overview.get("news", []) or [])[-10:]
+        research = list(overview.get("research", []) or [])[-8:]
+        macro = list(overview.get("macro", []) or [])[-8:]
+        fund_rows = list(overview.get("fund", []) or [])
+        fund_row = fund_rows[-1] if fund_rows else {}
+
+        def minutes_since(ts_value: str) -> int | None:
+            raw = str(ts_value or "").strip()
+            if not raw:
+                return None
+            delta = datetime.now(timezone.utc) - self._parse_time(raw)
+            return max(0, int(delta.total_seconds() // 60))
+
+        evidence_rows: list[dict[str, Any]] = []
+        key_catalysts: list[dict[str, Any]] = []
+        risk_watch: list[dict[str, Any]] = []
+
+        positive_keywords = ("增长", "增持", "中标", "回购", "改善", "突破", "上调", "buy", "outperform")
+        negative_keywords = ("下滑", "减持", "诉讼", "处罚", "亏损", "风险", "下调", "sell", "underperform")
+
+        def add_evidence(
+            *,
+            kind: str,
+            title: str,
+            summary: str,
+            source_id: str,
+            source_url: str,
+            event_time: str,
+            reliability_score: float,
+            retrieval_track: str,
+        ) -> None:
+            evidence_rows.append(
+                {
+                    "kind": kind,
+                    "title": title[:220],
+                    "summary": summary[:420],
+                    "source_id": source_id,
+                    "source_url": source_url,
+                    "event_time": event_time,
+                    "reliability_score": round(max(0.0, min(1.0, reliability_score)), 4),
+                    "retrieval_track": retrieval_track,
+                }
+            )
+
+        def classify_row(title: str, summary: str, payload: dict[str, Any], *, kind: str, default_signal: str = "neutral") -> None:
+            text = f"{title} {summary}".lower()
+            signal = default_signal
+            if any(x in text for x in positive_keywords):
+                signal = "positive"
+            elif any(x in text for x in negative_keywords):
+                signal = "negative"
+            row = {
+                "kind": kind,
+                "title": title[:180],
+                "summary": summary[:240],
+                "source_id": str(payload.get("source_id", "")),
+                "source_url": str(payload.get("source_url", "")),
+                "event_time": str(payload.get("event_time", payload.get("published_at", payload.get("report_date", "")))),
+                "reliability_score": float(payload.get("reliability_score", 0.0) or 0.0),
+                "signal": signal,
+            }
+            if signal == "negative":
+                risk_watch.append(row)
+            else:
+                key_catalysts.append(row)
+
+        for row in news[-6:]:
+            title = str(row.get("title", "")).strip()
+            summary = str(row.get("content", "")).strip() or title
+            add_evidence(
+                kind="news",
+                title=title,
+                summary=summary,
+                source_id=str(row.get("source_id", "")),
+                source_url=str(row.get("source_url", "")),
+                event_time=str(row.get("event_time", "")),
+                reliability_score=float(row.get("reliability_score", 0.0) or 0.0),
+                retrieval_track="news_event",
+            )
+            classify_row(title, summary, row, kind="news", default_signal="neutral")
+
+        for row in research[-5:]:
+            title = str(row.get("title", "")).strip()
+            org = str(row.get("org_name", "")).strip()
+            summary = f"{org} {str(row.get('content', '')).strip()}".strip() or title
+            add_evidence(
+                kind="research",
+                title=title,
+                summary=summary,
+                source_id=str(row.get("source_id", "")),
+                source_url=str(row.get("source_url", "")),
+                event_time=str(row.get("published_at", "")),
+                reliability_score=float(row.get("reliability_score", 0.0) or 0.0),
+                retrieval_track="research_report",
+            )
+            classify_row(title, summary, row, kind="research", default_signal="positive")
+
+        for row in macro[-4:]:
+            metric_name = str(row.get("metric_name", "")).strip()
+            metric_value = str(row.get("metric_value", "")).strip()
+            title = metric_name or "宏观指标"
+            summary = f"{metric_name}={metric_value}，报告日={row.get('report_date', '')}".strip("，")
+            add_evidence(
+                kind="macro",
+                title=title,
+                summary=summary,
+                source_id=str(row.get("source_id", "")),
+                source_url=str(row.get("source_url", "")),
+                event_time=str(row.get("event_time", row.get("report_date", ""))),
+                reliability_score=float(row.get("reliability_score", 0.0) or 0.0),
+                retrieval_track="macro_indicator",
+            )
+            classify_row(title, summary, row, kind="macro", default_signal="neutral")
+
+        if fund_row:
+            fund_summary = (
+                f"主力={float(fund_row.get('main_inflow', 0.0) or 0.0):.2f}, "
+                f"大单={float(fund_row.get('large_inflow', 0.0) or 0.0):.2f}, "
+                f"小单={float(fund_row.get('small_inflow', 0.0) or 0.0):.2f}"
+            )
+            add_evidence(
+                kind="fund",
+                title="资金流向",
+                summary=fund_summary,
+                source_id=str(fund_row.get("source_id", "")),
+                source_url=str(fund_row.get("source_url", "")),
+                event_time=str(fund_row.get("ts", fund_row.get("trade_date", ""))),
+                reliability_score=float(fund_row.get("reliability_score", 0.0) or 0.0),
+                retrieval_track="fund_flow",
+            )
+            classify_row("资金流向", fund_summary, fund_row, kind="fund", default_signal="neutral")
+
+        for row in events[-3:]:
+            title = str(row.get("title", "")).strip()
+            summary = str(row.get("content", "")).strip() or title
+            add_evidence(
+                kind="announcement",
+                title=title,
+                summary=summary,
+                source_id=str(row.get("source_id", "")),
+                source_url=str(row.get("source_url", "")),
+                event_time=str(row.get("event_time", "")),
+                reliability_score=float(row.get("reliability_score", 0.0) or 0.0),
+                retrieval_track="announcement_event",
+            )
+            classify_row(title, summary, row, kind="announcement", default_signal="neutral")
+
+        # Score integrates trend, fundamentals and multi-source evidence polarity.
+        score = 0.0
+        ma20 = float(trend.get("ma20", 0.0) or 0.0)
+        ma60 = float(trend.get("ma60", 0.0) or 0.0)
+        momentum_20 = float(trend.get("momentum_20", 0.0) or 0.0)
+        volatility_20 = float(trend.get("volatility_20", 0.0) or 0.0)
+        drawdown_60 = float(trend.get("max_drawdown_60", 0.0) or 0.0)
+        pct_change = float(realtime.get("pct_change", 0.0) or 0.0)
+        main_inflow = float(fund_row.get("main_inflow", 0.0) or 0.0)
+        revenue_yoy = float(financial.get("revenue_yoy", 0.0) or 0.0)
+        profit_yoy = float(financial.get("net_profit_yoy", 0.0) or 0.0)
+
+        score += 0.9 if ma20 >= ma60 else -0.8
+        score += 0.8 if momentum_20 > 0 else -0.7
+        score += 0.4 if pct_change > 0 else -0.3
+        score += 0.45 if main_inflow > 0 else -0.35
+        score += 0.35 if revenue_yoy > 0 else -0.25
+        score += 0.35 if profit_yoy > 0 else -0.25
+        score += min(1.0, 0.2 * len(key_catalysts))
+        score -= min(1.2, 0.3 * len(risk_watch))
+
+        signal = "hold"
+        if score >= 1.2:
+            signal = "buy"
+        elif score <= -0.8:
+            signal = "reduce"
+
+        risk_level = "medium"
+        if drawdown_60 > 0.2 or volatility_20 > 0.03:
+            risk_level = "high"
+        elif drawdown_60 < 0.1 and volatility_20 < 0.015 and momentum_20 > 0:
+            risk_level = "low"
+
+        # If evidence is sparse, cap confidence to avoid overclaiming.
+        confidence_raw = 0.42 + abs(score) * 0.1 + min(0.2, len(evidence_rows) * 0.015)
+        confidence = min(0.92, max(0.35, confidence_raw))
+        if len(evidence_rows) < 4:
+            confidence = min(confidence, 0.6)
+
+        position_hint_map = {
+            "buy": {"conservative": "20-35%", "neutral": "35-60%", "aggressive": "55-75%"},
+            "hold": {"conservative": "10-20%", "neutral": "20-35%", "aggressive": "25-45%"},
+            "reduce": {"conservative": "0-10%", "neutral": "5-15%", "aggressive": "10-20%"},
+        }
+        position_hint = position_hint_map[signal][profile]
+
+        base_return_pct = momentum_20 * 100.0 if momentum_20 != 0 else pct_change * 0.35
+        profile_shift = {"conservative": -1.5, "neutral": 0.0, "aggressive": 1.5}[profile]
+        risk_penalty = {"low": 2.0, "medium": 4.0, "high": 7.0}[risk_level]
+        scenario_matrix = [
+            {
+                "scenario": "bull",
+                "expected_return_pct": round(base_return_pct + 8.0 + profile_shift, 2),
+                "probability": 0.25 if risk_level != "high" else 0.18,
+            },
+            {
+                "scenario": "base",
+                "expected_return_pct": round(base_return_pct - risk_penalty * 0.25, 2),
+                "probability": 0.5 if risk_level != "high" else 0.42,
+            },
+            {
+                "scenario": "bear",
+                "expected_return_pct": round(base_return_pct - risk_penalty - 4.0, 2),
+                "probability": 0.25 if risk_level != "high" else 0.4,
+            },
+        ]
+
+        event_calendar: list[dict[str, Any]] = []
+        for row in events[-4:]:
+            event_calendar.append(
+                {
+                    "date": str(row.get("event_time", ""))[:10],
+                    "title": str(row.get("title", "公司公告"))[:120],
+                    "event_type": "company",
+                    "source_id": str(row.get("source_id", "")),
+                }
+            )
+        for row in macro[-3:]:
+            event_calendar.append(
+                {
+                    "date": str(row.get("report_date", row.get("event_time", "")))[:10],
+                    "title": f"{str(row.get('metric_name', '宏观指标'))} {str(row.get('metric_value', ''))}".strip(),
+                    "event_type": "macro",
+                    "source_id": str(row.get("source_id", "")),
+                }
+            )
+        if not event_calendar:
+            event_calendar.append(
+                {
+                    "date": (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d"),
+                    "title": "下一交易日复核窗口",
+                    "event_type": "review",
+                    "source_id": "system",
+                }
+            )
+
+        # Keep evidence sorted by recency so frontend can stream top signals first.
+        evidence_rows = sorted(
+            evidence_rows,
+            key=lambda x: str(x.get("event_time", "")),
+            reverse=True,
+        )[:16]
+        key_catalysts = sorted(
+            key_catalysts,
+            key=lambda x: (str(x.get("event_time", "")), float(x.get("reliability_score", 0.0))),
+            reverse=True,
+        )[:8]
+        risk_watch = sorted(
+            risk_watch,
+            key=lambda x: (str(x.get("event_time", "")), float(x.get("reliability_score", 0.0))),
+            reverse=True,
+        )[:8]
+
+        freshness = {
+            "quote_minutes": minutes_since(str(realtime.get("ts", ""))),
+            "financial_minutes": minutes_since(str(financial.get("ts", ""))),
+            "news_minutes": minutes_since(str(news[-1].get("event_time", ""))) if news else None,
+            "research_minutes": minutes_since(str(research[-1].get("published_at", ""))) if research else None,
+            "macro_minutes": minutes_since(str(macro[-1].get("event_time", ""))) if macro else None,
+            "fund_minutes": minutes_since(str(fund_row.get("ts", ""))) if fund_row else None,
+        }
+
+        trigger_conditions = [
+            "趋势维持（MA20>=MA60 且 20日动量不转负）",
+            "资金流向不显著恶化（主力净流入不连续转负）",
+            "核心证据更新频率维持（日内/日级别有新证据）",
+        ]
+        invalidation_conditions = [
+            "关键风险事件落地且方向偏负面",
+            "趋势反转（MA20<MA60 且动量连续走弱）",
+            "波动或回撤超过风险阈值（volatility_20 / max_drawdown_60）",
+        ]
+        if risk_level == "high":
+            trigger_conditions.append("仅在风险收敛后考虑恢复仓位节奏")
+
+        review_hours = 6 if risk_level == "high" else 24 if risk_level == "medium" else 48
+        return {
+            "stock_code": code,
+            "time_horizon": horizon,
+            "horizon_days": horizon_days_map[horizon],
+            "risk_profile": profile,
+            "overall_signal": signal,
+            "confidence": round(confidence, 4),
+            "risk_level": risk_level,
+            "position_hint": position_hint,
+            "market_snapshot": {
+                "price": float(realtime.get("price", 0.0) or 0.0),
+                "pct_change": pct_change,
+                "ma20": ma20,
+                "ma60": ma60,
+                "momentum_20": momentum_20,
+                "volatility_20": volatility_20,
+                "max_drawdown_60": drawdown_60,
+                "main_inflow": main_inflow,
+            },
+            "key_catalysts": key_catalysts,
+            "risk_watch": risk_watch,
+            "event_calendar": event_calendar,
+            "scenario_matrix": scenario_matrix,
+            "evidence": evidence_rows,
+            "trigger_conditions": trigger_conditions,
+            "invalidation_conditions": invalidation_conditions,
+            "next_review_time": (datetime.now(timezone.utc) + timedelta(hours=review_hours)).isoformat(),
+            "data_freshness": freshness,
         }
 
     def backtest_run(self, payload: dict[str, Any]) -> dict[str, Any]:

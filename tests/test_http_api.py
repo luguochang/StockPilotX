@@ -494,6 +494,22 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("realtime", body)
         self.assertIn("history", body)
 
+    def test_analysis_intel_card(self) -> None:
+        code, body = self._get("/v1/analysis/intel-card?stock_code=SH600000&horizon=30d&risk_profile=neutral")
+        self.assertEqual(code, 200)
+        self.assertEqual(str(body.get("stock_code", "")), "SH600000")
+        self.assertIn(str(body.get("overall_signal", "")), {"buy", "hold", "reduce"})
+        self.assertIn("evidence", body)
+        self.assertIn("event_calendar", body)
+        self.assertIn("data_freshness", body)
+
+        with self.assertRaises(urllib.error.HTTPError) as bad_horizon:
+            urllib.request.urlopen(  # noqa: S310 - local endpoint
+                self.base_url + "/v1/analysis/intel-card?stock_code=SH600000&horizon=15d",
+                timeout=8,
+            )
+        self.assertEqual(bad_horizon.exception.code, 400)
+
     def test_portfolio_endpoints(self) -> None:
         c1, created = self._post(
             "/v1/portfolio",

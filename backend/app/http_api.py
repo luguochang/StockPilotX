@@ -479,6 +479,13 @@ def create_app() -> FastAPI:
     def market_overview(stock_code: str):
         return svc.market_overview(stock_code)
 
+    @app.get("/v1/analysis/intel-card")
+    def analysis_intel_card(stock_code: str, horizon: str = "30d", risk_profile: str = "neutral"):
+        try:
+            return svc.analysis_intel_card(stock_code, horizon=horizon, risk_profile=risk_profile)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+
     @app.post("/v1/backtest/run")
     def backtest_run(payload: dict):
         try:

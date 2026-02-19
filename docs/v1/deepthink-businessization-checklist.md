@@ -15,10 +15,10 @@
   - [x] 产出“数据源 -> 页面模块”覆盖矩阵文档
   - [x] 完成回归自测并记录
 
-- [ ] ROUND-2：后端业务映射层（Intel Card）
-  - [ ] 新增 `GET /v1/analysis/intel-card`
-  - [ ] 统一新闻/研报/资金/宏观到业务字段层
-  - [ ] 补齐接口测试与类型注释
+- [x] ROUND-2：后端业务映射层（Intel Card）
+  - [x] 新增 `GET /v1/analysis/intel-card`
+  - [x] 统一新闻/研报/资金/宏观到业务字段层
+  - [x] 补齐接口测试与类型注释
 
 - [ ] ROUND-3：RAG 两阶段检索
   - [ ] 粗排（BM25+向量）
@@ -50,3 +50,4 @@
 ## 执行日志
 
 1. `2026-02-19 | ROUND-1 | 完成 ops/health 新接口切换、可见性字段增强与覆盖矩阵文档 | commit: 63f672e | doc: docs/v1/2026-02-19-round-1-ops-health-and-visibility-matrix.md`
+2. `2026-02-19 | ROUND-2 | 新增 intel-card 聚合接口，输出业务结论/证据/事件日历/情景矩阵并补充回归测试 | commit: 待提交 | doc: docs/v1/2026-02-19-round-2-intel-card-api.md`

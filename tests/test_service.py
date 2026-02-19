@@ -277,6 +277,21 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("macro", data)
         self.assertGreater(len(data["history"]), 30)
 
+    def test_analysis_intel_card_contract(self) -> None:
+        card = self.svc.analysis_intel_card("SH600000", horizon="30d", risk_profile="neutral")
+        self.assertEqual(str(card.get("stock_code", "")), "SH600000")
+        self.assertIn(str(card.get("overall_signal", "")), {"buy", "hold", "reduce"})
+        self.assertTrue(0.0 <= float(card.get("confidence", 0.0) or 0.0) <= 1.0)
+        self.assertIn("key_catalysts", card)
+        self.assertIn("risk_watch", card)
+        self.assertIn("event_calendar", card)
+        self.assertIn("scenario_matrix", card)
+        self.assertIn("evidence", card)
+        self.assertIn("data_freshness", card)
+        self.assertTrue(isinstance(card.get("evidence", []), list))
+        self.assertTrue(isinstance(card.get("trigger_conditions", []), list))
+        self.assertTrue(isinstance(card.get("invalidation_conditions", []), list))
+
     def test_portfolio_lifecycle(self) -> None:
         created = self.svc.portfolio_create(
             "",
