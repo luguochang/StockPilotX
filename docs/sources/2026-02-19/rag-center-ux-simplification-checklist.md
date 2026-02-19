@@ -41,4 +41,4 @@
 
 ## Commit 记录
 1. `223e7b1` | `feat(ux): simplify rag-center business upload flow with preset-first entry`
-2. 待本轮提交后补充（ROUND-UX-7）
+2. `0678a1c` | `feat(rag): add upload-time retrieval preview and verification UI`
