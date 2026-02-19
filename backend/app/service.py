@@ -3788,6 +3788,136 @@ class AShareAgentService:
         payload.setdefault("emitted_at", datetime.now(timezone.utc).isoformat())
         return {"event": event_name, "data": payload}
 
+    @staticmethod
+    def _deep_journal_related_research_id(session_id: str, round_id: str) -> str:
+        """Stable idempotency key for linking one round to one journal record."""
+        return f"deepthink:{str(session_id).strip()}:{str(round_id).strip()}"
+
+    def _deep_build_journal_from_business_summary(
+        self,
+        *,
+        session_id: str,
+        round_id: str,
+        round_no: int,
+        question: str,
+        stock_code: str,
+        business_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        signal = str(business_summary.get("signal", "hold")).strip().lower() or "hold"
+        confidence = float(business_summary.get("confidence", 0.0) or 0.0)
+        related_research_id = self._deep_journal_related_research_id(session_id, round_id)
+        title = f"DeepThink R{round_no} {stock_code or 'UNASSIGNED'} {signal}".strip()
+        content_lines = [
+            f"[DeepThink] session={session_id}, round={round_id}, round_no={round_no}",
+            f"问题: {question}",
+            f"结论: signal={signal}, confidence={confidence:.4f}, disagreement={float(business_summary.get('disagreement_score', 0.0) or 0.0):.4f}",
+            f"触发条件: {str(business_summary.get('trigger_condition', ''))}",
+            f"失效条件: {str(business_summary.get('invalidation_condition', ''))}",
+            f"复核建议: {str(business_summary.get('review_time_hint', 'T+1 日内复核'))}",
+            f"风险偏好: {str(business_summary.get('risk_bias', ''))}, 市场状态: {str(business_summary.get('market_regime', ''))}",
+            f"冲突源: {','.join(str(x) for x in list(business_summary.get('top_conflict_sources', []))[:6]) or 'none'}",
+        ]
+        tags = [
+            "deepthink",
+            "auto_link",
+            f"round_{round_no}",
+            signal,
+            str(stock_code or "").strip().upper() or "unassigned",
+        ]
+        sentiment = "positive" if signal == "buy" else "negative" if signal == "reduce" else "neutral"
+        return {
+            "journal_type": "reflection",
+            "title": title[:200],
+            "content": "\n".join(content_lines)[:8000],
+            "stock_code": str(stock_code or "").strip().upper(),
+            "decision_type": signal[:40],
+            "related_research_id": related_research_id[:120],
+            "tags": tags,
+            "sentiment": sentiment,
+        }
+
+    def _deep_auto_link_journal_entry(
+        self,
+        *,
+        session_id: str,
+        round_id: str,
+        round_no: int,
+        question: str,
+        stock_code: str,
+        business_summary: dict[str, Any],
+        auto_journal: bool,
+    ) -> dict[str, Any]:
+        """Auto-create/reuse journal entry for each DeepThink round, with idempotent key."""
+        related_research_id = self._deep_journal_related_research_id(session_id, round_id)
+        if not auto_journal:
+            return {
+                "ok": True,
+                "enabled": False,
+                "action": "disabled",
+                "journal_id": 0,
+                "related_research_id": related_research_id,
+                "session_id": session_id,
+                "round_id": round_id,
+                "round_no": round_no,
+            }
+        try:
+            existed = self.web.journal_find_by_related_research("", related_research_id=related_research_id)
+            existing_id = int(existed.get("journal_id", 0) or 0)
+            if existing_id > 0:
+                return {
+                    "ok": True,
+                    "enabled": True,
+                    "action": "reused",
+                    "journal_id": existing_id,
+                    "related_research_id": related_research_id,
+                    "session_id": session_id,
+                    "round_id": round_id,
+                    "round_no": round_no,
+                }
+
+            create_payload = self._deep_build_journal_from_business_summary(
+                session_id=session_id,
+                round_id=round_id,
+                round_no=round_no,
+                question=question,
+                stock_code=stock_code,
+                business_summary=business_summary,
+            )
+            created = self.web.journal_create(
+                "",
+                journal_type=str(create_payload.get("journal_type", "reflection")),
+                title=str(create_payload.get("title", "")),
+                content=str(create_payload.get("content", "")),
+                stock_code=str(create_payload.get("stock_code", "")),
+                decision_type=str(create_payload.get("decision_type", "")),
+                related_research_id=str(create_payload.get("related_research_id", "")),
+                related_portfolio_id=None,
+                tags=create_payload.get("tags", []),
+                sentiment=str(create_payload.get("sentiment", "")),
+            )
+            return {
+                "ok": True,
+                "enabled": True,
+                "action": "created",
+                "journal_id": int(created.get("journal_id", 0) or 0),
+                "related_research_id": related_research_id,
+                "session_id": session_id,
+                "round_id": round_id,
+                "round_no": round_no,
+            }
+        except Exception as ex:  # noqa: BLE001
+            return {
+                "ok": False,
+                "enabled": True,
+                "action": "failed",
+                "journal_id": 0,
+                "related_research_id": related_research_id,
+                "session_id": session_id,
+                "round_id": round_id,
+                "round_no": round_no,
+                "error": str(ex)[:280],
+            }
+
     def deep_think_run_round_stream_events(self, session_id: str, payload: dict[str, Any] | None = None):
         """V2 真流式执行：执行过程中逐步产出事件，并在结束时返回会话快照。"""
         payload = payload or {}
@@ -4135,6 +4265,18 @@ class AShareAgentService:
                 stop_reason=stop_reason,
             )
             yield emit("business_summary", dict(business_summary))
+            # DeepThink -> Journal 自动落库：round_id 作为幂等键，避免重复写入。
+            journal_link = self._deep_auto_link_journal_entry(
+                session_id=session_id,
+                round_id=round_id,
+                round_no=round_no,
+                question=question,
+                stock_code=code,
+                business_summary=business_summary,
+                auto_journal=bool(payload.get("auto_journal", True)),
+            )
+            if bool(journal_link.get("enabled", False)):
+                yield emit("journal_linked", dict(journal_link))
 
             session_status = "completed" if round_no >= max_rounds or stop_reason else "in_progress"
             snapshot = self.web.deep_think_append_round(
@@ -4155,6 +4297,7 @@ class AShareAgentService:
             )
             # 业务摘要通过会话快照透传给同步接口调用方，便于前端直接展示。
             snapshot["business_summary"] = business_summary
+            snapshot["journal_link"] = journal_link
 
             avg_confidence = sum(float(x.get("confidence", 0.0)) for x in opinions) / max(1, len(opinions))
             quality_score = self._quality_score_for_group_card(
@@ -4361,6 +4504,29 @@ class AShareAgentService:
                     },
                 }
             )
+        round_id = str(latest.get("round_id", "")).strip()
+        if round_id:
+            try:
+                related_research_id = self._deep_journal_related_research_id(session_id, round_id)
+                linked = self.web.journal_find_by_related_research("", related_research_id=related_research_id)
+                linked_id = int(linked.get("journal_id", 0) or 0)
+                if linked_id > 0:
+                    events.append(
+                        {
+                            "event": "journal_linked",
+                            "data": {
+                                "ok": True,
+                                "enabled": True,
+                                "action": "reused",
+                                "journal_id": linked_id,
+                                "related_research_id": related_research_id,
+                                "round_id": round_id,
+                                "round_no": latest.get("round_no", 0),
+                            },
+                        }
+                    )
+            except Exception:
+                pass
         events.append({"event": "done", "data": {"ok": True, "session_id": session_id}})
         return events
 

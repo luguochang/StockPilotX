@@ -710,6 +710,7 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("event: intel_status", stream_text)
         self.assertIn("event: agent_opinion_final", stream_text)
         self.assertIn("event: arbitration_final", stream_text)
+        self.assertIn("event: journal_linked", stream_text)
         latest = round_snapshot["rounds"][-1]
         if latest.get("replan_triggered") or latest.get("budget_usage", {}).get("warn"):
             self.assertTrue("event: budget_warning" in stream_text or "event: replan_triggered" in stream_text)
@@ -719,6 +720,7 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c3b, 200)
         self.assertGreater(events_snapshot["count"], 0)
         self.assertTrue(any(str(x.get("event")) == "round_started" for x in events_snapshot["events"]))
+        self.assertTrue(any(str(x.get("event")) == "journal_linked" for x in events_snapshot["events"]))
         c3c, done_events = self._get(f"/v1/deep-think/sessions/{session_id}/events?limit=120&event_name=done")
         self.assertEqual(c3c, 200)
         self.assertEqual(done_events["event_name"], "done")
@@ -866,6 +868,7 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("event: agent_opinion_final", stream_text)
         self.assertIn("event: arbitration_final", stream_text)
         self.assertIn("event: business_summary", stream_text)
+        self.assertIn("event: journal_linked", stream_text)
         self.assertIn("event: round_persisted", stream_text)
         self.assertIn("event: done", stream_text)
         self.assertIn('"ok": true', stream_text)

@@ -94,7 +94,50 @@
 
 ## Round-Z: DeepThink Auto Journal Link (Backend)
 
-- 状态：pending
+### 变更摘要
+
+- 新增 App Service 方法：
+  - `_deep_journal_related_research_id`
+  - `_deep_build_journal_from_business_summary`
+  - `_deep_auto_link_journal_entry`
+- 深度分析轮次执行中新增自动落库：
+  - `deep_think_run_round_stream_events` 在 `business_summary` 后自动写 Journal
+  - 幂等键：`deepthink:{session_id}:{round_id}`
+  - 同步产出流事件：`journal_linked`
+- 深度分析历史事件重放兜底：
+  - `_build_deep_think_round_events` 可根据幂等键补出 `journal_linked` 事件
+- 新增测试：
+  - `tests/test_service.py`
+    - `test_deep_think_session_and_round`（新增 journal_linked 断言）
+    - `test_deep_think_v2_stream_round`（新增幂等复用断言）
+  - `tests/test_http_api.py`
+    - `test_deep_think_and_a2a`（新增 journal_linked 断言）
+    - `test_deep_think_v2_round_stream`（新增 journal_linked 断言）
+
+### 自测结果
+
+1. 命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "deep_think_session_and_round or deep_think_v2_stream_round"
+```
+结果：`3 passed, 34 deselected`
+
+2. 命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "deep_think_and_a2a or deep_think_v2_round_stream"
+```
+结果：`2 passed, 25 deselected`
+
+3. 命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests -k "deep_think or journal or api or web"
+```
+结果：`39 passed, 61 deselected`
+
+### 提交
+
+- Commit: `feat: auto link deepthink rounds to journal with stream event`
+- Message: `代码 + 测试 + 文档已在 Round-Z 同步提交（具体哈希见 git log）`
 
 ## Round-AA: Journal Workspace (Frontend)
 

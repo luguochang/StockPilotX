@@ -527,6 +527,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("agent_opinion_final", names)
         self.assertIn("arbitration_final", names)
         self.assertIn("business_summary", names)
+        self.assertIn("journal_linked", names)
         self.assertEqual(names[-1], "done")
         business_payload = next((x.get("data", {}) for x in stream_events if str(x.get("event", "")) == "business_summary"), {})
         self.assertIn("market_regime", business_payload)
@@ -536,12 +537,20 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("analysis_dimensions", business_payload)
         self.assertTrue(isinstance(business_payload.get("analysis_dimensions", []), list))
         self.assertGreaterEqual(len(business_payload.get("analysis_dimensions", [])), 5)
+        journal_link_payload = next((x.get("data", {}) for x in stream_events if str(x.get("event", "")) == "journal_linked"), {})
+        self.assertTrue(bool(journal_link_payload.get("ok", False)))
+        self.assertGreater(int(journal_link_payload.get("journal_id", 0)), 0)
+        related_key = str(journal_link_payload.get("related_research_id", ""))
+        self.assertTrue(related_key)
+        linked = self.svc.web.journal_find_by_related_research("", related_research_id=related_key)
+        self.assertEqual(int(linked.get("journal_id", 0)), int(journal_link_payload.get("journal_id", 0)))
         events_snapshot = self.svc.deep_think_list_events(session_id)
         self.assertGreater(events_snapshot["count"], 0)
         stored_names = [str(x.get("event", "")) for x in events_snapshot["events"]]
         self.assertIn("round_started", stored_names)
         self.assertIn("done", stored_names)
         self.assertIn("business_summary", stored_names)
+        self.assertIn("journal_linked", stored_names)
         done_only = self.svc.deep_think_list_events(session_id, event_name="done")
         self.assertGreater(done_only["count"], 0)
         self.assertTrue(all(str(x.get("event", "")) == "done" for x in done_only["events"]))
@@ -621,6 +630,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("agent_opinion_final", names)
         self.assertIn("arbitration_final", names)
         self.assertIn("business_summary", names)
+        self.assertIn("journal_linked", names)
         self.assertIn("round_persisted", names)
         self.assertEqual(names[-1], "done")
         self.assertTrue(bool(events[-1].get("data", {}).get("ok")))
@@ -631,6 +641,9 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("confidence_adjustment_detail", business_payload)
         self.assertIn("analysis_dimensions", business_payload)
         self.assertGreaterEqual(len(business_payload.get("analysis_dimensions", [])), 5)
+        journal_link_payload = next((x.get("data", {}) for x in events if str(x.get("event", "")) == "journal_linked"), {})
+        self.assertTrue(bool(journal_link_payload.get("ok", False)))
+        self.assertGreater(int(journal_link_payload.get("journal_id", 0)), 0)
 
         round_ids = {str(x.get("data", {}).get("round_id", "")) for x in events if "data" in x}
         self.assertEqual(len(round_ids), 1)
@@ -642,8 +655,22 @@ class ServiceTestCase(unittest.TestCase):
 
         stored = self.svc.deep_think_list_events(session_id, limit=200)
         stored_names = [str(x.get("event", "")) for x in stored["events"]]
+        self.assertIn("journal_linked", stored_names)
         self.assertIn("round_persisted", stored_names)
         self.assertIn("done", stored_names)
+
+        # 幂等回归：相同 session_id + round_id 再次触发应复用已有 Journal。
+        reused = self.svc._deep_auto_link_journal_entry(
+            session_id=session_id,
+            round_id=str(journal_link_payload.get("round_id", "")),
+            round_no=int(journal_link_payload.get("round_no", 0) or 0),
+            question="请输出可追踪过程",
+            stock_code=str(business_payload.get("stock_code", "SH600000")),
+            business_summary=business_payload,
+            auto_journal=True,
+        )
+        self.assertEqual(str(reused.get("action", "")), "reused")
+        self.assertEqual(int(reused.get("journal_id", 0)), int(journal_link_payload.get("journal_id", 0)))
 
     def test_deep_think_v2_stream_round_mutex_conflict(self) -> None:
         created = self.svc.deep_think_create_session(

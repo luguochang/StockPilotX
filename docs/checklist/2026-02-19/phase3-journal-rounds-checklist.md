@@ -21,10 +21,10 @@
 
 ## Round-Z DeepThink Auto Journal Link (Backend)
 
-- [ ] 增加 DeepThink 自动落 Journal 逻辑（幂等）
-- [ ] 增加流事件：`journal_linked`
-- [ ] 增加 service/http_api 测试并通过
-- [ ] Round-Z 文档与提交回填
+- [x] 增加 DeepThink 自动落 Journal 逻辑（幂等）
+- [x] 增加流事件：`journal_linked`
+- [x] 增加 service/http_api 测试并通过
+- [x] Round-Z 文档与提交回填
 
 ## Round-AA Journal Workspace (Frontend)
 

@@ -789,3 +789,49 @@ rg -n "Community MVP|Journal -> Community|社区内容推荐" docs/checklist/202
 - [x] Journal 洞察 API
 - [x] 服务层/API 层测试
 - [x] 回归测试通过
+
+## 第16批增量（Phase3 - Round-Z DeepThink 自动落 Journal）
+
+### 新增能力
+
+1. DeepThink 自动落 Journal（幂等）
+- `backend/app/service.py`
+  - 新增：
+    - `_deep_journal_related_research_id`
+    - `_deep_build_journal_from_business_summary`
+    - `_deep_auto_link_journal_entry`
+  - 在 `deep_think_run_round_stream_events` 中增加自动落库逻辑。
+
+2. 事件链路增强
+- 新增流事件：`journal_linked`
+  - 输出 `action(created/reused/failed)`、`journal_id`、`related_research_id`。
+- 历史事件重放兜底 `_build_deep_think_round_events` 可补出 `journal_linked`。
+
+3. 测试补充
+- `tests/test_service.py`
+  - `test_deep_think_session_and_round` 增加 `journal_linked` 断言
+  - `test_deep_think_v2_stream_round` 增加幂等复用断言
+- `tests/test_http_api.py`
+  - `test_deep_think_and_a2a` 增加 `journal_linked` SSE 断言
+  - `test_deep_think_v2_round_stream` 增加 `journal_linked` SSE 断言
+
+### 第16批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "deep_think_session_and_round or deep_think_v2_stream_round"
+.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "deep_think_and_a2a or deep_think_v2_round_stream"
+.\.venv\Scripts\python.exe -m pytest -q tests -k "deep_think or journal or api or web"
+```
+
+结果：
+- 3 passed, 34 deselected
+- 2 passed, 25 deselected
+- 39 passed, 61 deselected
+
+### 第16批 Checklist
+
+- [x] DeepThink 自动落 Journal
+- [x] `journal_linked` 流事件
+- [x] 服务层/API 层测试
+- [x] 回归测试通过
