@@ -159,6 +159,9 @@ class AShareAgentService:
         self._deep_archive_export_executor = ThreadPoolExecutor(max_workers=2)
         self._deep_round_mutex = threading.Lock()
         self._deep_round_inflight: set[str] = set()
+        # In-memory datasource operation logs for /v1/datasources/* observability APIs.
+        self._datasource_logs: list[dict[str, Any]] = []
+        self._datasource_log_seq = 0
         self._register_default_agent_cards()
 
     def _select_runtime(self, preference: str | None = None):
@@ -5660,6 +5663,289 @@ class AShareAgentService:
     def ops_deep_think_archive_metrics(self, token: str, *, window_hours: int = 24) -> dict[str, Any]:
         self.web.require_role(token, {"admin", "ops"})
         return self.web.deep_think_archive_audit_metrics(window_hours=window_hours)
+
+    def _build_datasource_catalog(self) -> list[dict[str, Any]]:
+        """Build datasource metadata snapshot from currently wired adapters."""
+
+        rows: list[dict[str, Any]] = []
+        adapter_groups = [
+            ("quote", getattr(self.ingestion.quote_service, "adapters", [])),
+            ("announcement", getattr(self.ingestion.announcement_service, "adapters", [])),
+            ("financial", getattr(self.ingestion.financial_service, "adapters", []) if self.ingestion.financial_service else []),
+            ("news", getattr(self.ingestion.news_service, "adapters", []) if self.ingestion.news_service else []),
+            ("research", getattr(self.ingestion.research_service, "adapters", []) if self.ingestion.research_service else []),
+            ("macro", getattr(self.ingestion.macro_service, "adapters", []) if self.ingestion.macro_service else []),
+            ("fund", getattr(self.ingestion.fund_service, "adapters", []) if self.ingestion.fund_service else []),
+        ]
+        for category, adapters in adapter_groups:
+            for adapter in adapters:
+                source_id = str(getattr(adapter, "source_id", f"{category}_unknown"))
+                cfg = getattr(adapter, "config", None)
+                reliability = float(
+                    getattr(cfg, "reliability_score", getattr(adapter, "reliability_score", 0.0)) or 0.0
+                )
+                proxy_url = str(getattr(cfg, "proxy_url", "") or "")
+                cookie = str(getattr(adapter, "cookie", "") or "")
+                # Cookie-backed sources are marked disabled when credential is missing.
+                enabled = bool(cookie.strip()) if hasattr(adapter, "cookie") else True
+                rows.append(
+                    {
+                        "source_id": source_id,
+                        "category": category,
+                        "enabled": enabled,
+                        "reliability_score": round(reliability, 4),
+                        "source_url": str(getattr(adapter, "source_url", "") or ""),
+                        "proxy_enabled": bool(proxy_url.strip()),
+                    }
+                )
+        # History ingestion currently relies on HistoryService (non-adapter style), expose a synthetic row.
+        rows.append(
+            {
+                "source_id": "eastmoney_history",
+                "category": "history",
+                "enabled": True,
+                "reliability_score": 0.9,
+                "source_url": "https://push2his.eastmoney.com/",
+                "proxy_enabled": bool(str(self.settings.datasource_proxy_url or "").strip()),
+            }
+        )
+
+        dedup: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            dedup.setdefault(str(row["source_id"]), row)
+        return sorted(dedup.values(), key=lambda x: (str(x.get("category", "")), str(x.get("source_id", ""))))
+
+    def _append_datasource_log(
+        self,
+        *,
+        source_id: str,
+        category: str,
+        action: str,
+        status: str,
+        latency_ms: int,
+        detail: dict[str, Any] | None = None,
+        error: str = "",
+    ) -> dict[str, Any]:
+        self._datasource_log_seq += 1
+        row = {
+            "log_id": self._datasource_log_seq,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source_id": source_id,
+            "category": category,
+            "action": action,
+            "status": status,
+            "latency_ms": max(0, int(latency_ms)),
+            "error": error,
+            "detail": detail or {},
+        }
+        self._datasource_logs.append(row)
+        # Keep bounded memory footprint for long-running dev processes.
+        if len(self._datasource_logs) > 5000:
+            self._datasource_logs = self._datasource_logs[-5000:]
+        return row
+
+    def datasource_sources(self, token: str) -> dict[str, Any]:
+        self.web.require_role(token, {"admin", "ops"})
+        items = self._build_datasource_catalog()
+        return {"count": len(items), "items": items}
+
+    def datasource_logs(self, token: str, *, source_id: str = "", status: str = "", limit: int = 100) -> dict[str, Any]:
+        self.web.require_role(token, {"admin", "ops"})
+        safe_limit = max(1, min(1000, int(limit)))
+        source_filter = str(source_id or "").strip()
+        status_filter = str(status or "").strip().lower()
+        rows = list(reversed(self._datasource_logs))
+        if source_filter:
+            rows = [x for x in rows if str(x.get("source_id", "")) == source_filter]
+        if status_filter:
+            rows = [x for x in rows if str(x.get("status", "")).lower() == status_filter]
+        rows = rows[:safe_limit]
+        return {"count": len(rows), "items": rows}
+
+    def datasource_health(self, token: str, *, limit: int = 200) -> dict[str, Any]:
+        self.web.require_role(token, {"admin", "ops"})
+        safe_limit = max(1, min(1000, int(limit)))
+        catalog = self._build_datasource_catalog()
+        metrics_by_source: dict[str, dict[str, Any]] = {}
+        for row in reversed(self._datasource_logs):
+            source_id = str(row.get("source_id", ""))
+            if not source_id:
+                continue
+            metrics = metrics_by_source.setdefault(
+                source_id,
+                {"attempts": 0, "success": 0, "failed": 0, "last_error": "", "last_latency_ms": 0, "last_seen_at": ""},
+            )
+            metrics["attempts"] += 1
+            if str(row.get("status", "")) == "ok":
+                metrics["success"] += 1
+            elif str(row.get("status", "")) == "failed":
+                metrics["failed"] += 1
+                if not metrics["last_error"]:
+                    metrics["last_error"] = str(row.get("error", ""))
+            metrics["last_latency_ms"] = int(row.get("latency_ms", 0) or 0)
+            metrics["last_seen_at"] = str(row.get("created_at", ""))
+
+        items: list[dict[str, Any]] = []
+        for source in catalog:
+            source_id = str(source.get("source_id", ""))
+            metric = metrics_by_source.get(source_id, {})
+            attempts = int(metric.get("attempts", 0) or 0)
+            failed = int(metric.get("failed", 0) or 0)
+            success = int(metric.get("success", 0) or 0)
+            success_rate = (float(success) / float(attempts)) if attempts > 0 else 1.0
+            failure_rate = (float(failed) / float(attempts)) if attempts > 0 else 0.0
+            item = {
+                **source,
+                "attempts": attempts,
+                "success_rate": round(success_rate, 4),
+                "failure_rate": round(failure_rate, 4),
+                "last_error": str(metric.get("last_error", "")),
+                "last_latency_ms": int(metric.get("last_latency_ms", 0) or 0),
+                "updated_at": str(metric.get("last_seen_at", "")),
+                "circuit_open": False,
+            }
+            self.web.source_health_upsert(
+                source_id=source_id,
+                success_rate=float(item["success_rate"]),
+                circuit_open=False,
+                last_error=item["last_error"],
+            )
+            # Alert when a source continuously fails within the local observation window.
+            if attempts >= 3 and failure_rate >= 0.6:
+                self.web.create_alert(
+                    "datasource_failure_rate_high",
+                    "high",
+                    f"{source_id} failure_rate={failure_rate:.2f} attempts={attempts}",
+                )
+            items.append(item)
+
+        scheduler_state = self.scheduler_status()
+        for job_name, snapshot in scheduler_state.items():
+            circuit_open = bool(snapshot.get("circuit_open_until"))
+            if circuit_open:
+                self.web.create_alert("scheduler_circuit_open", "high", f"{job_name} circuit open")
+            items.append(
+                {
+                    "source_id": str(job_name),
+                    "category": "scheduler",
+                    "enabled": True,
+                    "reliability_score": 0.0,
+                    "source_url": "",
+                    "proxy_enabled": False,
+                    "attempts": 0,
+                    "success_rate": 1.0 if snapshot.get("last_status") in ("ok", "never") else 0.0,
+                    "failure_rate": 0.0 if snapshot.get("last_status") in ("ok", "never") else 1.0,
+                    "last_error": str(snapshot.get("last_error", "")),
+                    "last_latency_ms": 0,
+                    "updated_at": str(snapshot.get("last_run_at", "")),
+                    "circuit_open": circuit_open,
+                }
+            )
+
+        items = sorted(items, key=lambda x: (str(x.get("category", "")), str(x.get("source_id", ""))))[:safe_limit]
+        return {"count": len(items), "items": items}
+
+    @staticmethod
+    def _infer_datasource_category(source_id: str) -> str:
+        sid = str(source_id or "").strip().lower()
+        if sid.startswith(("tencent", "sina", "netease", "xueqiu")) and "news" not in sid:
+            return "quote"
+        if "announcement" in sid:
+            return "announcement"
+        if "financial" in sid or "tushare" in sid:
+            return "financial"
+        if "news" in sid or sid.startswith(("cls", "tradingview")):
+            return "news"
+        if "research" in sid:
+            return "research"
+        if "macro" in sid:
+            return "macro"
+        if "fund" in sid or "ttjj" in sid:
+            return "fund"
+        if "history" in sid:
+            return "history"
+        return ""
+
+    def datasource_fetch(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.web.require_role(token, {"admin", "ops"})
+        source_id = str(payload.get("source_id", "")).strip()
+        if not source_id:
+            raise ValueError("source_id is required")
+
+        stock_codes = [str(x).strip().upper() for x in payload.get("stock_codes", []) if str(x).strip()]
+        limit = max(1, min(500, int(payload.get("limit", 20) or 20)))
+        catalog = {str(x.get("source_id", "")): x for x in self._build_datasource_catalog()}
+        category = str(payload.get("category", "")).strip().lower() or str(catalog.get(source_id, {}).get("category", ""))
+        if not category:
+            category = self._infer_datasource_category(source_id)
+        if not category:
+            raise ValueError("unable to infer datasource category from source_id")
+
+        started_at = time.perf_counter()
+        error = ""
+        result: dict[str, Any]
+        try:
+            if category == "quote":
+                result = self.ingest_market_daily(stock_codes or ["SH600000"])
+            elif category == "announcement":
+                result = self.ingest_announcements(stock_codes or ["SH600000"])
+            elif category == "history":
+                result = self.ingestion.ingest_history_daily(stock_codes or ["SH600000"], limit=max(60, limit))
+            elif category == "financial":
+                result = self.ingest_financials(stock_codes or ["SH600000"])
+            elif category == "news":
+                result = self.ingest_news(stock_codes or ["SH600000"], limit=limit)
+            elif category == "research":
+                result = self.ingest_research_reports(stock_codes or ["SH600000"], limit=limit)
+            elif category == "macro":
+                result = self.ingest_macro_indicators(limit=limit)
+            elif category == "fund":
+                result = self.ingest_fund_snapshots(stock_codes or ["SH600000"])
+            else:
+                raise ValueError(f"unsupported datasource category: {category}")
+        except Exception as ex:  # noqa: BLE001
+            error = str(ex)
+            result = {
+                "task_name": f"{category}-fetch",
+                "success_count": 0,
+                "failed_count": max(1, len(stock_codes) if stock_codes else 1),
+                "details": [{"status": "failed", "error": error}],
+            }
+
+        success_count = int(result.get("success_count", 0) or 0)
+        failed_count = int(result.get("failed_count", 0) or 0)
+        status = "ok"
+        if failed_count > 0 and success_count > 0:
+            status = "partial"
+        elif failed_count > 0 and success_count == 0:
+            status = "failed"
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        log = self._append_datasource_log(
+            source_id=source_id,
+            category=category,
+            action="fetch",
+            status=status,
+            latency_ms=latency_ms,
+            detail={
+                "stock_codes": stock_codes,
+                "limit": limit,
+                "task_name": str(result.get("task_name", "")),
+                "success_count": success_count,
+                "failed_count": failed_count,
+            },
+            error=error or (str(result.get("details", [{}])[0].get("error", "")) if failed_count > 0 else ""),
+        )
+        if status == "failed":
+            self.web.create_alert("datasource_fetch_failed", "medium", f"{source_id} fetch failed")
+
+        return {
+            "source_id": source_id,
+            "category": category,
+            "status": status,
+            "latency_ms": latency_ms,
+            "result": result,
+            "log_id": int(log["log_id"]),
+        }
 
     def ops_source_health(self, token: str) -> list[dict[str, Any]]:
         # 基于 scheduler 状态刷新 source health 快照

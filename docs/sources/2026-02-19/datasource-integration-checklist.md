@@ -108,22 +108,27 @@
 
 ## ROUND-AG：数据源管理 API 与可观测性
 
-- [ ] 新增 `/v1/datasources/sources`
-- [ ] 新增 `/v1/datasources/health`
-- [ ] 新增 `/v1/datasources/fetch`
-- [ ] 新增 `/v1/datasources/logs`
-- [ ] 新增 source 级日志/健康聚合逻辑
-- [ ] 对接告警策略（失败率、熔断状态）
-- [ ] 添加 API 与权限相关测试
-- [ ] 记录技术文档（round-AG）
-- [ ] 提交 commit（round-AG）
+- [x] 新增 `/v1/datasources/sources`
+- [x] 新增 `/v1/datasources/health`
+- [x] 新增 `/v1/datasources/fetch`
+- [x] 新增 `/v1/datasources/logs`
+- [x] 新增 source 级日志/健康聚合逻辑
+- [x] 对接告警策略（失败率、熔断状态）
+- [x] 添加 API 与权限相关测试
+- [x] 记录技术文档（round-AG）
+- [x] 提交 commit（round-AG）
 
 证据记录：
 
 - 自测命令：
-- 自测结果：
-- 技术文档路径：
-- Commit Hash：
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "datasource_ops_catalog_health_fetch_logs"`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "datasource_management_endpoints"`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_datasource_intel_adapters.py tests/test_ingestion_extended_sources.py tests/test_datasources_factory.py`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "ingest_endpoints or market_overview_contains_realtime_and_history or datasource_ops_catalog_health_fetch_logs"`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "ingest_market_daily or ingest_announcements or ingest_financials or ingest_news or ingest_research or ingest_macro or ingest_fund or datasource_management_endpoints"`
+- 自测结果：`1 passed` + `1 passed` + `21 passed` + `9 passed`（其余为 deselected 子集）
+- 技术文档路径：`docs/sources/2026-02-19/round-AG-datasource-management-api-and-observability.md`
+- Commit Hash：见本轮 round-AG commit
 
 ## ROUND-AH：回归与交付收口
 
@@ -174,3 +179,4 @@ npx tsc --noEmit
 2. `2026-02-19 | ROUND-AD | 完成 quote 四源迁移、新 QuoteService 回退链及回归验证 | hash: 7b5feb0 | doc: docs/sources/2026-02-19/round-AD-quote-adapters-migration.md`
 3. `2026-02-19 | ROUND-AE | 完成 financial 双源迁移、摄取落库、Query/DeepThink 财务证据接入 | hash: 见本轮 round-AE commit | doc: docs/sources/2026-02-19/round-AE-financial-adapters-and-ingestion.md`
 4. `2026-02-19 | ROUND-AF | 完成 news/research/macro/fund 迁移、自动 RAG 入索引、ingest API 与回归测试 | hash: 见本轮 round-AF commit | doc: docs/sources/2026-02-19/round-AF-news-research-macro-fund-rag.md`
+5. `2026-02-19 | ROUND-AG | 完成 datasources 管理 API（sources/health/fetch/logs）、健康聚合与告警策略接入 | hash: 见本轮 round-AG commit | doc: docs/sources/2026-02-19/round-AG-datasource-management-api-and-observability.md`

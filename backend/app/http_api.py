@@ -385,6 +385,43 @@ def create_app() -> FastAPI:
     def ingest_fund(payload: dict):
         return svc.ingest_fund_snapshots(payload.get("stock_codes", []))
 
+    @app.get("/v1/datasources/sources")
+    def datasource_sources(authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.datasource_sources(token)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/datasources/health")
+    def datasource_health(limit: int = 200, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.datasource_health(token, limit=limit)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.post("/v1/datasources/fetch")
+    def datasource_fetch(payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.datasource_fetch(token, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/datasources/logs")
+    def datasource_logs(
+        source_id: str = "",
+        status: str = "",
+        limit: int = 100,
+        authorization: str | None = Header(default=None),
+    ):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.datasource_logs(token, source_id=source_id, status=status, limit=limit)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     @app.post("/v1/docs/upload")
     def docs_upload(payload: dict):
         return svc.docs_upload(

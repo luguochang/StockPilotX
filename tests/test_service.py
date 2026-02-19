@@ -120,6 +120,28 @@ class ServiceTestCase(unittest.TestCase):
         # Regression: news/research ingest should produce RAG docs for later retrieval.
         self.assertGreaterEqual(len(self.svc.ingestion_store.docs), 1)
 
+    def test_datasource_ops_catalog_health_fetch_logs(self) -> None:
+        sources = self.svc.datasource_sources("")
+        self.assertGreater(int(sources.get("count", 0)), 0)
+        items = sources.get("items", [])
+        self.assertTrue(isinstance(items, list))
+        target = next((x for x in items if str(x.get("category", "")) == "news"), items[0])
+        source_id = str(target.get("source_id", ""))
+        self.assertTrue(source_id)
+
+        fetched = self.svc.datasource_fetch("", {"source_id": source_id, "stock_codes": ["SH600000"], "limit": 2})
+        self.assertEqual(str(fetched.get("source_id", "")), source_id)
+        self.assertIn(str(fetched.get("status", "")), {"ok", "partial", "failed"})
+        self.assertIn("result", fetched)
+
+        logs = self.svc.datasource_logs("", source_id=source_id, limit=20)
+        self.assertGreaterEqual(int(logs.get("count", 0)), 1)
+        self.assertTrue(isinstance(logs.get("items", []), list))
+
+        health = self.svc.datasource_health("", limit=200)
+        self.assertGreater(int(health.get("count", 0)), 0)
+        self.assertTrue(any(str(x.get("source_id", "")) == source_id for x in health.get("items", [])))
+
     def test_doc_upload_and_index(self) -> None:
         up = self.svc.docs_upload("d1", "demo.pdf", "财报正文" * 600, "user")
         idx = self.svc.docs_index("d1")

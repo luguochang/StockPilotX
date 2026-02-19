@@ -293,6 +293,34 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(body["task_name"], "fund-ingest")
 
+    def test_datasource_management_endpoints(self) -> None:
+        c1, sources = self._get("/v1/datasources/sources")
+        self.assertEqual(c1, 200)
+        self.assertGreater(int(sources.get("count", 0)), 0)
+        self.assertTrue(isinstance(sources.get("items", []), list))
+        target = next((x for x in sources.get("items", []) if str(x.get("category", "")) == "news"), sources["items"][0])
+        source_id = str(target.get("source_id", ""))
+        self.assertTrue(source_id)
+
+        c2, fetched = self._post(
+            "/v1/datasources/fetch",
+            {"source_id": source_id, "stock_codes": ["SH600000"], "limit": 2},
+        )
+        self.assertEqual(c2, 200)
+        self.assertEqual(str(fetched.get("source_id", "")), source_id)
+        self.assertIn(str(fetched.get("status", "")), {"ok", "partial", "failed"})
+
+        encoded_source = urllib.parse.quote(source_id)
+        c3, logs = self._get(f"/v1/datasources/logs?source_id={encoded_source}&limit=20")
+        self.assertEqual(c3, 200)
+        self.assertGreaterEqual(int(logs.get("count", 0)), 1)
+        self.assertTrue(isinstance(logs.get("items", []), list))
+
+        c4, health = self._get("/v1/datasources/health?limit=200")
+        self.assertEqual(c4, 200)
+        self.assertGreater(int(health.get("count", 0)), 0)
+        self.assertTrue(any(str(x.get("source_id", "")) == source_id for x in health.get("items", [])))
+
     def test_docs_upload_and_index(self) -> None:
         upload_code, uploaded = self._post(
             "/v1/docs/upload",
