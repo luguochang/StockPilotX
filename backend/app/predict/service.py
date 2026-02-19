@@ -82,6 +82,9 @@ class PredictionService:
                         "history_source_url": history_meta["history_source_url"],
                         "history_sample_size": history_meta["history_sample_size"],
                         "history_data_mode": history_meta["history_data_mode"],
+                        # Bubble up degradation metadata for UI confidence gating.
+                        "history_degraded": bool(history_meta.get("history_degraded", False)),
+                        "history_degrade_reason": str(history_meta.get("history_degrade_reason", "")),
                     },
                 }
             )
@@ -117,6 +120,8 @@ class PredictionService:
                 "history_source_url": history_meta["history_source_url"],
                 "history_sample_size": history_meta["history_sample_size"],
                 "history_data_mode": history_meta["history_data_mode"],
+                "history_degraded": bool(history_meta.get("history_degraded", False)),
+                "history_degrade_reason": str(history_meta.get("history_degrade_reason", "")),
             },
         }
 
@@ -138,8 +143,10 @@ class PredictionService:
                 "history_source_url": str(bars[-1].get("source_url", "")),
                 "history_sample_size": len(closes),
                 "history_data_mode": "real_history",
+                "history_degraded": False,
+                "history_degrade_reason": "",
             }
-        except Exception:
+        except Exception as ex:
             closes = self._build_synthetic_close_series(stock_code, anchor_price, days=max(80, limit // 2))
             volumes = [1000000.0] * len(closes)
             return closes, volumes, {
@@ -147,6 +154,8 @@ class PredictionService:
                 "history_source_url": "",
                 "history_sample_size": len(closes),
                 "history_data_mode": "synthetic_fallback",
+                "history_degraded": True,
+                "history_degrade_reason": str(ex)[:180],
             }
 
     def _build_synthetic_close_series(self, stock_code: str, anchor_price: float, days: int = 60) -> list[float]:
@@ -247,36 +256,151 @@ class PredictionService:
 
     def _build_eval_summary(self, run_id: str) -> dict[str, Any]:
         run = self.store.runs[run_id]
-        all_rows: list[tuple[float, float]] = []
-        for item in run["results"]:
-            code = item["stock_code"]
-            seed = sum(ord(c) for c in code)
-            for horizon in item["horizons"]:
-                pred = float(horizon["expected_excess_return"])
-                future = pred * 0.6 + (((seed + len(horizon["horizon"])) % 11) - 5) / 500.0
-                all_rows.append((pred, future))
+        horizons = [str(x) for x in list(run.get("horizons", [])) if str(x)]
+        backtest = self._build_backtest_eval_rows(run.get("results", []), horizons)
+        backtest_rows = list(backtest.get("rows", []))
+        if len(backtest_rows) >= 40:
+            metrics = self._build_metrics(backtest_rows)
+            return {
+                "status": "ok",
+                "run_id": run_id,
+                "generated_at": _now_iso(),
+                # Backtest proxy uses historical realized outcomes generated from walk-forward windows.
+                "metric_mode": "backtest_proxy",
+                "metrics_note": "derived_from_walk_forward_backtest",
+                "metrics": metrics,
+                "evaluated_stocks": int(backtest.get("evaluated_stocks", 0) or 0),
+                "skipped_stocks": list(backtest.get("skipped_stocks", [])),
+                "history_modes": dict(backtest.get("history_modes", {})),
+                "fallback_reason": "",
+            }
 
-        if not all_rows:
+        simulated_rows = self._build_simulated_eval_rows(run.get("results", []))
+        if not simulated_rows:
             return {"status": "empty", "metrics": {}, "run_id": run_id}
-
-        preds = [x for x, _ in all_rows]
-        futs = [y for _, y in all_rows]
-        ic = self._corr(preds, futs)
-        hit_rate = sum(1 for p, f in all_rows if (p >= 0 and f >= 0) or (p < 0 and f < 0)) / len(all_rows)
-        spread = self._top_bottom_spread(all_rows)
-        max_dd = self._mock_max_drawdown(all_rows)
+        metrics = self._build_metrics(simulated_rows)
         return {
             "status": "ok",
             "run_id": run_id,
             "generated_at": _now_iso(),
-            "metrics": {
-                "ic": round(ic, 6),
-                "hit_rate": round(hit_rate, 6),
-                "top_bottom_spread": round(spread, 6),
-                "max_drawdown": round(max_dd, 6),
-                "coverage": float(len(all_rows)),
-            },
+            "metric_mode": "simulated",
+            "metrics_note": "derived_from_internal_simulation",
+            "metrics": metrics,
+            "evaluated_stocks": int(backtest.get("evaluated_stocks", 0) or 0),
+            "skipped_stocks": list(backtest.get("skipped_stocks", [])),
+            "history_modes": dict(backtest.get("history_modes", {})),
+            "fallback_reason": "insufficient_backtest_rows",
         }
+
+    def _build_backtest_eval_rows(self, results: list[dict[str, Any]], horizons: list[str]) -> dict[str, Any]:
+        rows: list[tuple[float, float]] = []
+        evaluated_stocks = 0
+        skipped_stocks: list[dict[str, str]] = []
+        history_modes = {"real_history": 0, "synthetic_fallback": 0, "unknown": 0}
+        if not results:
+            return {
+                "rows": rows,
+                "evaluated_stocks": 0,
+                "skipped_stocks": skipped_stocks,
+                "history_modes": history_modes,
+            }
+        for item in results:
+            stock_code = str(item.get("stock_code", "")).strip().upper()
+            source = dict(item.get("source", {}) or {})
+            history_mode = str(source.get("history_data_mode", "unknown")).strip() or "unknown"
+            if history_mode in history_modes:
+                history_modes[history_mode] += 1
+            else:
+                history_modes["unknown"] += 1
+            if history_mode != "real_history":
+                skipped_stocks.append({"stock_code": stock_code, "reason": "history_not_real"})
+                continue
+            try:
+                bars = self.history_service.fetch_daily_bars(stock_code, limit=320)
+            except Exception:
+                skipped_stocks.append({"stock_code": stock_code, "reason": "history_fetch_failed"})
+                continue
+            closes = [float(x.get("close", 0.0)) for x in bars if float(x.get("close", 0.0)) > 0]
+            volumes = [float(x.get("volume", 0.0)) for x in bars if float(x.get("close", 0.0)) > 0]
+            amounts = [float(x.get("amount", 0.0)) for x in bars if float(x.get("close", 0.0)) > 0]
+            if len(closes) < 140:
+                skipped_stocks.append({"stock_code": stock_code, "reason": "history_sample_insufficient"})
+                continue
+            evaluated_stocks += 1
+            for horizon in horizons:
+                horizon_days = self._horizon_days(horizon)
+                if horizon_days <= 0:
+                    continue
+                # Walk-forward window: use recent anchors while keeping enough warmup period for factors.
+                max_anchor = len(closes) - horizon_days - 1
+                min_anchor = max(80, max_anchor - 90)
+                if max_anchor <= min_anchor:
+                    continue
+                for anchor in range(min_anchor, max_anchor + 1):
+                    factors = self._compute_factors(
+                        closes[: anchor + 1],
+                        volumes[: anchor + 1],
+                        self._turnover_proxy(amounts, anchor),
+                    )
+                    forecast = self._forecast(factors, [horizon])[0]
+                    pred = float(forecast.get("expected_excess_return", 0.0) or 0.0)
+                    base_price = closes[anchor]
+                    future_price = closes[anchor + horizon_days]
+                    realized = (future_price / base_price - 1.0) if base_price > 0 else 0.0
+                    rows.append((pred, realized))
+        return {
+            "rows": rows,
+            "evaluated_stocks": evaluated_stocks,
+            "skipped_stocks": skipped_stocks[:24],
+            "history_modes": history_modes,
+        }
+
+    @staticmethod
+    def _build_simulated_eval_rows(results: list[dict[str, Any]]) -> list[tuple[float, float]]:
+        rows: list[tuple[float, float]] = []
+        for item in results:
+            code = str(item.get("stock_code", ""))
+            seed = sum(ord(c) for c in code)
+            for horizon in list(item.get("horizons", [])):
+                pred = float(horizon.get("expected_excess_return", 0.0) or 0.0)
+                future = pred * 0.6 + (((seed + len(str(horizon.get("horizon", "")))) % 11) - 5) / 500.0
+                rows.append((pred, future))
+        return rows
+
+    def _build_metrics(self, rows: list[tuple[float, float]]) -> dict[str, float]:
+        preds = [x for x, _ in rows]
+        futs = [y for _, y in rows]
+        ic = self._corr(preds, futs)
+        hit_rate = sum(1 for p, f in rows if (p >= 0 and f >= 0) or (p < 0 and f < 0)) / max(1, len(rows))
+        spread = self._top_bottom_spread(rows)
+        max_dd = self._equity_max_drawdown(rows)
+        return {
+            "ic": round(ic, 6),
+            "hit_rate": round(hit_rate, 6),
+            "top_bottom_spread": round(spread, 6),
+            "max_drawdown": round(max_dd, 6),
+            "coverage": float(len(rows)),
+        }
+
+    @staticmethod
+    def _horizon_days(horizon: str) -> int:
+        raw = str(horizon or "").strip().lower()
+        if raw.endswith("d"):
+            try:
+                return max(0, int(raw[:-1]))
+            except ValueError:
+                return 0
+        return 0
+
+    @staticmethod
+    def _turnover_proxy(amounts: list[float], anchor: int) -> float:
+        if not amounts:
+            return 0.0
+        start = max(0, int(anchor) - 4)
+        window = [float(x) for x in amounts[start : int(anchor) + 1] if float(x) >= 0]
+        if not window:
+            return 0.0
+        return sum(window) / len(window)
 
     @staticmethod
     def _returns(closes: list[float]) -> list[float]:
@@ -361,7 +485,7 @@ class PredictionService:
         return (sum(top) / len(top)) - (sum(bottom) / len(bottom))
 
     @staticmethod
-    def _mock_max_drawdown(rows: list[tuple[float, float]]) -> float:
+    def _equity_max_drawdown(rows: list[tuple[float, float]]) -> float:
         equity = 1.0
         peak = 1.0
         max_dd = 0.0

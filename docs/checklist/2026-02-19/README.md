@@ -6,4 +6,5 @@
 - `phase3-journal-rounds-execution-log.md`: Round-X ~ Round-AB 执行日志与提交记录。
 - `round-AC-report-journal-ux-checklist.md`: Round-AC 报告质量可视化 + 日志模板化输入清单。
 - `round-AC-report-journal-ux-execution-log.md`: Round-AC 执行日志、自测证据与提交记录。
-
+- `round-AD-predict-demock-checklist.md`: Round-AD 预测模块去 mock 与评测来源透明化清单。
+- `round-AD-predict-demock-execution-log.md`: Round-AD 执行日志、自测证据与提交记录。
