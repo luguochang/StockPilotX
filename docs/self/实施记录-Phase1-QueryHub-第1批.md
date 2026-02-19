@@ -84,3 +84,37 @@
 - Query Hub：补充“查询失败可观测性字段（错误分类/降级原因）”
 - Query Hub：补充“历史筛选（按股票/时间）”
 - Knowledge Hub：开始文档处理 Pipeline 第1批优化
+
+## 第2批增量（Knowledge Hub 可观测性）
+
+### 新增能力：文档质量报告
+
+新增接口：`GET /v1/docs/{doc_id}/quality-report`
+
+输出包含：
+- `quality_score` / `quality_level`
+- `chunk_stats`（分块数、活跃分块数、平均分块长度、短分块占比）
+- `recommendations`（可执行建议）
+
+实现文件：
+- `backend/app/service.py`（`docs_quality_report`）
+- `backend/app/http_api.py`（新增路由）
+- `tests/test_http_api.py`（补充接口测试）
+
+### 第2批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python -m pytest -q tests/test_http_api.py
+.\.venv\Scripts\python -m pytest -q tests -k "web or api or watchlist"
+```
+结果：
+- 18 passed
+- 19 passed, 61 deselected
+
+### 第2批 Checklist
+
+- [x] 文档质量报告能力
+- [x] 质量建议规则
+- [x] API 路由接入
+- [x] 回归测试通过

@@ -2227,6 +2227,86 @@ class AShareAgentService:
             self._persist_doc_chunks_to_rag(doc_id, doc)
         return result
 
+    def docs_quality_report(self, doc_id: str) -> dict[str, Any]:
+        """Build a quality report for one indexed document.
+
+        This is a lightweight quality dashboard used by Knowledge Hub Phase 1:
+        - Parse confidence from `doc_index`
+        - Chunk distribution from `rag_doc_chunk`
+        - Actionable recommendations for low quality inputs
+        """
+        doc = self.web.store.query_one(
+            """
+            SELECT doc_id, filename, status, parse_confidence, needs_review, created_at
+            FROM doc_index
+            WHERE doc_id = ?
+            """,
+            (doc_id,),
+        )
+        if not doc:
+            return {"error": "not_found", "doc_id": doc_id}
+
+        chunks = self.web.store.query_all(
+            """
+            SELECT chunk_id, chunk_no, chunk_text_redacted, quality_score, effective_status, updated_at
+            FROM rag_doc_chunk
+            WHERE doc_id = ?
+            ORDER BY chunk_no ASC
+            """,
+            (doc_id,),
+        )
+        chunk_lengths = [len(str(row.get("chunk_text_redacted", ""))) for row in chunks]
+        chunk_count = len(chunks)
+        avg_chunk_len = (sum(chunk_lengths) / chunk_count) if chunk_count else 0.0
+        short_chunk_count = sum(1 for x in chunk_lengths if x < 60)
+        short_chunk_ratio = (short_chunk_count / chunk_count) if chunk_count else 0.0
+        avg_quality = (
+            sum(float(row.get("quality_score", 0.0) or 0.0) for row in chunks) / chunk_count if chunk_count else 0.0
+        )
+        active_chunk_count = sum(1 for row in chunks if str(row.get("effective_status", "")) == "active")
+
+        parse_confidence = float(doc.get("parse_confidence", 0.0) or 0.0)
+        quality_score = max(
+            0.0,
+            min(
+                1.0,
+                parse_confidence * 0.5 + avg_quality * 0.3 + (1.0 - short_chunk_ratio) * 0.2,
+            ),
+        )
+        quality_level = "high" if quality_score >= 0.8 else ("medium" if quality_score >= 0.6 else "low")
+
+        recommendations: list[str] = []
+        if parse_confidence < 0.7:
+            recommendations.append("parse_confidence ????????????? OCR ????????")
+        if chunk_count < 3:
+            recommendations.append("??????????????????")
+        if short_chunk_ratio > 0.4:
+            recommendations.append("????????????????????????")
+        if active_chunk_count == 0 and chunk_count > 0:
+            recommendations.append("??? active ????????????")
+        if not recommendations:
+            recommendations.append("??????????????????")
+
+        return {
+            "doc_id": doc_id,
+            "filename": str(doc.get("filename", "")),
+            "status": str(doc.get("status", "")),
+            "parse_confidence": round(parse_confidence, 4),
+            "needs_review": bool(int(doc.get("needs_review", 0) or 0)),
+            "quality_score": round(quality_score, 4),
+            "quality_level": quality_level,
+            "chunk_stats": {
+                "chunk_count": chunk_count,
+                "active_chunk_count": active_chunk_count,
+                "avg_chunk_len": round(avg_chunk_len, 2),
+                "short_chunk_count": short_chunk_count,
+                "short_chunk_ratio": round(short_chunk_ratio, 4),
+                "avg_chunk_quality": round(avg_quality, 4),
+            },
+            "recommendations": recommendations,
+            "created_at": str(doc.get("created_at", "")),
+        }
+
     def rag_upload_from_payload(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
         """统一处理 RAG 附件上传：解码 -> 去重 -> docs_upload -> (可选)index -> 资产入库。"""
         filename = str(payload.get("filename", "")).strip()

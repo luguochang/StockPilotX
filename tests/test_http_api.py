@@ -235,6 +235,12 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(index_code, 200)
         self.assertEqual(indexed["status"], "indexed")
 
+        qr_code, quality = self._get("/v1/docs/api-doc-1/quality-report")
+        self.assertEqual(qr_code, 200)
+        self.assertIn("quality_score", quality)
+        self.assertIn("chunk_stats", quality)
+        self.assertIn("recommendations", quality)
+
     def test_rag_asset_management_endpoints(self) -> None:
         c1, policies = self._get("/v1/rag/source-policy")
         self.assertEqual(c1, 200)
