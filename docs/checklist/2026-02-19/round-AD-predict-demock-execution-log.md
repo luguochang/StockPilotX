@@ -110,5 +110,4 @@ r = s.predict_run({"stock_codes": ["SH600000", "SZ000001"], "horizons": ["5d", "
 
 ## 提交记录
 
-- Commit: 待回填
-
+- Commit: `145fa07`

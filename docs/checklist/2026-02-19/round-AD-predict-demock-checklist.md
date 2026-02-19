@@ -35,5 +35,4 @@
 
 ## 提交记录
 
-- [ ] Commit Hash（待回填）
-
+- [x] Commit Hash: `145fa07`
