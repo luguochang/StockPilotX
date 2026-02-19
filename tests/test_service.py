@@ -33,6 +33,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("regime_confidence", result["analysis_brief"])
         self.assertIn("signal_guard_applied", result["analysis_brief"])
         self.assertIn("signal_guard_detail", result["analysis_brief"])
+        self.assertTrue(all(str(x.get("retrieval_track", "")).strip() for x in result.get("citations", [])))
         self.assertIn("仅供研究参考", result["answer"])
 
     def test_query_persists_rag_qa_memory_and_trace(self) -> None:
@@ -50,6 +51,8 @@ class ServiceTestCase(unittest.TestCase):
 
         traces = self.svc.ops_rag_retrieval_trace("", limit=30)
         self.assertGreaterEqual(int(traces.get("count", 0)), 1)
+        first = (traces.get("items", []) or [{}])[0]
+        self.assertTrue(any("|" in str(x) for x in list(first.get("selected_ids", []))))
 
     def test_query_graphrag_mode(self) -> None:
         result = self.svc.query(

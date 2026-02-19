@@ -23,6 +23,9 @@ class Citation(BaseModel):
     event_time: datetime | None = None
     reliability_score: float = 0.5
     excerpt: str
+    # retrieval_track/rerank_score are optional explainability fields for round-level RAG auditing.
+    retrieval_track: str | None = None
+    rerank_score: float | None = None
 
 
 class QueryResponse(BaseModel):
@@ -45,6 +48,9 @@ class ReportRequest(BaseModel):
     stock_code: str
     period: str = "1y"
     report_type: Literal["fact", "research"] = "fact"
+    run_id: str = ""
+    pool_snapshot_id: str = ""
+    template_id: str = "default"
 
 
 class ReportResponse(BaseModel):
@@ -77,6 +83,7 @@ class PredictRunRequest(BaseModel):
     """预测任务请求 DTO（对应 `/v1/predict/run`）。"""
 
     stock_codes: list[str] = Field(default_factory=list)
+    pool_id: str = ""
     horizons: list[str] = Field(default_factory=lambda: ["5d", "20d"])
     as_of_date: str | None = None
 

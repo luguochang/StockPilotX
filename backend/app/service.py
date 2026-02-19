@@ -997,9 +997,14 @@ class AShareAgentService:
                 state.citations,
                 regime_context=regime_context,
             )
-            analysis_brief = self._build_analysis_brief(req.stock_codes, merged_citations, regime_context=regime_context)
+            normalized_citations = self._normalize_citations_for_output(
+                merged_citations,
+                evidence_pack=state.evidence_pack,
+                max_items=10,
+            )
+            analysis_brief = self._build_analysis_brief(req.stock_codes, normalized_citations, regime_context=regime_context)
             state.report = answer
-            state.citations = merged_citations
+            state.citations = normalized_citations
             self.memory.add_memory(
                 req.user_id,
                 "task",
@@ -1297,7 +1302,12 @@ class AShareAgentService:
             yield {"event": "error", "data": {"error": runtime_error["message"], "trace_id": trace_id}}
             yield {"event": "done", "data": {"ok": False, "trace_id": trace_id, "error": runtime_error["message"]}}
             return
-        citations = [c for c in state.citations if isinstance(c, dict)]
+        citations = self._normalize_citations_for_output(
+            [c for c in state.citations if isinstance(c, dict)],
+            evidence_pack=state.evidence_pack,
+            max_items=10,
+        )
+        state.citations = citations
         latency_ms = int((time.perf_counter() - started_at) * 1000)
         self._record_rag_retrieval_trace(
             trace_id=trace_id,
@@ -1385,6 +1395,8 @@ class AShareAgentService:
                     "event_time": realtime.get("ts"),
                     "reliability_score": realtime.get("reliability_score", 0.7),
                     "excerpt": f"{code} 实时: price={realtime['price']}, pct={realtime['pct_change']}",
+                    "retrieval_track": "quote_snapshot",
+                    "rerank_score": float(realtime.get("reliability_score", 0.7) or 0.7),
                 }
             )
             if bars:
@@ -1395,6 +1407,8 @@ class AShareAgentService:
                         "event_time": bars[-1].get("trade_date"),
                         "reliability_score": bars[-1].get("reliability_score", 0.9),
                         "excerpt": f"{code} 历史K线样本 {len(bars)} 条，最近交易日 {bars[-1].get('trade_date','')}",
+                        "retrieval_track": "history_daily",
+                        "rerank_score": float(bars[-1].get("reliability_score", 0.9) or 0.9),
                     }
                 )
             # 额外补充三个月窗口首末点引用，避免模型仅看到“离散两点”却不知完整窗口样本量。
@@ -1410,6 +1424,8 @@ class AShareAgentService:
                             f"区间 {summary_3m.get('start_date','')}->{summary_3m.get('end_date','')}，"
                             f"收盘 {float(summary_3m.get('start_close', 0.0)):.3f}->{float(summary_3m.get('end_close', 0.0)):.3f}"
                         ),
+                        "retrieval_track": "history_3m_window",
+                        "rerank_score": 0.92,
                     }
                 )
 
@@ -1534,6 +1550,90 @@ class AShareAgentService:
             return
         self.web.rag_eval_add(query_text=query_text, positive_source_ids=pos_u, predicted_source_ids=pred_u)
 
+    @staticmethod
+    def _extract_retrieval_track(row: dict[str, Any]) -> str:
+        """Extract retrieval track from flat or nested metadata payload."""
+        track = str(row.get("retrieval_track", "")).strip()
+        if track:
+            return track
+        meta = row.get("metadata", {})
+        if isinstance(meta, dict):
+            nested = str(meta.get("retrieval_track", "")).strip()
+            if nested:
+                return nested
+        return ""
+
+    def _normalize_citations_for_output(
+        self,
+        citations: list[dict[str, Any]],
+        *,
+        evidence_pack: list[dict[str, Any]] | None = None,
+        max_items: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Normalize citation payload and enforce attribution fields for downstream UI/logs."""
+        tracks_by_source: dict[str, str] = {}
+        for row in list(evidence_pack or []):
+            if not isinstance(row, dict):
+                continue
+            source_id = str(row.get("source_id", "")).strip()
+            if not source_id:
+                continue
+            track = self._extract_retrieval_track(row)
+            if track and source_id not in tracks_by_source:
+                tracks_by_source[source_id] = track
+
+        normalized: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        safe_limit = max(1, min(50, int(max_items)))
+        for raw in citations:
+            if not isinstance(raw, dict):
+                continue
+            source_id = str(raw.get("source_id", "")).strip()
+            if not source_id:
+                continue
+            excerpt = str(raw.get("excerpt", raw.get("text", ""))).strip()
+            if not excerpt:
+                excerpt = f"{source_id} 证据摘要"
+            dedup_key = (source_id, excerpt[:120])
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            source_url = str(raw.get("source_url", "")).strip() or "local://unknown"
+            track = self._extract_retrieval_track(raw) or tracks_by_source.get(source_id, "unknown_track")
+            reliability = float(raw.get("reliability_score", 0.5) or 0.5)
+            reliability = max(0.0, min(1.0, reliability))
+            event_time = str(raw.get("event_time", "")).strip() or None
+            rerank_score_raw = raw.get("rerank_score")
+            rerank_score = None
+            if rerank_score_raw is not None:
+                try:
+                    rerank_score = round(float(rerank_score_raw), 6)
+                except Exception:
+                    rerank_score = None
+            normalized.append(
+                {
+                    "source_id": source_id,
+                    "source_url": source_url,
+                    "event_time": event_time,
+                    "reliability_score": round(reliability, 4),
+                    "excerpt": excerpt[:240],
+                    "retrieval_track": track,
+                    "rerank_score": rerank_score,
+                }
+            )
+            if len(normalized) >= safe_limit:
+                break
+        return normalized
+
+    def _trace_source_identity(self, row: dict[str, Any]) -> str:
+        """Build stable source identity that preserves retrieval attribution track."""
+        source_id = str(row.get("source_id", "")).strip()
+        if not source_id:
+            return ""
+        track = self._extract_retrieval_track(row)
+        return f"{source_id}|{track}" if track else source_id
+
     def _record_rag_retrieval_trace(
         self,
         *,
@@ -1546,14 +1646,14 @@ class AShareAgentService:
     ) -> None:
         """记录召回/选用轨迹，便于线上排查“召回命中但答案未使用”问题。"""
         retrieved_ids = [
-            str(x.get("source_id", "")).strip()
+            self._trace_source_identity(x)
             for x in evidence_pack[:12]
-            if str(x.get("source_id", "")).strip()
+            if self._trace_source_identity(x)
         ]
         selected_ids = [
-            str(x.get("source_id", "")).strip()
+            self._trace_source_identity(x)
             for x in citations[:12]
-            if str(x.get("source_id", "")).strip()
+            if self._trace_source_identity(x)
         ]
         if not trace_id.strip():
             return
@@ -1818,6 +1918,7 @@ class AShareAgentService:
                     score=0.0,
                     event_time=ts,
                     reliability_score=float(q.get("reliability_score", 0.6)),
+                    metadata={"retrieval_track": "quote_snapshot"},
                 )
             )
 
@@ -1836,6 +1937,7 @@ class AShareAgentService:
                     score=0.0,
                     event_time=event_time,
                     reliability_score=float(a.get("reliability_score", 0.9)),
+                    metadata={"retrieval_track": "announcement_event"},
                 )
             )
 
@@ -1858,6 +1960,7 @@ class AShareAgentService:
                     score=0.0,
                     event_time=self._parse_time(str(b.get("trade_date", ""))),
                     reliability_score=float(b.get("reliability_score", 0.9)),
+                    metadata={"retrieval_track": "history_daily"},
                 )
             )
         # 为每个标的增加“最近三个月连续窗口摘要”，避免模型只看到离散点后误判样本稀疏。
@@ -1885,6 +1988,7 @@ class AShareAgentService:
                     score=0.0,
                     event_time=self._parse_time(str(end.get("trade_date", ""))),
                     reliability_score=0.92,
+                    metadata={"retrieval_track": "history_3m_window"},
                 )
             )
 
@@ -1999,6 +2103,7 @@ class AShareAgentService:
                         score=0.0,
                         event_time=datetime.now(timezone.utc),
                         reliability_score=0.75,
+                        metadata={"retrieval_track": "doc_inline_chunk"},
                     )
                 )
 

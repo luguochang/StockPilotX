@@ -106,6 +106,7 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("market_regime", body["analysis_brief"])
         self.assertIn("regime_confidence", body["analysis_brief"])
         self.assertIn("signal_guard_applied", body["analysis_brief"])
+        self.assertTrue(all(str(x.get("retrieval_track", "")).strip() for x in body.get("citations", [])))
         self.assertIn(body["workflow_runtime"], ("langgraph", "direct"))
 
         code_mem, memory_rows = self._get("/v1/rag/qa-memory?stock_code=SH600000&limit=20")

@@ -203,6 +203,9 @@ class AgentWorkflow:
                     "source_url": "neo4j://local",
                     "event_time": datetime.now(timezone.utc).isoformat(),
                     "reliability_score": 0.8,
+                    "retrieval_track": "graph_summary",
+                    "metadata": {"retrieval_track": "graph_summary", "rerank_score": 0.8},
+                    "rerank_score": 0.8,
                 }
             ]
             for rel in graph_payload.get("relations", [])[:10]:
@@ -213,6 +216,9 @@ class AgentWorkflow:
                         "source_url": rel.get("source_url", "neo4j://local"),
                         "event_time": datetime.now(timezone.utc).isoformat(),
                         "reliability_score": 0.85,
+                        "retrieval_track": "graph_relation",
+                        "metadata": {"retrieval_track": "graph_relation", "rerank_score": 0.78},
+                        "rerank_score": 0.78,
                     }
                 )
         else:
@@ -233,6 +239,10 @@ class AgentWorkflow:
                     "source_url": i.source_url,
                     "event_time": i.event_time.isoformat(),
                     "reliability_score": i.reliability_score,
+                    # Preserve rerank metadata for downstream citation explainability/audit.
+                    "retrieval_track": str((i.metadata or {}).get("retrieval_track", "")),
+                    "metadata": dict(i.metadata or {}),
+                    "rerank_score": float(i.score),
                 }
                 for i in items
             ]
@@ -371,6 +381,10 @@ class AgentWorkflow:
     def _build_citations(self, state: AgentState) -> list[dict[str, Any]]:
         citations: list[dict[str, Any]] = []
         for e in state.evidence_pack[:5]:
+            meta = e.get("metadata", {})
+            if not isinstance(meta, dict):
+                meta = {}
+            retrieval_track = str(e.get("retrieval_track", "")).strip() or str(meta.get("retrieval_track", "")).strip()
             citations.append(
                 {
                     "source_id": e["source_id"],
@@ -378,6 +392,8 @@ class AgentWorkflow:
                     "event_time": e.get("event_time"),
                     "reliability_score": e.get("reliability_score", 0.5),
                     "excerpt": e["text"][:120],
+                    "retrieval_track": retrieval_track or "unknown_track",
+                    "rerank_score": float(e.get("rerank_score", 0.0) or 0.0),
                 }
             )
         return citations
