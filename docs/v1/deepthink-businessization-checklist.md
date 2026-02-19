@@ -50,4 +50,4 @@
 ## 执行日志
 
 1. `2026-02-19 | ROUND-1 | 完成 ops/health 新接口切换、可见性字段增强与覆盖矩阵文档 | commit: 63f672e | doc: docs/v1/2026-02-19-round-1-ops-health-and-visibility-matrix.md`
-2. `2026-02-19 | ROUND-2 | 新增 intel-card 聚合接口，输出业务结论/证据/事件日历/情景矩阵并补充回归测试 | commit: 待提交 | doc: docs/v1/2026-02-19-round-2-intel-card-api.md`
+2. `2026-02-19 | ROUND-2 | 新增 intel-card 聚合接口，输出业务结论/证据/事件日历/情景矩阵并补充回归测试 | commit: e857ed2 | doc: docs/v1/2026-02-19-round-2-intel-card-api.md`
