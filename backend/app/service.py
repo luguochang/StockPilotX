@@ -782,6 +782,7 @@ class AShareAgentService:
         *,
         stock_code: str,
         question: str,
+        opinions: list[dict[str, Any]],
         arbitration: dict[str, Any],
         budget_usage: dict[str, Any],
         intel: dict[str, Any],
@@ -804,6 +805,7 @@ class AShareAgentService:
         confidence = float(signal_guard.get("confidence", confidence))
         calendar = intel.get("calendar_watchlist", []) if isinstance(intel, dict) else []
         next_event = calendar[0] if isinstance(calendar, list) and calendar else {}
+        dimensions = self._deep_build_analysis_dimensions(opinions=opinions, regime=regime, intel=intel)
         return {
             "stock_code": stock_code,
             "question": question[:200],
@@ -832,7 +834,65 @@ class AShareAgentService:
             "intel_confidence_note": str(intel.get("confidence_note", "")) if isinstance(intel, dict) else "",
             "intel_trace_id": str(intel.get("trace_id", "")) if isinstance(intel, dict) else "",
             "intel_citation_count": len(citations),
+            "analysis_dimensions": dimensions,
         }
+
+    @staticmethod
+    def _deep_build_analysis_dimensions(
+        *,
+        opinions: list[dict[str, Any]],
+        regime: dict[str, Any],
+        intel: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Build structured analysis panels for frontend cockpit rendering."""
+        by_agent = {str(x.get("agent", "")): x for x in opinions}
+        risk_op = by_agent.get("risk_agent", {})
+        quant_op = by_agent.get("quant_agent", {})
+        macro_op = by_agent.get("macro_agent", {})
+        exec_op = by_agent.get("execution_agent", {})
+        pm_op = by_agent.get("pm_agent", {})
+        critic_op = by_agent.get("critic_agent", {})
+        industry_events = list(intel.get("industry_forward_events", [])) if isinstance(intel, dict) else []
+        catalysts = list(intel.get("stock_specific_catalysts", [])) if isinstance(intel, dict) else []
+        impact_chain = list(intel.get("impact_chain", [])) if isinstance(intel, dict) else []
+        return [
+            {
+                "dimension": "industry",
+                "score": round(float(quant_op.get("confidence", 0.5) or 0.5), 4),
+                "summary": str(pm_op.get("reason", "行业景气与叙事需结合基本面验证。"))[:180],
+                "signals": [str(x.get("title", ""))[:60] for x in industry_events[:3] if str(x.get("title", "")).strip()],
+            },
+            {
+                "dimension": "competition",
+                "score": round(float(critic_op.get("confidence", 0.5) or 0.5), 4),
+                "summary": "竞争格局需结合份额变化与盈利能力对比。",
+                "signals": [str(x.get("summary", ""))[:60] for x in catalysts[:2] if str(x.get("summary", "")).strip()],
+            },
+            {
+                "dimension": "supply_chain",
+                "score": round(float(macro_op.get("confidence", 0.5) or 0.5), 4),
+                "summary": "关注上下游传导链路与成本压力释放。",
+                "signals": [str(x.get("to", ""))[:60] for x in impact_chain[:3] if str(x.get("to", "")).strip()],
+            },
+            {
+                "dimension": "risk",
+                "score": round(float(risk_op.get("confidence", 0.5) or 0.5), 4),
+                "summary": str(risk_op.get("reason", "优先关注回撤、波动与下行尾部风险。"))[:180],
+                "signals": [str(regime.get("risk_bias", ""))[:40]],
+            },
+            {
+                "dimension": "macro",
+                "score": round(float(regime.get("regime_confidence", 0.0) or 0.0), 4),
+                "summary": str(regime.get("regime_rationale", "宏观与政策节奏将影响风险偏好。"))[:180],
+                "signals": [str(x.get("title", ""))[:60] for x in list(intel.get("macro_signals", []))[:3] if str(x.get("title", "")).strip()],
+            },
+            {
+                "dimension": "execution",
+                "score": round(float(exec_op.get("confidence", 0.5) or 0.5), 4),
+                "summary": str(exec_op.get("reason", "执行层需控制仓位节奏与流动性冲击。"))[:180],
+                "signals": [str(exec_op.get("signal", "hold"))],
+            },
+        ]
 
     def query(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Execute query pipeline with cache and history persistence."""
@@ -3623,6 +3683,7 @@ class AShareAgentService:
             business_summary = self._deep_build_business_summary(
                 stock_code=code,
                 question=question,
+                opinions=opinions,
                 arbitration=arbitration,
                 budget_usage=budget_usage,
                 intel=intel_payload,

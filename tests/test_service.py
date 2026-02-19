@@ -338,6 +338,9 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("regime_confidence", business_payload)
         self.assertIn("signal_guard_applied", business_payload)
         self.assertIn("confidence_adjustment_detail", business_payload)
+        self.assertIn("analysis_dimensions", business_payload)
+        self.assertTrue(isinstance(business_payload.get("analysis_dimensions", []), list))
+        self.assertGreaterEqual(len(business_payload.get("analysis_dimensions", [])), 5)
         events_snapshot = self.svc.deep_think_list_events(session_id)
         self.assertGreater(events_snapshot["count"], 0)
         stored_names = [str(x.get("event", "")) for x in events_snapshot["events"]]
@@ -431,6 +434,8 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("regime_confidence", business_payload)
         self.assertIn("signal_guard_applied", business_payload)
         self.assertIn("confidence_adjustment_detail", business_payload)
+        self.assertIn("analysis_dimensions", business_payload)
+        self.assertGreaterEqual(len(business_payload.get("analysis_dimensions", [])), 5)
 
         round_ids = {str(x.get("data", {}).get("round_id", "")) for x in events if "data" in x}
         self.assertEqual(len(round_ids), 1)

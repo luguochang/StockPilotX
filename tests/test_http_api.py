@@ -674,6 +674,7 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("event: round_persisted", stream_text)
         self.assertIn("event: done", stream_text)
         self.assertIn('"ok": true', stream_text)
+        self.assertIn('"analysis_dimensions"', stream_text)
 
         c2, loaded = self._get(f"/v1/deep-think/sessions/{session_id}")
         self.assertEqual(c2, 200)

@@ -361,3 +361,44 @@
 - [x] 导出 API 路由接入
 - [x] 服务层/API 层测试
 - [x] 回归测试通过
+
+## 第8批增量（DeepThink - 分析维度结构化）
+
+### 新增能力
+
+1. Business Summary 增加结构化分析维度
+- `backend/app/service.py`
+  - `_deep_build_business_summary()` 新增参数 `opinions`
+  - 新增 `_deep_build_analysis_dimensions()`，输出维度清单：
+    - `industry`
+    - `competition`
+    - `supply_chain`
+    - `risk`
+    - `macro`
+    - `execution`
+  - 在 `business_summary` 中新增字段：`analysis_dimensions`
+
+2. 轮次流程接入维度输出
+- `backend/app/service.py`
+  - `deep_think_run_round_stream_events()` 在生成 `business_summary` 时传入 `opinions`
+
+### 第8批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python -m pytest -q tests/test_service.py -k "deep_think_session_and_round or deep_think_v2_stream_round"
+.\.venv\Scripts\python -m pytest -q tests/test_http_api.py -k "test_deep_think_v2_round_stream"
+.\.venv\Scripts\python -m pytest -q tests -k "deep_think or api or docs or query"
+```
+
+结果：
+- 3 passed, 28 deselected
+- 1 passed, 20 deselected
+- 38 passed, 50 deselected
+
+### 第8批 Checklist
+
+- [x] DeepThink 分析维度结构化输出
+- [x] 流式事件携带维度面板
+- [x] 服务层/API 层测试
+- [x] 回归测试通过
