@@ -967,6 +967,24 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    @app.get("/v1/rag/retrieval-preview")
+    def rag_retrieval_preview(
+        doc_id: str,
+        max_queries: int = 3,
+        top_k: int = 5,
+        authorization: str | None = Header(default=None),
+    ):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_retrieval_preview_api(
+                token,
+                doc_id=doc_id,
+                max_queries=max_queries,
+                top_k=top_k,
+            )
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     # ---------------- WEB-005/006/007/008 Ops ----------------
     @app.get("/v1/ops/data-sources/health")
     def ops_source_health(authorization: str | None = Header(default=None)):

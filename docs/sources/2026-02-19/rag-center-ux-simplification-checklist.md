@@ -1,5 +1,7 @@
 ﻿# RAG 语料中心体验优化 Checklist（2026-02-19）
-> 关联轮次文档：`docs/sources/2026-02-19/round-UX-6-rag-business-entry-simplification.md`
+> 关联轮次文档：
+> 1. `docs/sources/2026-02-19/round-UX-6-rag-business-entry-simplification.md`
+> 2. `docs/sources/2026-02-19/round-UX-7-rag-retrieval-preview.md`
 
 ## 执行要求
 1. 每轮必须包含：代码实现（关键逻辑注释）+ 自测 + 技术文档 + commit。
@@ -8,6 +10,7 @@
 
 ## 轮次状态
 - [x] ROUND-UX-6：RAG 业务入口简化（预设驱动 + 高级项折叠 + 一键上传生效）
+- [x] ROUND-UX-7：上传后可检索样本预览（后端预览能力 + 前端结果可视化）
 
 ## 任务清单
 - [x] 新增 `business | ops` 双模式视图切换。
@@ -16,15 +19,26 @@
 - [x] 默认主路径收敛为「选择类型 -> 选择文件 -> 上传并生效」。
 - [x] 高级参数折叠在「高级设置（可选）」中，默认不干扰。
 - [x] 运维治理能力保留（source/chunk/memory/trace）。
+- [x] 新增 `/v1/rag/retrieval-preview` 接口，按 `doc_id` 输出样本 query 与命中结果。
+- [x] `upload-and-index` 工作流回传 `retrieval_preview`，上传后立即可见验证反馈。
+- [x] 业务页新增“可检索样本预览”卡片，展示命中率、命中 rank 和 top 命中片段。
 
 ## 自测记录
-1. `cd frontend && npm run build` -> Passed
-2. `cd frontend && npx tsc --noEmit` -> Passed
+1. `\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "rag_upload_workflow_and_dashboard or rag_retrieval_preview_api_wrapper"` -> Passed
+2. `\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "rag_asset_management_endpoints"` -> Passed
+3. `cd frontend && npm run build` -> Passed
+4. `cd frontend && npx tsc --noEmit` -> Passed
 
 ## 关键变更文件
-1. `frontend/app/rag-center/page.tsx`
-2. `docs/sources/2026-02-19/rag-center-ux-simplification-checklist.md`
-3. `docs/sources/2026-02-19/round-UX-6-rag-business-entry-simplification.md`
+1. `backend/app/service.py`
+2. `backend/app/web/service.py`
+3. `backend/app/http_api.py`
+4. `frontend/app/rag-center/page.tsx`
+5. `tests/test_service.py`
+6. `tests/test_http_api.py`
+7. `docs/sources/2026-02-19/rag-center-ux-simplification-checklist.md`
+8. `docs/sources/2026-02-19/round-UX-7-rag-retrieval-preview.md`
 
 ## Commit 记录
-1. 待本轮提交后补充（与本次改动同一 commit）
+1. `223e7b1` | `feat(ux): simplify rag-center business upload flow with preset-first entry`
+2. 待本轮提交后补充（ROUND-UX-7）

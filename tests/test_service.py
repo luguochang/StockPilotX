@@ -223,9 +223,15 @@ class ServiceTestCase(unittest.TestCase):
         )
         self.assertEqual(workflow["status"], "ok")
         self.assertIn("timeline", workflow)
+        self.assertIn("retrieval_preview", workflow)
         result = workflow.get("result", {})
         self.assertTrue(str(result.get("doc_id", "")).startswith("ragdoc-"))
         self.assertEqual(str((result.get("asset") or {}).get("status", "")), "active")
+        preview = workflow.get("retrieval_preview", {})
+        self.assertTrue(bool(preview.get("ready")))
+        self.assertGreaterEqual(int(preview.get("query_count", 0)), 1)
+        self.assertTrue(isinstance(preview.get("items", []), list))
+        self.assertTrue(any(bool(x.get("target_hit")) for x in preview.get("items", [])))
 
         uploads = self.svc.rag_uploads_list("", limit=20)
         self.assertGreater(len(uploads), 0)
@@ -235,6 +241,15 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("doc_total", dashboard)
         self.assertIn("active_chunks", dashboard)
         self.assertIn("retrieval_hit_rate_7d", dashboard)
+
+    def test_rag_retrieval_preview_api_wrapper(self) -> None:
+        _ = self.svc.docs_upload("rag-preview-doc", "preview.txt", "SH600000 营收增长且现金流改善" * 140, "user_upload")
+        _ = self.svc.docs_index("rag-preview-doc")
+        preview = self.svc.rag_retrieval_preview_api("", doc_id="rag-preview-doc", max_queries=2, top_k=4)
+        self.assertTrue(bool(preview.get("ready")))
+        self.assertEqual(str(preview.get("doc_id", "")), "rag-preview-doc")
+        self.assertGreaterEqual(int(preview.get("query_count", 0)), 1)
+        self.assertTrue(isinstance(preview.get("items", []), list))
 
     def test_semantic_summary_then_origin_backfill(self) -> None:
         _ = self.svc.docs_upload("rag-doc-3", "semantic-rag.pdf", "SH600000 纪要 提及现金流改善与订单增长" * 200, "cninfo")

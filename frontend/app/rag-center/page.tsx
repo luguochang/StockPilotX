@@ -81,6 +81,7 @@ export default function RagCenterPage() {
   const [uploadTags, setUploadTags] = useState("");
   const [uploadAutoIndex, setUploadAutoIndex] = useState(true);
   const [showUploadAdvanced, setShowUploadAdvanced] = useState(false);
+  const [retrievalPreview, setRetrievalPreview] = useState<Record<string, any> | null>(null);
 
   const [editSource, setEditSource] = useState("user_upload");
   const [editAutoApprove, setEditAutoApprove] = useState(false);
@@ -163,6 +164,23 @@ export default function RagCenterPage() {
     }
   }
 
+  async function loadRetrievalPreview(docId: string): Promise<Record<string, any> | null> {
+    const normalized = docId.trim();
+    if (!normalized) return null;
+    try {
+      const params = new URLSearchParams({
+        doc_id: normalized,
+        max_queries: "2",
+        top_k: "4",
+      });
+      const resp = await fetch(`${API_BASE}/v1/rag/retrieval-preview?${params.toString()}`);
+      return (await parseOrThrow(resp)) as Record<string, any>;
+    } catch {
+      // Preview failure should not block upload flow.
+      return null;
+    }
+  }
+
   async function submitBusinessUpload() {
     if (!uploadFile) {
       setError("请先选择附件");
@@ -170,6 +188,7 @@ export default function RagCenterPage() {
     }
     setUploading(true);
     resetFeedback();
+    setRetrievalPreview(null);
     try {
       const contentBase64 = await fileToBase64(uploadFile);
       const preset = PRESET_CONFIG[uploadPreset];
@@ -191,6 +210,12 @@ export default function RagCenterPage() {
         body: JSON.stringify(payload),
       });
       const body = (await parseOrThrow(resp)) as Record<string, any>;
+      const docId = String(body?.result?.doc_id ?? "").trim();
+      // Prefer workflow embedded preview, and fallback to dedicated endpoint for compatibility.
+      const preview =
+        (body?.retrieval_preview as Record<string, any> | undefined) ??
+        (docId ? await loadRetrievalPreview(docId) : null);
+      if (preview) setRetrievalPreview(preview);
       if (Boolean(body?.result?.dedupe_hit)) {
         setMessage(`检测到重复文件，已复用既有资产：${String(body?.result?.doc_id ?? "-")}`);
       } else {
@@ -464,6 +489,7 @@ export default function RagCenterPage() {
                 onChange={(e) => {
                   const file = e.target.files?.[0] ?? null;
                   setUploadFile(file);
+                  setRetrievalPreview(null);
                 }}
               />
 
@@ -484,6 +510,45 @@ export default function RagCenterPage() {
               <Text style={{ color: "#475569" }}>
                 当前文件：{uploadFile ? `${uploadFile.name} (${(uploadFile.size / 1024).toFixed(1)} KB)` : "未选择"}
               </Text>
+
+              {retrievalPreview ? (
+                <Card size="small" title="可检索样本预览">
+                  <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                    <Alert
+                      type={Boolean(retrievalPreview.passed) ? "success" : "warning"}
+                      showIcon
+                      message={
+                        Boolean(retrievalPreview.passed)
+                          ? "已验证：当前文档可被在线检索命中"
+                          : "提示：当前样本未命中本次文档，建议重试或检查入库状态"
+                      }
+                      description={`doc_id=${String(retrievalPreview.doc_id ?? "-")}，命中率=${(
+                        Number(retrievalPreview.target_hit_rate ?? 0) * 100
+                      ).toFixed(1)}%，命中查询=${String(retrievalPreview.matched_query_count ?? 0)}/${String(
+                        retrievalPreview.query_count ?? 0,
+                      )}`}
+                    />
+                    {(retrievalPreview.items ?? []).map((item: any, index: number) => {
+                      const hits = Array.isArray(item?.top_hits) ? item.top_hits.slice(0, 2) : [];
+                      const hitSummary = hits
+                        .map((hit: any) => `${Number(hit?.rank ?? 0)}.${hit?.is_target_doc ? "当前文档" : "其他"} ${String(hit?.excerpt ?? "")}`)
+                        .join(" | ");
+                      return (
+                        <Card key={`${String(item?.query ?? "q")}-${index}`} size="small" style={{ background: "#f8fafc" }}>
+                          <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                            <Text strong>Query {index + 1}: {String(item?.query ?? "")}</Text>
+                            <Text style={{ color: item?.target_hit ? "#15803d" : "#b45309" }}>
+                              {item?.target_hit ? `命中当前文档，rank=${String(item?.target_hit_rank ?? "-")}` : "未命中当前文档"}
+                              {`，latency=${String(item?.latency_ms ?? 0)}ms`}
+                            </Text>
+                            <Text style={{ color: "#475569" }}>Top 命中：{hitSummary || "暂无"}</Text>
+                          </Space>
+                        </Card>
+                      );
+                    })}
+                  </Space>
+                </Card>
+              ) : null}
 
               <Collapse
                 size="small"

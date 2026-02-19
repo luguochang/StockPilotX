@@ -426,6 +426,16 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(str(uploaded.get("status", "")), "ok")
         self.assertIn("timeline", uploaded)
         self.assertEqual(str(((uploaded.get("result") or {}).get("asset") or {}).get("status", "")), "active")
+        self.assertIn("retrieval_preview", uploaded)
+        preview = uploaded.get("retrieval_preview", {})
+        self.assertTrue(bool(preview.get("ready")))
+        self.assertGreaterEqual(int(preview.get("query_count", 0)), 1)
+
+        doc_id = str((uploaded.get("result") or {}).get("doc_id", ""))
+        c8b, preview_api = self._get(f"/v1/rag/retrieval-preview?doc_id={urllib.parse.quote(doc_id)}&max_queries=2&top_k=4")
+        self.assertEqual(c8b, 200)
+        self.assertEqual(str(preview_api.get("doc_id", "")), doc_id)
+        self.assertIn("items", preview_api)
 
         c9, dashboard = self._get("/v1/rag/dashboard")
         self.assertEqual(c9, 200)

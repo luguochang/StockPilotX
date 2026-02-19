@@ -3109,6 +3109,205 @@ class AShareAgentService:
             "asset": asset,
         }
 
+    @staticmethod
+    def _rag_preview_trim(text: str, max_len: int = 140) -> str:
+        """Normalize and truncate preview text to keep payload readable."""
+        compact = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(compact) <= max(1, int(max_len)):
+            return compact
+        return compact[: max(1, int(max_len))].rstrip() + "..."
+
+    def _build_rag_preview_queries(
+        self,
+        *,
+        chunks: list[dict[str, Any]],
+        stock_codes: list[str],
+        tags: list[str],
+        max_queries: int,
+    ) -> list[str]:
+        """Generate deterministic sample queries for retrieval verification."""
+        candidates: list[str] = []
+        snippet_queries: list[str] = []
+
+        for row in chunks[:12]:
+            text = str(row.get("chunk_text_redacted") or row.get("chunk_text") or "")
+            normalized = re.sub(r"\s+", " ", text).strip()
+            if not normalized:
+                continue
+            # Use sentence-like fragments so users can quickly understand preview intent.
+            for part in re.split(r"[。！？!?；;\n]", normalized):
+                piece = self._rag_preview_trim(part, max_len=42)
+                if len(piece) < 12:
+                    continue
+                snippet_queries.append(piece)
+                break
+            if len(snippet_queries) >= max_queries * 2:
+                break
+
+        # Put current-document snippets first to maximize "this doc is retrievable" signal.
+        candidates.extend(snippet_queries)
+        for code in stock_codes[:2]:
+            normalized = str(code or "").strip().upper()
+            if not normalized:
+                continue
+            candidates.append(f"{normalized} 关键结论")
+            candidates.append(f"{normalized} 风险提示")
+        for tag in tags[:2]:
+            normalized = str(tag or "").strip()
+            if not normalized:
+                continue
+            candidates.append(f"{normalized} 核心信息")
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for query in candidates:
+            key = query.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(query.strip())
+            if len(deduped) >= max_queries:
+                break
+        return deduped or ["文档核心结论"]
+
+    def rag_retrieval_preview(
+        self,
+        token: str,
+        *,
+        doc_id: str,
+        max_queries: int = 3,
+        top_k: int = 5,
+        hint_stock_codes: list[str] | None = None,
+        hint_tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Build retrieval verification preview for one uploaded document."""
+        _ = self.web.require_role(token, {"admin", "ops"})
+        doc_id_clean = str(doc_id or "").strip()
+        if not doc_id_clean:
+            raise ValueError("doc_id is required")
+        safe_max_queries = max(1, min(6, int(max_queries)))
+        safe_top_k = max(1, min(8, int(top_k)))
+
+        all_chunks = self.web.rag_doc_chunk_list_internal(doc_id=doc_id_clean, limit=180)
+        if not all_chunks:
+            return {
+                "doc_id": doc_id_clean,
+                "ready": False,
+                "passed": False,
+                "reason": "doc_not_found",
+                "total_chunk_count": 0,
+                "active_chunk_count": 0,
+                "query_count": 0,
+                "matched_query_count": 0,
+                "target_hit_rate": 0.0,
+                "items": [],
+            }
+
+        active_chunks = [row for row in all_chunks if str(row.get("effective_status", "")).strip().lower() == "active"]
+        if not active_chunks:
+            return {
+                "doc_id": doc_id_clean,
+                "ready": False,
+                "passed": False,
+                "reason": "doc_not_active",
+                "total_chunk_count": len(all_chunks),
+                "active_chunk_count": 0,
+                "query_count": 0,
+                "matched_query_count": 0,
+                "target_hit_rate": 0.0,
+                "items": [],
+            }
+
+        stock_codes: list[str] = []
+        for raw in hint_stock_codes or []:
+            code = str(raw or "").strip().upper()
+            if code and code not in stock_codes:
+                stock_codes.append(code)
+        for row in active_chunks:
+            for raw in row.get("stock_codes", []) or []:
+                code = str(raw or "").strip().upper()
+                if code and code not in stock_codes:
+                    stock_codes.append(code)
+
+        tags: list[str] = []
+        for raw in hint_tags or []:
+            tag = str(raw or "").strip()
+            if tag and tag not in tags:
+                tags.append(tag)
+
+        preview_queries = self._build_rag_preview_queries(
+            chunks=active_chunks,
+            stock_codes=stock_codes,
+            tags=tags,
+            max_queries=safe_max_queries,
+        )
+        retriever = self._build_runtime_retriever(stock_codes)
+
+        items: list[dict[str, Any]] = []
+        matched_queries = 0
+        for query in preview_queries:
+            started = time.perf_counter()
+            hits = retriever.retrieve(
+                query,
+                top_k_vector=max(8, safe_top_k * 2),
+                top_k_bm25=max(12, safe_top_k * 2),
+                rerank_top_n=safe_top_k,
+            )
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            hit_rows: list[dict[str, Any]] = []
+            target_hit_rank: int | None = None
+            for rank, hit in enumerate(hits, start=1):
+                meta = dict(hit.metadata or {})
+                hit_doc_id = str(meta.get("doc_id", "")).strip()
+                hit_source_url = str(hit.source_url or "")
+                # Some lexical retrieval paths may not preserve doc_id metadata, so keep source_url fallback.
+                is_target = bool(
+                    (hit_doc_id and hit_doc_id == doc_id_clean)
+                    or (f"/docs/{doc_id_clean}" in hit_source_url)
+                    or hit_source_url.endswith(f"://docs/{doc_id_clean}")
+                )
+                if is_target and target_hit_rank is None:
+                    target_hit_rank = rank
+                hit_rows.append(
+                    {
+                        "rank": rank,
+                        "score": round(float(hit.score or 0.0), 4),
+                        "source_id": str(hit.source_id or ""),
+                        "source_url": hit_source_url,
+                        "retrieval_track": str(meta.get("retrieval_track", "")),
+                        "doc_id": hit_doc_id,
+                        "chunk_id": str(meta.get("chunk_id", "")),
+                        "is_target_doc": is_target,
+                        "excerpt": self._rag_preview_trim(str(hit.text or ""), max_len=120),
+                    }
+                )
+            if target_hit_rank is not None:
+                matched_queries += 1
+            items.append(
+                {
+                    "query": query,
+                    "latency_ms": latency_ms,
+                    "target_hit": target_hit_rank is not None,
+                    "target_hit_rank": target_hit_rank,
+                    "top_hits": hit_rows,
+                }
+            )
+
+        query_count = len(items)
+        hit_rate = round((matched_queries / query_count), 4) if query_count > 0 else 0.0
+        return {
+            "doc_id": doc_id_clean,
+            "ready": True,
+            "passed": matched_queries > 0,
+            "reason": "",
+            "total_chunk_count": len(all_chunks),
+            "active_chunk_count": len(active_chunks),
+            "query_count": query_count,
+            "matched_query_count": matched_queries,
+            "target_hit_rate": hit_rate,
+            "items": items,
+        }
+
     def rag_workflow_upload_and_index(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
         """业务入口：上传并立即索引，返回阶段时间线，便于前端给出可解释反馈。"""
         req = dict(payload or {})
@@ -3128,7 +3327,64 @@ class AShareAgentService:
                 "at": datetime.now(timezone.utc).isoformat(),
             },
         ]
-        return {"status": "ok", "result": result, "timeline": timeline}
+        preview_doc_id = str(result.get("doc_id", "")).strip()
+        retrieval_preview: dict[str, Any] = {
+            "doc_id": preview_doc_id,
+            "ready": False,
+            "passed": False,
+            "reason": "doc_id_missing",
+            "query_count": 0,
+            "matched_query_count": 0,
+            "target_hit_rate": 0.0,
+            "items": [],
+        }
+        if preview_doc_id:
+            try:
+                asset = result.get("asset", {}) if isinstance(result.get("asset"), dict) else {}
+                hint_codes = [str(x).strip().upper() for x in asset.get("stock_codes", []) if str(x).strip()]
+                hint_tags = [str(x).strip() for x in asset.get("tags", []) if str(x).strip()]
+                retrieval_preview = self.rag_retrieval_preview(
+                    token,
+                    doc_id=preview_doc_id,
+                    max_queries=2,
+                    top_k=4,
+                    hint_stock_codes=hint_codes,
+                    hint_tags=hint_tags,
+                )
+            except Exception as ex:  # noqa: BLE001
+                retrieval_preview = {
+                    "doc_id": preview_doc_id,
+                    "ready": False,
+                    "passed": False,
+                    "reason": "preview_failed",
+                    "error": str(ex)[:240],
+                    "query_count": 0,
+                    "matched_query_count": 0,
+                    "target_hit_rate": 0.0,
+                    "items": [],
+                }
+        return {
+            "status": "ok",
+            "result": result,
+            "timeline": timeline,
+            "retrieval_preview": retrieval_preview,
+        }
+
+    def rag_retrieval_preview_api(
+        self,
+        token: str,
+        *,
+        doc_id: str,
+        max_queries: int = 3,
+        top_k: int = 5,
+    ) -> dict[str, Any]:
+        """Public API wrapper for upload-time retrieval preview."""
+        return self.rag_retrieval_preview(
+            token,
+            doc_id=doc_id,
+            max_queries=max_queries,
+            top_k=top_k,
+        )
 
     def rag_uploads_list(
         self,

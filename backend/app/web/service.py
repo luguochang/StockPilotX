@@ -1496,6 +1496,7 @@ class WebAppService:
     def rag_doc_chunk_list_internal(
         self,
         *,
+        doc_id: str = "",
         status: str = "",
         stock_code: str = "",
         limit: int = 800,
@@ -1504,12 +1505,15 @@ class WebAppService:
         safe_limit = max(1, min(5000, int(limit)))
         cond = ["1=1"]
         params: list[Any] = []
+        if doc_id.strip():
+            cond.append("doc_id = ?")
+            params.append(doc_id.strip())
         if status.strip():
             cond.append("effective_status = ?")
             params.append(status.strip().lower())
         sql = f"""
             SELECT chunk_id, doc_id, chunk_no, chunk_text, chunk_text_redacted, source, source_url,
-                   stock_codes_json, industry_tags_json, quality_score, updated_at
+                   effective_status, stock_codes_json, industry_tags_json, quality_score, updated_at
             FROM rag_doc_chunk
             WHERE {' AND '.join(cond)}
             ORDER BY updated_at DESC, chunk_no ASC
