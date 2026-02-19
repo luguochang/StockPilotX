@@ -2302,12 +2302,38 @@ class AShareAgentService:
             # Keep parse_confidence for observability, but do not block by review gate.
             needs_review=False,
         )
+        self.web.doc_pipeline_run_add(
+            doc_id=doc_id,
+            stage="upload",
+            status="ok",
+            filename=filename,
+            parse_confidence=float(doc.get("parse_confidence", 0.0) or 0.0),
+            chunk_count=0,
+            table_count=0,
+            parse_notes="upload_received",
+            metadata={
+                "source": source,
+                "doc_hash": str(doc.get("doc_hash", "")),
+                "pipeline_version": int(doc.get("version", 1) or 1),
+            },
+        )
         return result
 
     def docs_index(self, doc_id: str) -> dict[str, Any]:
         """执行文档分块索引。"""
         result = self.ingestion.index_doc(doc_id)
         doc = self.ingestion.store.docs.get(doc_id, {})
+        if str(result.get("status", "")) != "indexed":
+            self.web.doc_pipeline_run_add(
+                doc_id=doc_id,
+                stage="index",
+                status="not_found",
+                filename=str(doc.get("filename", "")),
+                parse_confidence=float(doc.get("parse_confidence", 0.0) or 0.0),
+                parse_notes="doc_not_found",
+                metadata={"result_status": str(result.get("status", ""))},
+            )
+            return result
         if doc:
             self.web.doc_upsert(
                 doc_id=doc_id,
@@ -2318,7 +2344,28 @@ class AShareAgentService:
             )
             # 文档索引完成后，把 chunk 持久化到 RAG 资产库，供后续检索与治理复用。
             self._persist_doc_chunks_to_rag(doc_id, doc)
+            self.web.doc_pipeline_run_add(
+                doc_id=doc_id,
+                stage="index",
+                status="ok",
+                filename=str(doc.get("filename", "")),
+                parse_confidence=float(doc.get("parse_confidence", 0.0) or 0.0),
+                chunk_count=int(result.get("chunk_count", 0) or 0),
+                table_count=int(result.get("table_count", 0) or 0),
+                parse_notes="index_completed",
+                metadata={
+                    "source": str(doc.get("source", "")),
+                    "doc_hash": str(doc.get("doc_hash", "")),
+                    "pipeline_version": int(doc.get("version", 1) or 1),
+                },
+            )
         return result
+
+    def docs_versions(self, token: str, doc_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        return self.web.doc_versions(token, doc_id, limit=limit)
+
+    def docs_pipeline_runs(self, token: str, doc_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
+        return self.web.doc_pipeline_runs(token, doc_id, limit=limit)
 
     def docs_quality_report(self, doc_id: str) -> dict[str, Any]:
         """Build a quality report for one indexed document.

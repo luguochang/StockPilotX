@@ -142,6 +142,20 @@ class WebStore:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS doc_pipeline_run (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                status TEXT NOT NULL,
+                filename TEXT NOT NULL DEFAULT '',
+                parse_confidence REAL NOT NULL DEFAULT 0,
+                chunk_count INTEGER NOT NULL DEFAULT 0,
+                table_count INTEGER NOT NULL DEFAULT 0,
+                parse_notes TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS source_health (
                 source_id TEXT PRIMARY KEY,
                 success_rate REAL NOT NULL,
@@ -413,6 +427,8 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_watchlist_pool_stock_pool ON watchlist_pool_stock(pool_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_watchlist_pool_stock_code ON watchlist_pool_stock(stock_code);
             CREATE INDEX IF NOT EXISTS idx_query_history_user_created ON query_history(user_id, tenant_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_doc_pipeline_run_doc_created ON doc_pipeline_run(doc_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_doc_pipeline_run_stage_status ON doc_pipeline_run(stage, status, created_at);
             CREATE INDEX IF NOT EXISTS idx_stock_industry_map_code ON stock_universe_industry_map(stock_code);
             CREATE INDEX IF NOT EXISTS idx_stock_industry_map_l1 ON stock_universe_industry_map(industry_l1);
             CREATE INDEX IF NOT EXISTS idx_rag_doc_chunk_doc_status ON rag_doc_chunk(doc_id, effective_status, chunk_no);

@@ -80,6 +80,14 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(up["status"], "uploaded")
         self.assertEqual(idx["status"], "indexed")
         self.assertGreater(idx["chunk_count"], 1)
+        versions = self.svc.docs_versions("", "d1", limit=20)
+        self.assertGreaterEqual(len(versions), 1)
+        self.assertGreaterEqual(int(versions[0].get("version", 0)), 1)
+        runs = self.svc.docs_pipeline_runs("", "d1", limit=20)
+        self.assertGreaterEqual(len(runs), 2)
+        stages = {str(x.get("stage", "")) for x in runs}
+        self.assertIn("upload", stages)
+        self.assertIn("index", stages)
         # Regression guard: upload/index should not enter review queue anymore.
         docs = self.svc.docs_list("")
         row = next((x for x in docs if str(x.get("doc_id", "")) == "d1"), None)

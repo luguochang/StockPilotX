@@ -549,6 +549,26 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    @app.get("/v1/docs/{doc_id}/versions")
+    def docs_versions(doc_id: str, limit: int = 20, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.docs_versions(token, doc_id, limit=limit)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/docs/{doc_id}/pipeline-runs")
+    def docs_pipeline_runs(doc_id: str, limit: int = 30, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.docs_pipeline_runs(token, doc_id, limit=limit)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     @app.get("/v1/docs/{doc_id}/quality-report")
     def docs_quality_report(doc_id: str, authorization: str | None = Header(default=None)):
         token = _extract_optional_bearer_token(authorization)

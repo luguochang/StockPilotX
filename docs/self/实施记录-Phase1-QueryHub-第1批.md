@@ -178,3 +178,60 @@
 - [x] Query history 支持时间范围筛选
 - [x] `/v1/query` 校验异常返回 400
 - [x] 回归测试通过并记录结果
+
+## 第4批增量（Knowledge Hub - 文档 Pipeline 可追溯）
+
+### 新增能力
+
+1. 文档处理运行记录（pipeline run）
+- `backend/app/web/store.py`
+  - 新增表：`doc_pipeline_run`
+  - 新增索引：
+    - `idx_doc_pipeline_run_doc_created`
+    - `idx_doc_pipeline_run_stage_status`
+- `backend/app/web/service.py`
+  - 新增写入方法：`doc_pipeline_run_add()`
+  - 新增查询方法：`doc_pipeline_runs()`
+
+2. 文档版本列表（基于成功索引序列）
+- `backend/app/web/service.py`
+  - 新增：`doc_versions()`
+  - 规则：对 `stage=index 且 status=ok` 的运行按时间顺序编号为版本号，接口按最新版本倒序返回。
+- `backend/app/service.py`
+  - 新增应用层透传：
+    - `docs_versions()`
+    - `docs_pipeline_runs()`
+
+3. Upload/Index 流程接入运行追踪
+- `backend/app/service.py`
+  - `docs_upload()` 写入 `stage=upload,status=ok` 记录
+  - `docs_index()` 写入：
+    - `stage=index,status=ok`（索引成功）
+    - `stage=index,status=not_found`（索引对象不存在）
+
+4. 新增 API
+- `backend/app/http_api.py`
+  - `GET /v1/docs/{doc_id}/versions?limit=20`
+  - `GET /v1/docs/{doc_id}/pipeline-runs?limit=30`
+
+### 第4批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python -m pytest -q tests/test_service.py -k "test_doc_upload_and_index"
+.\.venv\Scripts\python -m pytest -q tests/test_http_api.py -k "test_docs_upload_and_index"
+.\.venv\Scripts\python -m pytest -q tests -k "docs or query or web or api"
+```
+
+结果：
+- 1 passed, 27 deselected
+- 1 passed, 18 deselected
+- 28 passed, 55 deselected
+
+### 第4批 Checklist
+
+- [x] 文档 pipeline 运行记录落库
+- [x] 文档版本列表接口
+- [x] Upload/Index 流程接入可追溯日志
+- [x] API 路由接入
+- [x] 相关回归测试通过

@@ -280,6 +280,20 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(index_code, 200)
         self.assertEqual(indexed["status"], "indexed")
 
+        v_code, versions = self._get("/v1/docs/api-doc-1/versions?limit=20")
+        self.assertEqual(v_code, 200)
+        self.assertTrue(isinstance(versions, list))
+        self.assertGreaterEqual(len(versions), 1)
+        self.assertGreaterEqual(int(versions[0].get("version", 0)), 1)
+
+        p_code, runs = self._get("/v1/docs/api-doc-1/pipeline-runs?limit=20")
+        self.assertEqual(p_code, 200)
+        self.assertTrue(isinstance(runs, list))
+        self.assertGreaterEqual(len(runs), 2)
+        stages = {str(x.get("stage", "")) for x in runs}
+        self.assertIn("upload", stages)
+        self.assertIn("index", stages)
+
         qr_code, quality = self._get("/v1/docs/api-doc-1/quality-report")
         self.assertEqual(qr_code, 200)
         self.assertIn("quality_score", quality)

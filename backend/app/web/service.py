@@ -486,6 +486,96 @@ class WebAppService:
         )
         return {"status": "ok", "doc_id": doc_id, "action": action}
 
+    def doc_pipeline_run_add(
+        self,
+        *,
+        doc_id: str,
+        stage: str,
+        status: str,
+        filename: str = "",
+        parse_confidence: float = 0.0,
+        chunk_count: int = 0,
+        table_count: int = 0,
+        parse_notes: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Append one doc pipeline run event for observability and version tracking."""
+        self.store.execute(
+            """
+            INSERT INTO doc_pipeline_run
+            (doc_id, stage, status, filename, parse_confidence, chunk_count, table_count, parse_notes, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(doc_id or "").strip(),
+                str(stage or "").strip()[:40],
+                str(status or "").strip()[:24],
+                str(filename or "").strip()[:260],
+                max(0.0, min(1.0, float(parse_confidence or 0.0))),
+                max(0, int(chunk_count or 0)),
+                max(0, int(table_count or 0)),
+                str(parse_notes or "").strip()[:500],
+                json.dumps(metadata or {}, ensure_ascii=False),
+            ),
+        )
+
+    def doc_pipeline_runs(self, token: str, doc_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
+        """List latest document pipeline runs for one doc."""
+        _ = self.auth_me(token)
+        safe_doc = str(doc_id or "").strip()
+        if not safe_doc:
+            raise ValueError("doc_id is required")
+        safe_limit = max(1, min(200, int(limit)))
+        rows = self.store.query_all(
+            """
+            SELECT id, doc_id, stage, status, filename, parse_confidence, chunk_count, table_count, parse_notes, metadata_json, created_at
+            FROM doc_pipeline_run
+            WHERE doc_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (safe_doc, safe_limit),
+        )
+        for row in rows:
+            row["metadata"] = self._json_loads_or(row.get("metadata_json"), {})
+            row.pop("metadata_json", None)
+        return rows
+
+    def doc_versions(self, token: str, doc_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Build version list from successful index runs (version = sequence of successful index)."""
+        _ = self.auth_me(token)
+        safe_doc = str(doc_id or "").strip()
+        if not safe_doc:
+            raise ValueError("doc_id is required")
+        safe_limit = max(1, min(100, int(limit)))
+        rows = self.store.query_all(
+            """
+            SELECT id, doc_id, filename, parse_confidence, chunk_count, table_count, parse_notes, metadata_json, created_at
+            FROM doc_pipeline_run
+            WHERE doc_id = ? AND stage = 'index' AND status = 'ok'
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (safe_doc, safe_limit),
+        )
+        versions: list[dict[str, Any]] = []
+        for idx, row in enumerate(rows, start=1):
+            versions.append(
+                {
+                    "version": idx,
+                    "doc_id": row.get("doc_id", ""),
+                    "filename": row.get("filename", ""),
+                    "parse_confidence": float(row.get("parse_confidence", 0.0) or 0.0),
+                    "chunk_count": int(row.get("chunk_count", 0) or 0),
+                    "table_count": int(row.get("table_count", 0) or 0),
+                    "parse_notes": row.get("parse_notes", ""),
+                    "metadata": self._json_loads_or(row.get("metadata_json"), {}),
+                    "created_at": row.get("created_at", ""),
+                }
+            )
+        versions.reverse()
+        return versions
+
     # ----------------- RAG Assets -----------------
     def rag_source_policy_list(self, token: str) -> list[dict[str, Any]]:
         _ = self.require_role(token, {"admin", "ops"})
