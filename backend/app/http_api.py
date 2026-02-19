@@ -624,6 +624,22 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    @app.post("/v1/journal/{journal_id}/ai-reflection/generate")
+    def journal_ai_reflection_generate(journal_id: int, payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.journal_ai_reflection_generate(token, journal_id, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/journal/{journal_id}/ai-reflection")
+    def journal_ai_reflection_get(journal_id: int, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.journal_ai_reflection_get(token, journal_id)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     # ---------------- WEB-003 Report Center ----------------
     @app.get("/v1/reports")
     def reports_list(authorization: str | None = Header(default=None)):

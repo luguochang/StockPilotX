@@ -563,6 +563,36 @@ class HttpApiTestCase(unittest.TestCase):
         )
         self.assertEqual(bad_code, 400)
 
+    def test_journal_ai_reflection_endpoints(self) -> None:
+        c1, created = self._post(
+            "/v1/journal",
+            {
+                "journal_type": "decision",
+                "title": "API AI复盘",
+                "content": "计划基于估值修复做分批加仓，并在两周后复核。",
+                "stock_code": "SH600000",
+                "decision_type": "buy",
+            },
+        )
+        self.assertEqual(c1, 200)
+        journal_id = int(created.get("journal_id", 0))
+        self.assertGreater(journal_id, 0)
+
+        c2, generated = self._post(
+            f"/v1/journal/{journal_id}/ai-reflection/generate",
+            {"focus": "优先分析触发条件和失效条件"},
+        )
+        self.assertEqual(c2, 200)
+        self.assertIn(str(generated.get("status", "")), {"ready", "fallback"})
+        self.assertTrue(str(generated.get("summary", "")).strip())
+        self.assertTrue(isinstance(generated.get("insights", []), list))
+        self.assertTrue(isinstance(generated.get("lessons", []), list))
+
+        c3, loaded = self._get(f"/v1/journal/{journal_id}/ai-reflection")
+        self.assertEqual(c3, 200)
+        self.assertEqual(int(loaded.get("journal_id", 0)), journal_id)
+        self.assertTrue(str(loaded.get("summary", "")).strip())
+
     def test_ops_capabilities(self) -> None:
         code, body = self._get("/v1/ops/capabilities")
         self.assertEqual(code, 200)

@@ -672,3 +672,64 @@ rg -n "Community MVP|Journal -> Community|社区内容推荐" docs/checklist/202
 - [x] Community 从执行计划移除
 - [x] 计划文档同步收敛
 - [x] 自检通过
+
+## 第14批增量（Phase3 - Round-X Journal AI复盘）
+
+### 新增能力
+
+1. AI复盘持久化
+- `backend/app/web/store.py`
+  - 新增表：`journal_ai_reflection`
+  - 新增索引：`idx_journal_ai_reflection_generated`
+
+2. Journal AI复盘服务
+- `backend/app/web/service.py`
+  - 新增：
+    - `journal_get`
+    - `journal_ai_reflection_upsert`
+    - `journal_ai_reflection_get`
+    - `journal_find_by_related_research`（供后续自动关联幂等复用）
+
+3. 应用层 AI 复盘编排
+- `backend/app/service.py`
+  - 新增：
+    - `journal_ai_reflection_generate`
+    - `journal_ai_reflection_get`
+  - 增加：
+    - Prompt 构造
+    - JSON 校验
+    - 失败 fallback
+    - latency 观测字段
+
+4. API 路由
+- `backend/app/http_api.py`
+  - `POST /v1/journal/{journal_id}/ai-reflection/generate`
+  - `GET /v1/journal/{journal_id}/ai-reflection`
+
+5. 测试补充
+- `tests/test_service.py`
+  - `test_journal_ai_reflection_generate_and_get`
+- `tests/test_http_api.py`
+  - `test_journal_ai_reflection_endpoints`
+
+### 第14批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "journal_lifecycle or journal_ai_reflection_generate_and_get"
+.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "journal_endpoints or journal_ai_reflection_endpoints"
+.\.venv\Scripts\python.exe -m pytest -q tests -k "journal or api or web"
+```
+
+结果：
+- 2 passed, 34 deselected
+- 2 passed, 24 deselected
+- 29 passed, 69 deselected
+
+### 第14批 Checklist
+
+- [x] Journal AI复盘存储表
+- [x] Journal AI复盘生成与查询服务
+- [x] Journal AI复盘 API
+- [x] 服务层/API 层测试
+- [x] 回归测试通过

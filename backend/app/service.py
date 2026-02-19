@@ -3199,6 +3199,91 @@ class AShareAgentService:
     def portfolio_transactions(self, token: str, portfolio_id: int, *, limit: int = 200) -> list[dict[str, Any]]:
         return self.web.portfolio_transactions(token, portfolio_id=portfolio_id, limit=limit)
 
+    def _journal_normalize_items(self, values: Any, *, max_items: int = 6, max_len: int = 200) -> list[str]:
+        if not isinstance(values, list):
+            return []
+        normalized: list[str] = []
+        for raw in values:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            text = text[:max_len]
+            if text in normalized:
+                continue
+            normalized.append(text)
+            if len(normalized) >= max_items:
+                break
+        return normalized
+
+    def _journal_build_ai_reflection_prompt(
+        self,
+        *,
+        journal: dict[str, Any],
+        reflections: list[dict[str, Any]],
+        focus: str,
+    ) -> str:
+        """Build strict JSON prompt so downstream API can parse deterministic fields."""
+        reflection_brief = []
+        for item in reflections[:5]:
+            reflection_brief.append(str(item.get("reflection_content", ""))[:120])
+        return (
+            "你是A股投资复盘助手。请只输出一个JSON对象，不要输出Markdown。\n"
+            "JSON schema:\n"
+            "{\n"
+            '  "summary": "一句话总结，<=120字",\n'
+            '  "insights": ["洞察1", "洞察2"],\n'
+            '  "lessons": ["教训1", "教训2"],\n'
+            '  "confidence": 0.0\n'
+            "}\n\n"
+            f"日志类型: {journal.get('journal_type', '')}\n"
+            f"股票: {journal.get('stock_code', '')}\n"
+            f"决策类型: {journal.get('decision_type', '')}\n"
+            f"日志标题: {journal.get('title', '')}\n"
+            f"日志正文: {journal.get('content', '')}\n"
+            f"历史复盘摘要: {json.dumps(reflection_brief, ensure_ascii=False)}\n"
+            f"关注重点: {focus}\n"
+            "要求:\n"
+            "1) 洞察聚焦可执行改进，不给买卖指令。\n"
+            "2) 每条洞察/教训控制在40字内。\n"
+            "3) confidence范围[0,1]。"
+        )
+
+    def _journal_validate_ai_reflection_payload(self, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("ai reflection payload must be object")
+        summary = str(payload.get("summary", "")).strip()
+        if not summary:
+            raise ValueError("ai reflection summary is empty")
+        insights = self._journal_normalize_items(payload.get("insights", []))
+        lessons = self._journal_normalize_items(payload.get("lessons", []))
+        confidence = max(0.0, min(1.0, float(payload.get("confidence", 0.0) or 0.0)))
+        if not insights:
+            insights = ["建议复核证据完整性与触发条件，避免单因子决策。"]
+        if not lessons:
+            lessons = ["执行前明确失效条件和复核时间，降低主观偏差。"]
+        return {
+            "summary": summary[:600],
+            "insights": insights,
+            "lessons": lessons,
+            "confidence": confidence,
+        }
+
+    def _journal_ai_reflection_fallback(self, *, journal: dict[str, Any]) -> dict[str, Any]:
+        stock = str(journal.get("stock_code", "")).strip()
+        decision = str(journal.get("decision_type", "")).strip() or "unknown"
+        return {
+            "summary": f"{stock or '该标的'}的{decision}决策已记录，建议围绕触发条件与失效条件做闭环复盘。",
+            "insights": [
+                "将决策依据拆成可验证指标，避免叙事先行。",
+                "补充仓位约束与止损阈值，降低执行偏差。",
+            ],
+            "lessons": [
+                "复盘时对比预期与实际差异，更新下次决策模板。",
+                "记录失败样本与边界条件，优先优化高频错误。",
+            ],
+            "confidence": 0.46,
+        }
+
     # Investment Journal: keep orchestration in service layer so API payload remains thin.
     def journal_create(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self.web.journal_create(
@@ -3242,6 +3327,65 @@ class AShareAgentService:
 
     def journal_reflection_list(self, token: str, journal_id: int, *, limit: int = 50) -> list[dict[str, Any]]:
         return self.web.journal_reflection_list(token, journal_id=journal_id, limit=limit)
+
+    def journal_ai_reflection_get(self, token: str, journal_id: int) -> dict[str, Any]:
+        return self.web.journal_ai_reflection_get(token, journal_id=journal_id)
+
+    def journal_ai_reflection_generate(self, token: str, journal_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        journal = self.web.journal_get(token, journal_id=journal_id)
+        reflections = self.web.journal_reflection_list(token, journal_id=journal_id, limit=8)
+        focus = str(payload.get("focus", "")).strip()[:200]
+        trace_id = self.traces.new_trace()
+
+        generated = self._journal_ai_reflection_fallback(journal=journal)
+        status = "fallback"
+        error_code = ""
+        error_message = ""
+        provider = ""
+        model = ""
+        started_at = time.perf_counter()
+
+        if self.settings.llm_external_enabled and self.llm_gateway.providers:
+            state = AgentState(
+                user_id=str(journal.get("user_id", "journal_user")),
+                question=f"journal-ai-reflection:{journal_id}",
+                stock_codes=[str(journal.get("stock_code", "")).strip().upper()] if str(journal.get("stock_code", "")).strip() else [],
+                trace_id=trace_id,
+            )
+            prompt = self._journal_build_ai_reflection_prompt(
+                journal=journal,
+                reflections=reflections,
+                focus=focus or "请强调执行偏差、证据缺口和可执行改进。",
+            )
+            try:
+                raw = self.llm_gateway.generate(state, prompt)
+                parsed = self._deep_safe_json_loads(raw)
+                generated = self._journal_validate_ai_reflection_payload(parsed)
+                status = "ready"
+                provider = str(state.analysis.get("llm_provider", ""))
+                model = str(state.analysis.get("llm_model", ""))
+            except Exception as ex:  # noqa: BLE001
+                status = "fallback"
+                error_code = "journal_ai_generation_failed"
+                error_message = str(ex)[:380]
+
+        result = self.web.journal_ai_reflection_upsert(
+            token,
+            journal_id=journal_id,
+            status=status,
+            summary=str(generated.get("summary", "")),
+            insights=generated.get("insights", []),
+            lessons=generated.get("lessons", []),
+            confidence=float(generated.get("confidence", 0.0) or 0.0),
+            provider=provider,
+            model=model,
+            trace_id=trace_id,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        # 输出生成耗时，方便后续排查“AI复盘慢/失败”的具体链路。
+        result["latency_ms"] = int((time.perf_counter() - started_at) * 1000)
+        return result
 
     def reports_list(self, token: str) -> list[dict[str, Any]]:
         return self.web.report_list(token)

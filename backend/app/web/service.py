@@ -680,6 +680,36 @@ class WebAppService:
         payload.pop("tags_json", None)
         return payload
 
+    def _journal_ai_reflection_serialize_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        if not row:
+            return {}
+        payload = dict(row)
+        payload["ai_reflection_id"] = int(payload.pop("id"))
+        payload["journal_id"] = int(payload.get("journal_id", 0) or 0)
+        payload["confidence"] = float(payload.get("confidence", 0.0) or 0.0)
+        payload["insights"] = self._json_loads_or(payload.get("insights_json", "[]"), [])
+        payload["lessons"] = self._json_loads_or(payload.get("lessons_json", "[]"), [])
+        payload.pop("insights_json", None)
+        payload.pop("lessons_json", None)
+        return payload
+
+    def _journal_normalize_brief_items(self, items: Any, *, max_items: int = 6, max_len: int = 200) -> list[str]:
+        """Normalize generated insight/lesson list to keep payload stable for UI rendering."""
+        if not isinstance(items, list):
+            return []
+        normalized: list[str] = []
+        for raw in items:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            text = text[:max_len]
+            if text in normalized:
+                continue
+            normalized.append(text)
+            if len(normalized) >= max_items:
+                break
+        return normalized
+
     def journal_create(
         self,
         token: str,
@@ -729,6 +759,10 @@ class WebAppService:
         )
         row = self.store.query_one("SELECT * FROM investment_journal WHERE id = ?", (int(cur.lastrowid),))
         return self._journal_serialize_row(row or {})
+
+    def journal_get(self, token: str, *, journal_id: int) -> dict[str, Any]:
+        row = self._journal_ensure_owned(token, journal_id)
+        return self._journal_serialize_row(row)
 
     def journal_list(
         self,
@@ -817,6 +851,96 @@ class WebAppService:
             """,
             (int(journal_id), safe_limit),
         )
+
+    def journal_find_by_related_research(self, token: str, *, related_research_id: str) -> dict[str, Any]:
+        """Find one journal by external link key for idempotent auto-link scenarios."""
+        me = self.auth_me(token)
+        key = str(related_research_id or "").strip()
+        if not key:
+            raise ValueError("related_research_id is required")
+        row = self.store.query_one(
+            """
+            SELECT id, journal_type, title, content, stock_code, decision_type, related_research_id,
+                   related_portfolio_id, tags_json, sentiment, created_at, updated_at
+            FROM investment_journal
+            WHERE user_id = ? AND tenant_id = ? AND related_research_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (me["user_id"], me["tenant_id"], key),
+        )
+        return self._journal_serialize_row(row or {})
+
+    def journal_ai_reflection_upsert(
+        self,
+        token: str,
+        *,
+        journal_id: int,
+        status: str,
+        summary: str,
+        insights: Any = None,
+        lessons: Any = None,
+        confidence: float = 0.0,
+        provider: str = "",
+        model: str = "",
+        trace_id: str = "",
+        error_code: str = "",
+        error_message: str = "",
+    ) -> dict[str, Any]:
+        _ = self._journal_ensure_owned(token, journal_id)
+        safe_status = str(status or "").strip().lower()
+        if safe_status not in {"ready", "fallback", "failed"}:
+            raise ValueError("status must be one of ready/fallback/failed")
+        normalized_insights = self._journal_normalize_brief_items(insights)
+        normalized_lessons = self._journal_normalize_brief_items(lessons)
+        self.store.execute(
+            """
+            INSERT INTO journal_ai_reflection
+            (journal_id, status, summary, insights_json, lessons_json, confidence, provider, model, trace_id, error_code, error_message, generated_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(journal_id) DO UPDATE SET
+                status = excluded.status,
+                summary = excluded.summary,
+                insights_json = excluded.insights_json,
+                lessons_json = excluded.lessons_json,
+                confidence = excluded.confidence,
+                provider = excluded.provider,
+                model = excluded.model,
+                trace_id = excluded.trace_id,
+                error_code = excluded.error_code,
+                error_message = excluded.error_message,
+                generated_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                int(journal_id),
+                safe_status,
+                str(summary or "").strip()[:2400],
+                json.dumps(normalized_insights, ensure_ascii=False),
+                json.dumps(normalized_lessons, ensure_ascii=False),
+                max(0.0, min(1.0, float(confidence or 0.0))),
+                str(provider or "").strip()[:80],
+                str(model or "").strip()[:120],
+                str(trace_id or "").strip()[:80],
+                str(error_code or "").strip()[:64],
+                str(error_message or "").strip()[:400],
+            ),
+        )
+        return self.journal_ai_reflection_get(token, journal_id=journal_id)
+
+    def journal_ai_reflection_get(self, token: str, *, journal_id: int) -> dict[str, Any]:
+        _ = self._journal_ensure_owned(token, journal_id)
+        row = self.store.query_one(
+            """
+            SELECT id, journal_id, status, summary, insights_json, lessons_json, confidence, provider, model,
+                   trace_id, error_code, error_message, generated_at, updated_at
+            FROM journal_ai_reflection
+            WHERE journal_id = ?
+            LIMIT 1
+            """,
+            (int(journal_id),),
+        )
+        return self._journal_ai_reflection_serialize_row(row or {})
 
     # ----------------- Reports -----------------
     def save_report_index(

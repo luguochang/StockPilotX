@@ -333,6 +333,44 @@ class ServiceTestCase(unittest.TestCase):
                 },
             )
 
+    def test_journal_ai_reflection_generate_and_get(self) -> None:
+        created = self.svc.journal_create(
+            "",
+            {
+                "journal_type": "decision",
+                "title": "AI复盘样本",
+                "content": "买入理由是估值回落+现金流改善，计划两周复核。",
+                "stock_code": "SH600000",
+                "decision_type": "buy",
+                "tags": ["复盘", "现金流"],
+            },
+        )
+        journal_id = int(created.get("journal_id", 0))
+        self.assertGreater(journal_id, 0)
+
+        _ = self.svc.journal_reflection_add(
+            "",
+            journal_id,
+            {
+                "reflection_content": "实际执行偏慢，触发条件定义不够清晰。",
+            },
+        )
+        generated = self.svc.journal_ai_reflection_generate(
+            "",
+            journal_id,
+            {"focus": "强调执行偏差和后续可验证改进"},
+        )
+        self.assertGreater(int(generated.get("journal_id", 0)), 0)
+        self.assertIn(str(generated.get("status", "")), {"ready", "fallback"})
+        self.assertTrue(str(generated.get("summary", "")).strip())
+        self.assertTrue(isinstance(generated.get("insights", []), list))
+        self.assertTrue(isinstance(generated.get("lessons", []), list))
+        self.assertGreaterEqual(int(generated.get("latency_ms", 0)), 0)
+
+        loaded = self.svc.journal_ai_reflection_get("", journal_id)
+        self.assertEqual(int(loaded.get("journal_id", 0)), journal_id)
+        self.assertTrue(str(loaded.get("summary", "")).strip())
+
     def test_query_repeated_calls_do_not_hit_global_model_limit(self) -> None:
         # 回归：预算计数应按请求重置，连续请求不应在第9次后失败。
         for idx in range(12):
