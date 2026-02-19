@@ -37,26 +37,30 @@
   - `.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "ingest_market_daily or ingest_announcements"`
 - 自测结果：`20 passed`（含 deselected 子集）
 - 技术文档路径：`docs/sources/2026-02-19/round-AC-datasource-scaffold-and-config.md`
-- Commit Hash：`见本轮 round-AC commit`
+- Commit Hash：`89c8f01`
 
 ## ROUND-AD：行情数据源迁移
 
-- [ ] 迁移并实现 `sina.py`
-- [ ] 迁移并实现 `tencent.py`
-- [ ] 迁移并实现 `netease.py`
-- [ ] 迁移并实现 `xueqiu.py`
-- [ ] 完成行情回退链和失败降级策略
-- [ ] 接入 `ingest_market_daily` 与相关调用点
-- [ ] 添加行情相关单测（解析、编码、回退）
-- [ ] 记录技术文档（round-AD）
-- [ ] 提交 commit（round-AD）
+- [x] 迁移并实现 `sina.py`
+- [x] 迁移并实现 `tencent.py`
+- [x] 迁移并实现 `netease.py`
+- [x] 迁移并实现 `xueqiu.py`
+- [x] 完成行情回退链和失败降级策略
+- [x] 接入 `ingest_market_daily` 与相关调用点
+- [x] 添加行情相关单测（解析、编码、回退）
+- [x] 记录技术文档（round-AD）
+- [x] 提交 commit（round-AD）
 
 证据记录：
 
 - 自测命令：
-- 自测结果：
-- 技术文档路径：
-- Commit Hash：
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_datasource_quote_adapters.py tests/test_datasources_factory.py tests/test_datasource_utils.py`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "ingest_endpoints"`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "ingest_market_daily or ingest_announcements"`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_data_sources_live.py tests/test_announcements.py tests/test_ingestion_quality.py tests/test_doc_pipeline.py`
+- 自测结果：`25 passed`（含 deselected 子集）
+- 技术文档路径：`docs/sources/2026-02-19/round-AD-quote-adapters-migration.md`
+- Commit Hash：`见本轮 round-AD commit`
 
 ## ROUND-AE：财务数据源迁移
 
@@ -160,3 +164,4 @@ npx tsc --noEmit
 > 说明：每完成一轮，在这里追加一条记录（日期、轮次、摘要、hash、文档路径）。
 
 1. `2026-02-19 | ROUND-AC | 完成 datasources 骨架、factory、config 接入与基础回归测试 | hash: 见本轮 round-AC commit | doc: docs/sources/2026-02-19/round-AC-datasource-scaffold-and-config.md`
+2. `2026-02-19 | ROUND-AD | 完成 quote 四源迁移、新 QuoteService 回退链及回归验证 | hash: 见本轮 round-AD commit | doc: docs/sources/2026-02-19/round-AD-quote-adapters-migration.md`

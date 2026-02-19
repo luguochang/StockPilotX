@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from backend.app.config import Settings
-from backend.app.data.sources import AnnouncementService, HistoryService, QuoteService
+from backend.app.data.sources import AnnouncementService, HistoryService
+from backend.app.datasources.quote.service import QuoteService
 
 
 def build_default_quote_service(settings: Settings | None = None) -> QuoteService:
@@ -12,8 +13,13 @@ def build_default_quote_service(settings: Settings | None = None) -> QuoteServic
     """
 
     cfg = settings or Settings.from_env()
-    cookie = (cfg.datasource_xueqiu_cookie or "").strip() or None
-    return QuoteService.build_default(xueqiu_cookie=cookie)
+    return QuoteService.build_default(
+        xueqiu_cookie=(cfg.datasource_xueqiu_cookie or "").strip(),
+        timeout_seconds=float(cfg.datasource_request_timeout_seconds),
+        retry_count=int(cfg.datasource_retry_count),
+        retry_backoff_seconds=float(cfg.datasource_retry_backoff_seconds),
+        proxy_url=str(cfg.datasource_proxy_url or ""),
+    )
 
 
 def build_default_announcement_service(settings: Settings | None = None) -> AnnouncementService:
@@ -36,4 +42,3 @@ def build_default_history_service(settings: Settings | None = None) -> HistorySe
 
     _ = settings
     return HistoryService()
-
