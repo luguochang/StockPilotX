@@ -514,6 +514,27 @@ class HttpApiTestCase(unittest.TestCase):
             )
         self.assertEqual(bad_horizon.exception.code, 400)
 
+    def test_analysis_intel_feedback_and_review(self) -> None:
+        c1, card = self._get("/v1/analysis/intel-card?stock_code=SH600000&horizon=30d&risk_profile=neutral")
+        self.assertEqual(c1, 200)
+        c2, feedback = self._post(
+            "/v1/analysis/intel-card/feedback",
+            {
+                "stock_code": "SH600000",
+                "trace_id": "api-intel-feedback-1",
+                "signal": str(card.get("overall_signal", "hold")),
+                "confidence": float(card.get("confidence", 0.0) or 0.0),
+                "position_hint": str(card.get("position_hint", "")),
+                "feedback": "adopt",
+            },
+        )
+        self.assertEqual(c2, 200)
+        self.assertEqual(str(feedback.get("status", "")), "ok")
+        c3, review = self._get("/v1/analysis/intel-card/review?stock_code=SH600000&limit=20")
+        self.assertEqual(c3, 200)
+        self.assertIn("stats", review)
+        self.assertIn("t5", review.get("stats", {}))
+
     def test_portfolio_endpoints(self) -> None:
         c1, created = self._post(
             "/v1/portfolio",

@@ -232,6 +232,13 @@ type IntelCardSnapshot = {
   data_freshness: Record<string, number | null>;
 };
 
+type IntelReviewSnapshot = {
+  stock_code: string;
+  count: number;
+  stats: Record<string, { count: number; avg_return: number | null; hit_rate: number | null }>;
+  items: Array<Record<string, any>>;
+};
+
 type DeepConsoleMode = "analysis" | "engineering";
 type DeepRoundStageKey = "idle" | "planning" | "data_refresh" | "intel_search" | "debate" | "arbitration" | "persist" | "done";
 
@@ -372,6 +379,10 @@ export default function DeepThinkPage() {
   const [intelCardError, setIntelCardError] = useState("");
   const [intelCardHorizon, setIntelCardHorizon] = useState<"7d" | "30d" | "90d">("30d");
   const [intelCardRiskProfile, setIntelCardRiskProfile] = useState<"conservative" | "neutral" | "aggressive">("neutral");
+  const [intelFeedbackLoading, setIntelFeedbackLoading] = useState(false);
+  const [intelFeedbackMessage, setIntelFeedbackMessage] = useState("");
+  const [intelReviewLoading, setIntelReviewLoading] = useState(false);
+  const [intelReview, setIntelReview] = useState<IntelReviewSnapshot | null>(null);
   // query/stream 在后端落库后会发 knowledge_persisted，前端据此显示“已沉淀共享语料”反馈。
   const [knowledgePersistedTraceId, setKnowledgePersistedTraceId] = useState("");
   const [deepSession, setDeepSession] = useState<DeepThinkSession | null>(null);
@@ -541,10 +552,55 @@ export default function DeepThinkPage() {
       const body = await resp.json();
       if (!resp.ok) throw new Error(body?.detail ?? `intel-card HTTP ${resp.status}`);
       setIntelCard(body as IntelCardSnapshot);
+      void loadIntelReview(code, false);
     } catch (e) {
       setIntelCardError(e instanceof Error ? e.message : "业务情报卡片加载失败");
     } finally {
       if (showLoading) setIntelCardLoading(false);
+    }
+  }
+
+  async function loadIntelReview(code?: string, showLoading = true) {
+    const target = String(code ?? stockCode).trim().toUpperCase();
+    if (showLoading) setIntelReviewLoading(true);
+    try {
+      const resp = await fetch(`${API_BASE}/v1/analysis/intel-card/review?stock_code=${encodeURIComponent(target)}&limit=50`);
+      const body = await resp.json();
+      if (!resp.ok) throw new Error(body?.detail ?? `intel-review HTTP ${resp.status}`);
+      setIntelReview(body as IntelReviewSnapshot);
+    } catch (e) {
+      setIntelFeedbackMessage(e instanceof Error ? e.message : "复盘统计加载失败");
+    } finally {
+      if (showLoading) setIntelReviewLoading(false);
+    }
+  }
+
+  async function submitIntelFeedback(signal: "adopt" | "watch" | "reject") {
+    if (!intelCard) return;
+    setIntelFeedbackLoading(true);
+    setIntelFeedbackMessage("");
+    try {
+      const payload = {
+        stock_code: stockCode,
+        trace_id: result?.trace_id ?? "",
+        signal: intelCard.overall_signal,
+        confidence: intelCard.confidence,
+        position_hint: intelCard.position_hint,
+        feedback: signal,
+      };
+      const resp = await fetch(`${API_BASE}/v1/analysis/intel-card/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await resp.json();
+      if (!resp.ok) throw new Error(body?.detail ?? `intel-feedback HTTP ${resp.status}`);
+      setIntelFeedbackMessage(`反馈已记录：${signal}`);
+      await loadIntelReview(stockCode, false);
+    } catch (e) {
+      setIntelFeedbackMessage(e instanceof Error ? e.message : "反馈提交失败");
+    } finally {
+      setIntelFeedbackLoading(false);
     }
   }
 
@@ -711,6 +767,8 @@ export default function DeepThinkPage() {
     // 切换标的后先清空旧卡片，避免把前一只股票的结论误读为当前标的。
     setIntelCard(null);
     setIntelCardError("");
+    setIntelReview(null);
+    setIntelFeedbackMessage("");
   }, [stockCode]);
 
   async function createDeepThinkSessionRequest(): Promise<DeepThinkSession> {
@@ -1304,6 +1362,17 @@ export default function DeepThinkPage() {
         minutes: typeof v === "number" ? v : null,
       })),
     [intelCard]
+  );
+  const intelReviewStatsRows = useMemo(
+    () =>
+      Object.entries(intelReview?.stats ?? {}).map(([k, v]) => ({
+        key: k,
+        horizon: k,
+        count: Number(v?.count ?? 0),
+        avg_return: typeof v?.avg_return === "number" ? v.avg_return : null,
+        hit_rate: typeof v?.hit_rate === "number" ? v.hit_rate : null,
+      })),
+    [intelReview]
   );
   const bannerItems = [
     "实时行情聚合",
@@ -1973,6 +2042,21 @@ export default function DeepThinkPage() {
                         <Tag key={`degrade-${reason}`} color="orange">{String(reason)}</Tag>
                       ))}
                     </Space>
+                    <Space wrap>
+                      <Button size="small" loading={intelFeedbackLoading} onClick={() => submitIntelFeedback("adopt")}>
+                        采纳本次建议
+                      </Button>
+                      <Button size="small" loading={intelFeedbackLoading} onClick={() => submitIntelFeedback("watch")}>
+                        继续观察
+                      </Button>
+                      <Button size="small" danger loading={intelFeedbackLoading} onClick={() => submitIntelFeedback("reject")}>
+                        拒绝本次建议
+                      </Button>
+                      <Button size="small" loading={intelReviewLoading} onClick={() => loadIntelReview(stockCode, true)}>
+                        刷新复盘统计
+                      </Button>
+                    </Space>
+                    {intelFeedbackMessage ? <Alert type="info" showIcon message={intelFeedbackMessage} /> : null}
 
                     <Row gutter={[12, 12]}>
                       <Col xs={24} md={12}>
@@ -2158,6 +2242,57 @@ export default function DeepThinkPage() {
                           },
                         ]}
                       />
+                    </Card>
+
+                    <Card size="small" title={<span style={{ color: "#0f172a" }}>采纳与偏差复盘（T+1/T+5/T+20）</span>}>
+                      <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                        <Text style={{ color: "#64748b" }}>
+                          说明：统计用户对建议的采纳结果，并追踪后续区间偏差，用于迭代阈值与策略节奏。
+                        </Text>
+                        <Table
+                          rowKey="key"
+                          pagination={false}
+                          dataSource={intelReviewStatsRows}
+                          columns={[
+                            { title: "窗口", dataIndex: "horizon", key: "horizon" },
+                            { title: "样本数", dataIndex: "count", key: "count" },
+                            {
+                              title: "平均收益",
+                              dataIndex: "avg_return",
+                              key: "avg_return",
+                              render: (v: number | null) => (typeof v === "number" ? `${(v * 100).toFixed(2)}%` : "-"),
+                            },
+                            {
+                              title: "命中率",
+                              dataIndex: "hit_rate",
+                              key: "hit_rate",
+                              render: (v: number | null) => (typeof v === "number" ? `${(v * 100).toFixed(2)}%` : "-"),
+                            },
+                          ]}
+                        />
+                        <List
+                          size="small"
+                          dataSource={(intelReview?.items ?? []).slice(0, 6)}
+                          renderItem={(row: any) => (
+                            <List.Item>
+                              <Space wrap>
+                                <Tag color="blue">{String(row?.feedback ?? "-")}</Tag>
+                                <Tag color="purple">{String(row?.signal ?? "-")}</Tag>
+                                <Text style={{ color: "#334155" }}>{String(row?.created_at ?? "")}</Text>
+                                <Text style={{ color: "#64748b" }}>
+                                  T+1={row?.realized?.t1 == null ? "-" : `${(Number(row.realized.t1) * 100).toFixed(2)}%`}
+                                </Text>
+                                <Text style={{ color: "#64748b" }}>
+                                  T+5={row?.realized?.t5 == null ? "-" : `${(Number(row.realized.t5) * 100).toFixed(2)}%`}
+                                </Text>
+                                <Text style={{ color: "#64748b" }}>
+                                  T+20={row?.realized?.t20 == null ? "-" : `${(Number(row.realized.t20) * 100).toFixed(2)}%`}
+                                </Text>
+                              </Space>
+                            </List.Item>
+                          )}
+                        />
+                      </Space>
                     </Card>
                   </>
                 ) : (

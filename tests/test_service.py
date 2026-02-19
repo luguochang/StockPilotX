@@ -298,6 +298,25 @@ class ServiceTestCase(unittest.TestCase):
         self.assertTrue(isinstance(card.get("trigger_conditions", []), list))
         self.assertTrue(isinstance(card.get("invalidation_conditions", []), list))
 
+    def test_analysis_intel_feedback_and_review(self) -> None:
+        card = self.svc.analysis_intel_card("SH600000", horizon="30d", risk_profile="neutral")
+        feedback = self.svc.analysis_intel_feedback(
+            {
+                "stock_code": "SH600000",
+                "trace_id": "svc-intel-feedback-1",
+                "signal": str(card.get("overall_signal", "hold")),
+                "confidence": float(card.get("confidence", 0.0) or 0.0),
+                "position_hint": str(card.get("position_hint", "")),
+                "feedback": "watch",
+            }
+        )
+        self.assertEqual(str(feedback.get("status", "")), "ok")
+        self.assertIn("item", feedback)
+        review = self.svc.analysis_intel_review("SH600000", limit=20)
+        self.assertGreaterEqual(int(review.get("count", 0)), 1)
+        self.assertIn("stats", review)
+        self.assertIn("t1", review.get("stats", {}))
+
     def test_portfolio_lifecycle(self) -> None:
         created = self.svc.portfolio_create(
             "",

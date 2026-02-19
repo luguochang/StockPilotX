@@ -3804,6 +3804,119 @@ class AShareAgentService:
             "data_freshness": freshness,
         }
 
+    def analysis_intel_feedback(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Record whether user accepts/rejects intel-card conclusion for later review loop."""
+        stock_code = str(payload.get("stock_code", "")).strip().upper()
+        if not stock_code:
+            raise ValueError("stock_code is required")
+        feedback = str(payload.get("feedback", "")).strip().lower()
+        if feedback not in {"adopt", "watch", "reject"}:
+            raise ValueError("feedback must be one of: adopt, watch, reject")
+        signal = str(payload.get("signal", "hold")).strip().lower() or "hold"
+        if signal not in {"buy", "hold", "reduce"}:
+            signal = "hold"
+        confidence = float(payload.get("confidence", 0.0) or 0.0)
+        position_hint = str(payload.get("position_hint", "")).strip()
+        trace_id = str(payload.get("trace_id", "")).strip()
+
+        if self._needs_history_refresh(stock_code):
+            try:
+                self.ingestion.ingest_history_daily([stock_code], limit=520)
+            except Exception:
+                pass
+        bars = self._history_bars(stock_code, limit=520)
+        baseline_trade_date = str((bars[-1] if bars else {}).get("trade_date", ""))
+        baseline_close = float((bars[-1] if bars else {}).get("close", 0.0) or 0.0)
+        if baseline_close <= 0:
+            quote = self._latest_quote(stock_code) or {}
+            baseline_close = float(quote.get("price", 0.0) or 0.0)
+            baseline_trade_date = baseline_trade_date or str(quote.get("ts", ""))[:10]
+
+        row = self.web.analysis_intel_feedback_add(
+            stock_code=stock_code,
+            trace_id=trace_id,
+            signal=signal,
+            confidence=confidence,
+            position_hint=position_hint,
+            feedback=feedback,
+            baseline_trade_date=baseline_trade_date,
+            baseline_price=baseline_close,
+        )
+        return {"status": "ok", "item": row}
+
+    def _analysis_forward_return(self, stock_code: str, baseline_trade_date: str, baseline_price: float, horizon_steps: int) -> float | None:
+        bars = sorted(self._history_bars(stock_code, limit=520), key=lambda x: str(x.get("trade_date", "")))
+        if not bars or baseline_price <= 0:
+            return None
+        start_idx = None
+        for idx, row in enumerate(bars):
+            if str(row.get("trade_date", "")) >= str(baseline_trade_date):
+                start_idx = idx
+                break
+        if start_idx is None:
+            return None
+        target_idx = start_idx + int(horizon_steps)
+        if target_idx >= len(bars):
+            return None
+        target_close = float(bars[target_idx].get("close", 0.0) or 0.0)
+        if target_close <= 0:
+            return None
+        return target_close / baseline_price - 1.0
+
+    def analysis_intel_review(self, stock_code: str, *, limit: int = 120) -> dict[str, Any]:
+        """Aggregate feedback outcomes with T+1/T+5/T+20 realized drift for review dashboard."""
+        code = str(stock_code or "").strip().upper()
+        rows = self.web.analysis_intel_feedback_list(stock_code=code, limit=limit)
+        if code and self._needs_history_refresh(code):
+            try:
+                self.ingestion.ingest_history_daily([code], limit=520)
+            except Exception:
+                pass
+
+        horizons = {"t1": 1, "t5": 5, "t20": 20}
+        review_rows: list[dict[str, Any]] = []
+        for row in rows:
+            stock = str(row.get("stock_code", "")).strip().upper()
+            if stock and self._needs_history_refresh(stock):
+                try:
+                    self.ingestion.ingest_history_daily([stock], limit=520)
+                except Exception:
+                    pass
+            baseline_trade_date = str(row.get("baseline_trade_date", ""))
+            baseline_price = float(row.get("baseline_price", 0.0) or 0.0)
+            realized: dict[str, Any] = {}
+            for name, step in horizons.items():
+                ret = self._analysis_forward_return(stock, baseline_trade_date, baseline_price, step)
+                realized[name] = None if ret is None else round(ret, 6)
+            review_rows.append({**row, "realized": realized})
+
+        stats: dict[str, dict[str, Any]] = {}
+        for name in horizons:
+            values: list[float] = []
+            hit = 0
+            total = 0
+            for row in review_rows:
+                value = row.get("realized", {}).get(name)
+                if value is None:
+                    continue
+                ret = float(value)
+                values.append(ret)
+                total += 1
+                signal = str(row.get("signal", "hold"))
+                if (signal == "buy" and ret > 0) or (signal == "reduce" and ret < 0) or (signal == "hold" and abs(ret) <= 0.02):
+                    hit += 1
+            stats[name] = {
+                "count": total,
+                "avg_return": round(mean(values), 6) if values else None,
+                "hit_rate": round(hit / total, 4) if total > 0 else None,
+            }
+        return {
+            "stock_code": code,
+            "count": len(review_rows),
+            "stats": stats,
+            "items": review_rows[: max(1, min(200, limit))],
+        }
+
     def backtest_run(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Run a reproducible MA strategy backtest using local history bars."""
         stock_code = str(payload.get("stock_code", "")).strip().upper()

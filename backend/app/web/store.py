@@ -396,6 +396,19 @@ class WebStore:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS analysis_intel_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_code TEXT NOT NULL,
+                trace_id TEXT NOT NULL DEFAULT '',
+                signal TEXT NOT NULL DEFAULT 'hold',
+                confidence REAL NOT NULL DEFAULT 0.0,
+                position_hint TEXT NOT NULL DEFAULT '',
+                feedback TEXT NOT NULL DEFAULT 'watch',
+                baseline_trade_date TEXT NOT NULL DEFAULT '',
+                baseline_price REAL NOT NULL DEFAULT 0.0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS rag_upload_asset (
                 upload_id TEXT PRIMARY KEY,
                 doc_id TEXT NOT NULL,
@@ -571,6 +584,7 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_rag_qa_memory_stock_retrieval ON rag_qa_memory(stock_code, retrieval_enabled, created_at);
             CREATE INDEX IF NOT EXISTS idx_rag_qa_feedback_memory ON rag_qa_feedback(memory_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_rag_retrieval_trace_trace_id ON rag_retrieval_trace(trace_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_analysis_intel_feedback_stock_time ON analysis_intel_feedback(stock_code, created_at);
             CREATE INDEX IF NOT EXISTS idx_rag_upload_asset_created_at ON rag_upload_asset(created_at);
             CREATE INDEX IF NOT EXISTS idx_rag_upload_asset_doc_status ON rag_upload_asset(doc_id, status, updated_at);
             CREATE INDEX IF NOT EXISTS idx_rag_upload_asset_sha ON rag_upload_asset(file_sha256, updated_at);

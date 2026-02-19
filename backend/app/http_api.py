@@ -486,6 +486,20 @@ def create_app() -> FastAPI:
         except ValueError as ex:
             raise HTTPException(status_code=400, detail=str(ex)) from ex
 
+    @app.post("/v1/analysis/intel-card/feedback")
+    def analysis_intel_feedback(payload: dict):
+        try:
+            return svc.analysis_intel_feedback(payload)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+
+    @app.get("/v1/analysis/intel-card/review")
+    def analysis_intel_review(stock_code: str = "", limit: int = 120):
+        try:
+            return svc.analysis_intel_review(stock_code, limit=limit)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+
     @app.post("/v1/backtest/run")
     def backtest_run(payload: dict):
         try:

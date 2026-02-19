@@ -1699,6 +1699,64 @@ class WebAppService:
             row.pop("selected_ids_json", None)
         return rows
 
+    def analysis_intel_feedback_add(
+        self,
+        *,
+        stock_code: str,
+        trace_id: str,
+        signal: str,
+        confidence: float,
+        position_hint: str,
+        feedback: str,
+        baseline_trade_date: str,
+        baseline_price: float,
+    ) -> dict[str, Any]:
+        self.store.execute(
+            """
+            INSERT INTO analysis_intel_feedback
+            (stock_code, trace_id, signal, confidence, position_hint, feedback, baseline_trade_date, baseline_price)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(stock_code).strip().upper(),
+                str(trace_id).strip(),
+                str(signal).strip().lower() or "hold",
+                float(confidence or 0.0),
+                str(position_hint or "").strip(),
+                str(feedback).strip().lower() or "watch",
+                str(baseline_trade_date).strip(),
+                float(baseline_price or 0.0),
+            ),
+        )
+        row = self.store.query_one(
+            """
+            SELECT id, stock_code, trace_id, signal, confidence, position_hint, feedback,
+                   baseline_trade_date, baseline_price, created_at
+            FROM analysis_intel_feedback
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        )
+        return row or {}
+
+    def analysis_intel_feedback_list(self, *, stock_code: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(2000, int(limit)))
+        cond = ["1=1"]
+        params: list[Any] = []
+        if str(stock_code).strip():
+            cond.append("stock_code = ?")
+            params.append(str(stock_code).strip().upper())
+        sql = f"""
+            SELECT id, stock_code, trace_id, signal, confidence, position_hint, feedback,
+                   baseline_trade_date, baseline_price, created_at
+            FROM analysis_intel_feedback
+            WHERE {' AND '.join(cond)}
+            ORDER BY id DESC
+            LIMIT ?
+            """
+        params.append(safe_limit)
+        return self.store.query_all(sql, tuple(params))
+
     def rag_upload_asset_get_by_hash(self, file_sha256: str) -> dict[str, Any] | None:
         row = self.store.query_one(
             """
