@@ -679,6 +679,39 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c2, 200)
         self.assertEqual(int(loaded.get("current_round", 0)), 1)
 
+    def test_deep_think_report_export(self) -> None:
+        c1, session = self._post(
+            "/v1/deep-think/sessions",
+            {
+                "user_id": "api-deep-report",
+                "question": "请导出报告",
+                "stock_codes": ["SH600000"],
+                "max_rounds": 2,
+            },
+        )
+        self.assertEqual(c1, 200)
+        session_id = session["session_id"]
+        c2, _snapshot = self._post(f"/v1/deep-think/sessions/{session_id}/rounds", {})
+        self.assertEqual(c2, 200)
+
+        with urllib.request.urlopen(
+            self.base_url + f"/v1/deep-think/sessions/{session_id}/report-export?format=markdown",
+            timeout=8,
+        ) as resp_md:
+            self.assertEqual(resp_md.status, 200)
+            self.assertIn("text/markdown", resp_md.headers.get("Content-Type", ""))
+            md_text = resp_md.read().decode("utf-8")
+        self.assertIn("DeepThink Report", md_text)
+
+        with urllib.request.urlopen(
+            self.base_url + f"/v1/deep-think/sessions/{session_id}/report-export?format=pdf",
+            timeout=8,
+        ) as resp_pdf:
+            self.assertEqual(resp_pdf.status, 200)
+            self.assertIn("application/pdf", resp_pdf.headers.get("Content-Type", ""))
+            pdf_bytes = resp_pdf.read()
+        self.assertTrue(pdf_bytes.startswith(b"%PDF-1.4"))
+
     def test_deep_think_budget_exceeded(self) -> None:
         c1, session = self._post(
             "/v1/deep-think/sessions",

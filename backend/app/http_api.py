@@ -165,6 +165,23 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=result)
         return result
 
+    @app.get("/v1/deep-think/sessions/{session_id}/report-export")
+    def deep_think_report_export(session_id: str, format: str = "markdown"):
+        try:
+            result = svc.deep_think_export_report(session_id, format=format)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+        if _error_code(result):
+            raise HTTPException(status_code=404, detail=result)
+        filename = str(result.get("filename", "deepthink-report.txt"))
+        media_type = str(result.get("media_type", "text/plain; charset=utf-8"))
+        content = result.get("content", "")
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     @app.get("/v1/deep-think/sessions/{session_id}/stream")
     def deep_think_stream(session_id: str):
         def event_gen():

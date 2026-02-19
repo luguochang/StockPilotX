@@ -479,6 +479,28 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(latest["stop_reason"], "DEEP_BUDGET_EXCEEDED")
         self.assertEqual(snapshot["status"], "completed")
 
+    def test_deep_think_report_export_markdown_and_pdf(self) -> None:
+        created = self.svc.deep_think_create_session(
+            {
+                "user_id": "deep-export-report",
+                "question": "请导出深度研判报告",
+                "stock_codes": ["SH600000"],
+                "max_rounds": 2,
+            }
+        )
+        session_id = created["session_id"]
+        _ = self.svc.deep_think_run_round(session_id, {})
+
+        md = self.svc.deep_think_export_report(session_id, format="markdown")
+        self.assertEqual(str(md.get("format", "")), "markdown")
+        self.assertIn("# DeepThink Report", str(md.get("content", "")))
+
+        pdf = self.svc.deep_think_export_report(session_id, format="pdf")
+        self.assertEqual(str(pdf.get("format", "")), "pdf")
+        payload = pdf.get("content", b"")
+        self.assertTrue(isinstance(payload, (bytes, bytearray)))
+        self.assertTrue(bytes(payload).startswith(b"%PDF-1.4"))
+
     def test_deep_think_export_task_and_archive_metrics(self) -> None:
         created = self.svc.deep_think_create_session(
             {

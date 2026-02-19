@@ -25,6 +25,7 @@ from backend.app.config import Settings
 from backend.app.data.ingestion import IngestionService, IngestionStore
 from backend.app.data.scheduler import JobConfig, LocalJobScheduler
 from backend.app.data.sources import AnnouncementService, QuoteService
+from backend.app.deepthink_exporter import DeepThinkReportExporter
 from backend.app.knowledge.recommender import DocumentRecommender
 from backend.app.evals.service import EvalService
 from backend.app.llm.gateway import MultiProviderLLMGateway
@@ -104,6 +105,7 @@ class AShareAgentService:
             store=self.ingestion_store,
         )
         self.doc_recommender = DocumentRecommender()
+        self.deepthink_exporter = DeepThinkReportExporter()
         self.prediction = PredictionService(
             quote_service=self.ingestion.quote_service,
             traces=self.traces,
@@ -3771,6 +3773,33 @@ class AShareAgentService:
         if not session:
             return {"error": "not_found", "session_id": session_id}
         return session
+
+    def deep_think_export_report(self, session_id: str, *, format: str = "markdown") -> dict[str, Any]:
+        """Export DeepThink session as business-readable report document."""
+        session = self.web.deep_think_get_session(session_id)
+        if not session:
+            return {"error": "not_found", "session_id": session_id}
+        export_format = str(format or "markdown").strip().lower()
+        if export_format not in {"markdown", "pdf"}:
+            raise ValueError("format must be one of: markdown, pdf")
+        if export_format == "markdown":
+            content = self.deepthink_exporter.export_markdown(session)
+            return {
+                "session_id": session_id,
+                "format": "markdown",
+                "filename": f"deepthink-report-{session_id}.md",
+                "media_type": "text/markdown; charset=utf-8",
+                "content": content,
+            }
+
+        pdf_bytes = self.deepthink_exporter.export_pdf_bytes(session)
+        return {
+            "session_id": session_id,
+            "format": "pdf",
+            "filename": f"deepthink-report-{session_id}.pdf",
+            "media_type": "application/pdf",
+            "content": pdf_bytes,
+        }
 
     def _build_deep_think_round_events(self, session_id: str, latest: dict[str, Any]) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = [

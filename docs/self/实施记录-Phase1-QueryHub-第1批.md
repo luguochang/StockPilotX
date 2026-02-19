@@ -318,3 +318,46 @@
 - [x] 推荐服务层聚合逻辑
 - [x] 推荐 API
 - [x] 新增测试与回归通过
+
+## 第7批增量（DeepThink - 报告导出）
+
+### 新增能力
+
+1. DeepThink 报告导出器
+- 新增文件：`backend/app/deepthink_exporter.py`
+  - `export_markdown(session)`：输出结构化 Markdown 报告
+  - `export_pdf_bytes(session)`：输出 PDF 二进制（内置最小 PDF 生成器，无三方依赖）
+
+2. 服务层导出能力
+- `backend/app/service.py`
+  - 注入 `DeepThinkReportExporter`
+  - 新增 `deep_think_export_report(session_id, format)`，支持：
+    - `markdown`
+    - `pdf`
+
+3. 新增 API
+- `backend/app/http_api.py`
+  - `GET /v1/deep-think/sessions/{session_id}/report-export?format=markdown|pdf`
+  - 通过 `Response` 直接下载文件。
+
+### 第7批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python -m pytest -q tests/test_service.py -k "test_deep_think_report_export_markdown_and_pdf"
+.\.venv\Scripts\python -m pytest -q tests/test_http_api.py -k "test_deep_think_report_export"
+.\.venv\Scripts\python -m pytest -q tests -k "deep_think or api or docs or query"
+```
+
+结果：
+- 1 passed, 30 deselected
+- 1 passed, 20 deselected
+- 38 passed, 50 deselected
+
+### 第7批 Checklist
+
+- [x] DeepThink Markdown 报告导出
+- [x] DeepThink PDF 报告导出
+- [x] 导出 API 路由接入
+- [x] 服务层/API 层测试
+- [x] 回归测试通过
