@@ -15,7 +15,7 @@
 
 ## 自测记录
 1. `cd frontend && npm run build` -> Passed
-2. `cd frontend && npx tsc --noEmit` -> Passed
+2. `cd frontend && npx tsc --noEmit` -> Passed（本地先补齐 `.next/types` 占位后执行）
 
 ## 关键变更文件
 1. `frontend/app/deep-think/page.tsx`
@@ -26,4 +26,4 @@
 6. `frontend/app/lib/analysis/guardrails.ts`
 
 ## Commit 记录
-1. 待补充（本轮提交后回填）
+1. `ad5df2d` | `feat(ux): implement deepthink input redesign and console split (UX-1~UX-5)`
