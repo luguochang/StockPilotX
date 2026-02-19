@@ -8,3 +8,6 @@
 - `round-AC-report-journal-ux-execution-log.md`: Round-AC 执行日志、自测证据与提交记录。
 - `round-AD-predict-demock-checklist.md`: Round-AD 预测模块去 mock 与评测来源透明化清单。
 - `round-AD-predict-demock-execution-log.md`: Round-AD 执行日志、自测证据与提交记录。
+
+- ound-AE-report-journal-async-stability-checklist.md: Round-AE async report task + journal UX + backend stability checklist.
+- ound-AE-report-journal-async-stability-execution-log.md: Round-AE execution log and verification evidence.

@@ -1,12 +1,12 @@
-"use client";
+﻿"use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Alert, Button, Card, Col, Collapse, Empty, Input, List, Progress, Row, Select, Space, Tag, Typography } from "antd";
 import MediaCarousel from "../components/MediaCarousel";
 import StockSelectorModal from "../components/StockSelectorModal";
+import { fetchJson } from "../lib/api";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
 const { Title, Text, Paragraph } = Typography;
 
 type ReportItem = {
@@ -35,21 +35,38 @@ type BusinessDataHealth = {
   };
 };
 
+type ReportTask = {
+  task_id: string;
+  status: string;
+  progress: number;
+  current_stage: string;
+  stage_message: string;
+  result_level: "none" | "partial" | "full" | string;
+  error_code?: string;
+  error_message?: string;
+};
+
+type TaskResult = {
+  task_id: string;
+  status: string;
+  result_level: "none" | "partial" | "full" | string;
+  result: Record<string, unknown> | null;
+};
+
 function statusColor(status: string): string {
-  if (status === "ok") return "success";
-  if (status === "degraded") return "warning";
-  if (status === "critical") return "error";
+  if (status === "ok" || status === "completed") return "success";
+  if (status === "degraded" || status === "partial_ready" || status === "running" || status === "queued") return "warning";
+  if (status === "failed" || status === "cancelled") return "error";
   return "default";
 }
 
-function parsePreview(raw: string): Record<string, unknown> {
-  if (!raw.trim()) return {};
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
+function parseObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object") return {};
+  return value as Record<string, unknown>;
+}
+
+function taskRunning(status: string): boolean {
+  return ["queued", "running", "partial_ready", "cancelling"].includes(status);
 }
 
 export default function ReportsPage() {
@@ -66,23 +83,32 @@ export default function ReportsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [activeReportId, setActiveReportId] = useState("");
-  const [qualityGatePreview, setQualityGatePreview] = useState("");
-  const [dataPackPreview, setDataPackPreview] = useState("");
+  const [qualityGatePreview, setQualityGatePreview] = useState<Record<string, unknown>>({});
+  const [dataPackPreview, setDataPackPreview] = useState<Record<string, unknown>>({});
+  const [degradePreview, setDegradePreview] = useState<Record<string, unknown>>({});
   const [generationMode, setGenerationMode] = useState("");
   const [businessHealth, setBusinessHealth] = useState<BusinessDataHealth | null>(null);
+  const [task, setTask] = useState<ReportTask | null>(null);
 
-  const qualityGate = parsePreview(qualityGatePreview);
-  const dataPack = parsePreview(dataPackPreview);
-  const qualityStatus = String(qualityGate.status ?? "unknown");
-  const qualityScore = Number(qualityGate.score ?? 0);
-  const qualityReasons = Array.isArray(qualityGate.reasons) ? qualityGate.reasons.map((item) => String(item)) : [];
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const qualityStatus = String(qualityGatePreview.status ?? "unknown");
+  const qualityScore = Number(qualityGatePreview.score ?? 0);
+  const qualityReasons = Array.isArray(qualityGatePreview.reasons) ? qualityGatePreview.reasons.map((item) => String(item)) : [];
   const reportsHealth = (businessHealth?.module_health ?? []).find((row) => String(row.module) === "reports");
 
   const heroSlides = [
-    { src: "/assets/images/nyse-floor-1963.jpg", alt: "Archive trading report visual", caption: "档案回溯" },
-    { src: "/assets/images/nyse-floor-2014.jpg", alt: "Modern report visual", caption: "研究输出" },
-    { src: "/assets/images/nyse-floor-1930.png", alt: "Long cycle report visual", caption: "长期视角" },
+    { src: "/assets/images/nyse-floor-1963.jpg", alt: "Archive report", caption: "档案回溯" },
+    { src: "/assets/images/nyse-floor-2014.jpg", alt: "Modern report", caption: "研究输出" },
+    { src: "/assets/images/nyse-floor-1930.png", alt: "Long cycle", caption: "长周期视角" },
   ];
+
+  function stopPolling() {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  }
 
   async function loadBusinessHealth(stockCode: string) {
     const code = stockCode.trim().toUpperCase();
@@ -91,12 +117,10 @@ export default function ReportsPage() {
       return;
     }
     try {
-      const r = await fetch(`${API_BASE}/v1/business/data-health?stock_code=${encodeURIComponent(code)}&limit=200`);
-      const body = await r.json();
-      if (!r.ok) throw new Error(body?.detail ?? `HTTP ${r.status}`);
-      setBusinessHealth(body as BusinessDataHealth);
+      const body = (await fetchJson(`/v1/business/data-health?stock_code=${encodeURIComponent(code)}&limit=200`)) as BusinessDataHealth;
+      setBusinessHealth(body);
     } catch {
-      // Keep report flow non-blocking even if observability endpoint temporarily fails.
+      // Keep this non-blocking so observability endpoint failures do not break core report UX.
       setBusinessHealth(null);
     }
   }
@@ -105,38 +129,68 @@ export default function ReportsPage() {
     setLoading(true);
     setError("");
     try {
-      const r = await fetch(`${API_BASE}/v1/reports`);
-      const body = await r.json();
-      if (!r.ok) throw new Error(body?.detail ?? `HTTP ${r.status}`);
-      setItems(body as ReportItem[]);
+      const body = (await fetchJson("/v1/reports")) as ReportItem[];
+      setItems(Array.isArray(body) ? body : []);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "请求失败");
+      setError(e instanceof Error ? e.message : "加载报告列表失败");
       setItems([]);
     } finally {
       setLoading(false);
     }
   }
 
-  async function exportReport(reportId: string) {
-    setLoading(true);
-    setError("");
-    try {
-      const r = await fetch(`${API_BASE}/v1/reports/${reportId}/export`, { method: "POST" });
-      const body = await r.json();
-      if (!r.ok) throw new Error(body?.detail ?? `HTTP ${r.status}`);
-      setSelectedMarkdown(String(body.markdown ?? ""));
-      setActiveReportId(reportId);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "请求失败");
-      setSelectedMarkdown("");
-    } finally {
-      setLoading(false);
+  function applyReportResult(result: Record<string, unknown>) {
+    setSelectedMarkdown(String(result.markdown ?? ""));
+    setSelectedRaw(JSON.stringify(result, null, 2));
+    setQualityGatePreview(parseObject(result.quality_gate));
+    setDataPackPreview(parseObject(result.report_data_pack_summary));
+    setDegradePreview(parseObject(result.degrade));
+    setGenerationMode(String(result.generation_mode ?? ""));
+    setActiveReportId(String(result.report_id ?? ""));
+  }
+
+  async function syncTaskResult(taskId: string) {
+    const body = (await fetchJson(`/v1/report/tasks/${taskId}/result`)) as TaskResult;
+    if (body.result && typeof body.result === "object") {
+      applyReportResult(body.result);
+      const code = String((body.result as Record<string, unknown>).stock_code ?? "").trim().toUpperCase();
+      if (code) {
+        setGenerateStockCode(code);
+        await loadBusinessHealth(code);
+      }
+      if (body.result_level === "full") {
+        await load();
+      }
     }
   }
 
+  async function pollTask(taskId: string) {
+    try {
+      const body = (await fetchJson(`/v1/report/tasks/${taskId}`)) as ReportTask;
+      setTask(body);
+      if (body.result_level === "partial" || body.result_level === "full" || body.status === "partial_ready" || body.status === "completed") {
+        await syncTaskResult(taskId);
+      }
+      if (!taskRunning(body.status)) {
+        stopPolling();
+      }
+    } catch (e) {
+      stopPolling();
+      setError(e instanceof Error ? e.message : "轮询任务状态失败");
+    }
+  }
+
+  function startPolling(taskId: string) {
+    stopPolling();
+    void pollTask(taskId);
+    pollTimerRef.current = setInterval(() => {
+      void pollTask(taskId);
+    }, 1500);
+  }
+
   async function generateReport() {
-    setLoading(true);
     setError("");
+    setLoading(true);
     try {
       const payload = {
         user_id: "demo_user",
@@ -147,23 +201,41 @@ export default function ReportsPage() {
         run_id: runId.trim(),
         pool_snapshot_id: poolSnapshotId.trim(),
       };
-      const r = await fetch(`${API_BASE}/v1/report/generate`, {
+      const created = (await fetchJson("/v1/report/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-      });
-      const body = await r.json();
-      if (!r.ok) throw new Error(body?.detail ?? `HTTP ${r.status}`);
-      setSelectedMarkdown(String(body.markdown ?? ""));
-      setSelectedRaw(JSON.stringify(body, null, 2));
-      setQualityGatePreview(JSON.stringify((body.quality_gate as Record<string, unknown>) ?? {}, null, 2));
-      setDataPackPreview(JSON.stringify((body.report_data_pack_summary as Record<string, unknown>) ?? {}, null, 2));
-      setGenerationMode(String(body.generation_mode ?? ""));
-      setActiveReportId(String(body.report_id ?? ""));
-      await loadBusinessHealth(payload.stock_code);
-      await load();
+      })) as ReportTask;
+      setTask(created);
+      startPolling(created.task_id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "请求失败");
+      setError(e instanceof Error ? e.message : "创建报告任务失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function cancelTask() {
+    if (!task?.task_id) return;
+    try {
+      const body = (await fetchJson(`/v1/report/tasks/${task.task_id}/cancel`, { method: "POST" })) as ReportTask;
+      setTask(body);
+      if (!taskRunning(body.status)) stopPolling();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "取消任务失败");
+    }
+  }
+
+  async function exportReport(reportId: string) {
+    setLoading(true);
+    setError("");
+    try {
+      const body = (await fetchJson(`/v1/reports/${reportId}/export`, { method: "POST" })) as { markdown?: string };
+      setSelectedMarkdown(String(body.markdown ?? ""));
+      setActiveReportId(reportId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "导出报告失败");
+      setSelectedMarkdown("");
     } finally {
       setLoading(false);
     }
@@ -173,14 +245,8 @@ export default function ReportsPage() {
     setLoading(true);
     setError("");
     try {
-      const r = await fetch(`${API_BASE}/v1/report/${reportId}`);
-      const body = await r.json();
-      if (!r.ok) throw new Error(body?.detail ?? `HTTP ${r.status}`);
-      setSelectedRaw(JSON.stringify(body, null, 2));
-      setSelectedMarkdown(String(body.markdown ?? ""));
-      setQualityGatePreview(JSON.stringify((body.quality_gate as Record<string, unknown>) ?? {}, null, 2));
-      setDataPackPreview(JSON.stringify((body.report_data_pack_summary as Record<string, unknown>) ?? {}, null, 2));
-      setGenerationMode(String(body.generation_mode ?? ""));
+      const body = (await fetchJson(`/v1/report/${reportId}`)) as Record<string, unknown>;
+      applyReportResult(body);
       setActiveReportId(reportId);
       const detailCode = String(body.stock_code ?? "").trim().toUpperCase();
       if (detailCode) {
@@ -188,7 +254,7 @@ export default function ReportsPage() {
         await loadBusinessHealth(detailCode);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "请求失败");
+      setError(e instanceof Error ? e.message : "加载报告详情失败");
     } finally {
       setLoading(false);
     }
@@ -198,18 +264,23 @@ export default function ReportsPage() {
     setLoading(true);
     setError("");
     try {
-      const r = await fetch(`${API_BASE}/v1/reports/${reportId}/versions`);
-      const body = await r.json();
-      if (!r.ok) throw new Error(body?.detail ?? `HTTP ${r.status}`);
+      const body = await fetchJson(`/v1/reports/${reportId}/versions`);
       setSelectedVersions(JSON.stringify(body, null, 2));
       setActiveReportId(reportId);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "请求失败");
+      setError(e instanceof Error ? e.message : "加载版本历史失败");
       setSelectedVersions("");
     } finally {
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    void load();
+    return () => {
+      stopPolling();
+    };
+  }, []);
 
   return (
     <main className="container">
@@ -223,13 +294,14 @@ export default function ReportsPage() {
             <Tag color="processing" style={{ width: "fit-content" }}>Research Report Center</Tag>
             <Title level={2} style={{ margin: 0, color: "#0f172a" }}>报告中心</Title>
             <Paragraph style={{ margin: 0, color: "#475569", maxWidth: 760 }}>
-              主流程只保留两个输入: 股票与报告类型。高级参数折叠，减少无效输入。
+              主流程仅保留两个输入项：股票与报告类型。高级参数可选展开，默认不打扰普通用户。
             </Paragraph>
             <StockSelectorModal value={generateStockCode} onChange={(next) => setGenerateStockCode(Array.isArray(next) ? (next[0] ?? "") : next)} title="选择报告标的" placeholder="请选择股票" />
             <Space.Compact block>
               <Select value={generateType} onChange={(v) => setGenerateType(v)} options={[{ label: "事实报告", value: "fact" }, { label: "研究报告", value: "research" }]} style={{ minWidth: 180 }} />
-              <Button type="primary" loading={loading} onClick={generateReport}>生成报告</Button>
+              <Button type="primary" loading={loading || taskRunning(task?.status ?? "")} onClick={generateReport}>生成报告</Button>
               <Button loading={loading} onClick={load}>刷新列表</Button>
+              {task && taskRunning(task.status) ? <Button danger onClick={cancelTask}>取消任务</Button> : null}
             </Space.Compact>
             <Collapse
               size="small"
@@ -253,12 +325,25 @@ export default function ReportsPage() {
         </Card>
       </motion.div>
 
+      {task ? (
+        <Card className="premium-card" style={{ marginTop: 12 }} title="生成任务进度">
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Text>任务ID: <Text code>{task.task_id}</Text></Text>
+            <Text>状态: <Tag color={statusColor(task.status)}>{task.status}</Tag></Text>
+            <Text>阶段: {task.current_stage || "-"}</Text>
+            <Text type="secondary">{task.stage_message || "等待中"}</Text>
+            <Progress percent={Math.max(0, Math.min(100, Number((Number(task.progress || 0) * 100).toFixed(1))))} strokeColor="#2563eb" />
+            {task.result_level === "partial" ? <Alert type="warning" showIcon message="已返回最小可用结果，系统仍在补全完整报告。" /> : null}
+          </Space>
+        </Card>
+      ) : null}
+
       {error ? <Alert style={{ marginTop: 12 }} type="error" showIcon message={error} /> : null}
 
-      {generationMode || qualityGatePreview || dataPackPreview || businessHealth ? (
+      {(generationMode || Object.keys(qualityGatePreview).length || Object.keys(dataPackPreview).length || businessHealth) ? (
         <Row gutter={[12, 12]} style={{ marginTop: 12 }}>
           <Col xs={24} lg={8}>
-            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>报告质量门禁</span>}>
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>报告质量闸门</span>}>
               <Space direction="vertical" size={6} style={{ width: "100%" }}>
                 <Text style={{ color: "#475569" }}>生成模式: <Tag color={generationMode === "llm" ? "success" : "default"}>{generationMode || "unknown"}</Tag></Text>
                 <Text style={{ color: "#475569" }}>质量状态: <Tag color={statusColor(qualityStatus)}>{qualityStatus}</Tag></Text>
@@ -271,28 +356,25 @@ export default function ReportsPage() {
           <Col xs={24} lg={8}>
             <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>数据包摘要</span>}>
               <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                <Text style={{ color: "#475569" }}>历史样本数: {String(dataPack.history_sample_size ?? 0)}</Text>
-                <Text style={{ color: "#475569" }}>预测质量: {String(dataPack.predict_quality ?? "unknown")}</Text>
-                <Text style={{ color: "#475569" }}>情报信号: {String(dataPack.intel_signal ?? "unknown")}</Text>
-                <Text style={{ color: "#475569" }}>情报置信度: {Number(dataPack.intel_confidence ?? 0).toFixed(2)}</Text>
+                <Text style={{ color: "#475569" }}>历史样本: {String(dataPackPreview.history_sample_size ?? 0)}</Text>
+                <Text style={{ color: "#475569" }}>预测质量: {String(dataPackPreview.predict_quality ?? "unknown")}</Text>
+                <Text style={{ color: "#475569" }}>情报信号: {String(dataPackPreview.intel_signal ?? "unknown")}</Text>
+                <Text style={{ color: "#475569" }}>情报置信度: {Number(dataPackPreview.intel_confidence ?? 0).toFixed(2)}</Text>
                 <Text style={{ color: "#64748b" }}>
-                  新闻/研报/宏观: {String(dataPack.news_count ?? 0)} / {String(dataPack.research_count ?? 0)} / {String(dataPack.macro_count ?? 0)}
+                  新闻/研报/宏观: {String(dataPackPreview.news_count ?? 0)} / {String(dataPackPreview.research_count ?? 0)} / {String(dataPackPreview.macro_count ?? 0)}
                 </Text>
               </Space>
             </Card>
           </Col>
           <Col xs={24} lg={8}>
-            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>业务数据健康</span>}>
-              {!businessHealth ? (
-                <Alert type="info" showIcon message="尚未加载业务健康快照" />
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>降级信息</span>}>
+              {Object.keys(degradePreview).length === 0 ? (
+                <Alert type="info" showIcon message="当前无降级信息" />
               ) : (
                 <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                  <Text style={{ color: "#475569" }}>全局状态: <Tag color={statusColor(String(businessHealth.status))}>{String(businessHealth.status)}</Tag></Text>
-                  <Text style={{ color: "#475569" }}>reports 模块: <Tag color={statusColor(String(reportsHealth?.status ?? "unknown"))}>{String(reportsHealth?.status ?? "unknown")}</Tag></Text>
-                  <Text style={{ color: "#64748b" }}>覆盖率: {Number(reportsHealth?.coverage ?? 0).toFixed(2)} ({Number(reportsHealth?.healthy_categories ?? 0)}/{Number(reportsHealth?.expected_categories ?? 0)})</Text>
-                  <Text style={{ color: "#64748b" }}>
-                    标的快照: quote={businessHealth.stock_snapshot?.has_quote ? "yes" : "no"}, history={Number(businessHealth.stock_snapshot?.history_sample_size ?? 0)}, financial={businessHealth.stock_snapshot?.has_financial ? "yes" : "no"}
-                  </Text>
+                  <Text style={{ color: "#475569" }}>active: <Tag color={Boolean(degradePreview.active) ? "warning" : "success"}>{String(degradePreview.active)}</Tag></Text>
+                  <Text style={{ color: "#475569" }}>code: {String(degradePreview.code ?? "") || "none"}</Text>
+                  <Text style={{ color: "#64748b" }}>message: {String(degradePreview.user_message ?? "") || "none"}</Text>
                 </Space>
               )}
             </Card>
@@ -309,9 +391,9 @@ export default function ReportsPage() {
             renderItem={(item) => (
               <List.Item
                 actions={[
-                  <Button key="detail" size="small" onClick={() => loadReportDetail(item.report_id)}>详情</Button>,
-                  <Button key="versions" size="small" onClick={() => loadReportVersions(item.report_id)}>版本</Button>,
-                  <Button key="view" size="small" onClick={() => exportReport(item.report_id)}>查看导出</Button>,
+                  <Button key="detail" size="small" onClick={() => void loadReportDetail(item.report_id)}>详情</Button>,
+                  <Button key="versions" size="small" onClick={() => void loadReportVersions(item.report_id)}>版本</Button>,
+                  <Button key="view" size="small" onClick={() => void exportReport(item.report_id)}>查看导出</Button>,
                 ]}
               >
                 <Space>
@@ -353,4 +435,3 @@ export default function ReportsPage() {
     </main>
   );
 }
-

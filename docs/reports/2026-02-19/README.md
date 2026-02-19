@@ -8,3 +8,4 @@
 - `phase3-journal-round-ab-quality-ops-2026-02-19.md`
 - `round-AC-report-journal-ux-businessization-2026-02-19.md`
 - `round-AD-predict-demock-businessization-2026-02-19.md`
+- `round-AE-report-journal-async-stability.md`

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import csv
@@ -17,7 +17,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from statistics import mean
-from typing import Any
+from typing import Any, Callable
 
 from backend.app.capabilities import build_capability_snapshot
 from backend.app.agents.langgraph_runtime import build_workflow_runtime
@@ -64,14 +64,18 @@ except Exception:  # pragma: no cover - optional dependency
     load_workbook = None  # type: ignore[assignment]
 
 
-class AShareAgentService:
-    """应用服务层。
+class ReportTaskCancelled(RuntimeError):
+    """Raised when the async report task is cancelled by user action."""
 
-    负责聚合 API 所需能力，可类比 Java 的 Facade + ApplicationService。
+
+class AShareAgentService:
+    """搴旂敤鏈嶅姟灞傘€?
+
+    璐熻矗鑱氬悎 API 鎵€闇€鑳藉姏锛屽彲绫绘瘮 Java 鐨?Facade + ApplicationService銆?
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
-        """初始化各子系统依赖。"""
+        """Initialize service dependencies and runtime components."""
         self.settings = settings or Settings.from_env()
         self.traces = TraceStore()
         self.memory = MemoryStore(self.settings.memory_db_path)
@@ -84,7 +88,7 @@ class AShareAgentService:
             jwt_secret=self.settings.jwt_secret,
             jwt_expire_seconds=self.settings.jwt_expire_seconds,
         )
-        # Phase-B 向量检索组件：支持可配置 embedding provider + 本地向量索引。
+        # Phase-B 鍚戦噺妫€绱㈢粍浠讹細鏀寔鍙厤缃?embedding provider + 鏈湴鍚戦噺绱㈠紩銆?
         self.embedding_provider = EmbeddingProvider(
             EmbeddingRuntimeConfig(
                 provider=self.settings.embedding_provider,
@@ -152,8 +156,12 @@ class AShareAgentService:
             prefer_langgraph=self.settings.use_langgraph_runtime,
         )
 
-        # 报告存储：MVP 先使用内存字典
+        # 鎶ュ憡瀛樺偍锛歁VP 鍏堜娇鐢ㄥ唴瀛樺瓧鍏?
         self._reports: dict[str, dict[str, Any]] = {}
+        # Async report generation runtime state for /v1/report/tasks.
+        self._report_task_lock = threading.RLock()
+        self._report_tasks: dict[str, dict[str, Any]] = {}
+        self._report_task_executor = ThreadPoolExecutor(max_workers=2)
         self._backtest_runs: dict[str, dict[str, Any]] = {}
         self._deep_archive_ts_format = "%Y-%m-%d %H:%M:%S"
         self._deep_archive_export_executor = ThreadPoolExecutor(max_workers=2)
@@ -165,7 +173,7 @@ class AShareAgentService:
         self._register_default_agent_cards()
 
     def _select_runtime(self, preference: str | None = None):
-        """按请求参数选择运行时：langgraph/direct/auto。"""
+        """Select runtime by request preference: langgraph/direct/auto."""
         pref = (preference or "").strip().lower()
         if pref in ("", "auto", "default"):
             return self.workflow_runtime
@@ -176,7 +184,7 @@ class AShareAgentService:
         return self.workflow_runtime
 
     def _register_default_jobs(self) -> None:
-        """注册默认调度任务（对应 DATA-004）。"""
+        """Register default scheduler jobs."""
 
         self.scheduler.register(
             JobConfig(
@@ -201,16 +209,16 @@ class AShareAgentService:
         )
 
     def _register_default_agent_cards(self) -> None:
-        """注册内置多 Agent 配置，供内部 A2A 适配层发现能力。"""
+        """Register built-in agent cards for A2A capability discovery."""
         cards = [
-            ("supervisor_agent", "Supervisor", "负责任务拆解、轮次推进与仲裁", ["plan", "route", "arbitrate"]),
-            ("pm_agent", "PM Agent", "关注主题、叙事与产品侧解释", ["theme_analysis", "narrative"]),
-            ("quant_agent", "Quant Agent", "关注因子、概率与收益风险比", ["factor_analysis", "probability"]),
-            ("risk_agent", "Risk Agent", "关注波动、回撤与下行风险", ["risk_scoring", "drawdown_check"]),
-            ("critic_agent", "Critic Agent", "质检证据完整性与逻辑一致性", ["consistency_check", "counter_view"]),
-            ("macro_agent", "Macro Agent", "关注政策与宏观环境冲击", ["macro_event", "policy_watch"]),
-            ("execution_agent", "Execution Agent", "关注仓位节奏与执行约束", ["execution_plan", "position_sizing"]),
-            ("compliance_agent", "Compliance Agent", "关注合规边界与敏感表述", ["compliance_check", "policy_block"]),
+            ("supervisor_agent", "Supervisor Agent", "Coordinate rounds and output arbitration conclusions.", ["plan", "route", "arbitrate"]),
+            ("pm_agent", "PM Agent", "Evaluate theme logic and narrative consistency.", ["theme_analysis", "narrative"]),
+            ("quant_agent", "Quant Agent", "Evaluate valuation, expectancy and probabilistic signals.", ["factor_analysis", "probability"]),
+            ("risk_agent", "Risk Agent", "Evaluate drawdown, volatility and downside risk.", ["risk_scoring", "drawdown_check"]),
+            ("critic_agent", "Critic Agent", "Check evidence completeness and logical consistency.", ["consistency_check", "counter_view"]),
+            ("macro_agent", "Macro Agent", "Evaluate macro-policy and global shocks.", ["macro_event", "policy_watch"]),
+            ("execution_agent", "Execution Agent", "Evaluate position sizing, timing and execution constraints.", ["execution_plan", "position_sizing"]),
+            ("compliance_agent", "Compliance Agent", "Check compliance boundaries and expression risk.", ["compliance_check", "policy_block"]),
         ]
         for agent_id, display_name, description, capabilities in cards:
             self.web.register_agent_card(
@@ -286,7 +294,7 @@ class AShareAgentService:
             if str(opinion.get("signal", "hold")) != consensus_signal and str(opinion.get("reason", "")).strip()
         ]
         counter_candidates.sort(key=lambda x: float(x.get("confidence", 0.0)), reverse=True)
-        counter_view = str(counter_candidates[0]["reason"]) if counter_candidates else "无显著反方观点"
+        counter_view = str(counter_candidates[0]["reason"]) if counter_candidates else "no significant counter view"
 
         return {
             "consensus_signal": consensus_signal,
@@ -301,17 +309,21 @@ class AShareAgentService:
         return round((1.0 - disagreement_score) * 0.6 + min(1.0, evidence_count / 4.0) * 0.2 + avg_confidence * 0.2, 4)
 
     def _deep_plan_tasks(self, question: str, round_no: int) -> list[dict[str, Any]]:
-        q = question.lower()
+        q = (question or "").lower()
         tasks: list[dict[str, Any]] = [
-            {"task_id": f"r{round_no}-t1", "agent": "quant_agent", "title": "估值与收益风险比评估", "priority": "high"},
-            {"task_id": f"r{round_no}-t2", "agent": "risk_agent", "title": "回撤与波动风险评估", "priority": "high"},
-            {"task_id": f"r{round_no}-t3", "agent": "pm_agent", "title": "主题与叙事一致性评估", "priority": "medium"},
-            {"task_id": f"r{round_no}-t4", "agent": "compliance_agent", "title": "合规边界审查", "priority": "high"},
+            {"task_id": f"r{round_no}-t1", "agent": "quant_agent", "title": "Valuation and risk/reward assessment", "priority": "high"},
+            {"task_id": f"r{round_no}-t2", "agent": "risk_agent", "title": "Drawdown and volatility assessment", "priority": "high"},
+            {"task_id": f"r{round_no}-t3", "agent": "pm_agent", "title": "Theme and narrative consistency assessment", "priority": "medium"},
+            {"task_id": f"r{round_no}-t4", "agent": "compliance_agent", "title": "Compliance boundary review", "priority": "high"},
         ]
-        if any(k in q for k in ("宏观", "政策", "利率", "财政")):
-            tasks.append({"task_id": f"r{round_no}-t5", "agent": "macro_agent", "title": "宏观与政策冲击评估", "priority": "high"})
-        if any(k in q for k in ("执行", "仓位", "节奏", "交易")):
-            tasks.append({"task_id": f"r{round_no}-t6", "agent": "execution_agent", "title": "执行节奏与仓位约束评估", "priority": "medium"})
+        if any(k in q for k in ("macro", "policy", "rate", "fiscal", "gdp", "cpi", "ppi", "pmi", "宏观", "政策", "利率")):
+            tasks.append(
+                {"task_id": f"r{round_no}-t5", "agent": "macro_agent", "title": "Macro and policy shock assessment", "priority": "high"}
+            )
+        if any(k in q for k in ("execute", "execution", "position", "timing", "trade", "执行", "仓位", "交易", "节奏")):
+            tasks.append(
+                {"task_id": f"r{round_no}-t6", "agent": "execution_agent", "title": "Execution cadence and position constraints", "priority": "medium"}
+            )
         return tasks
 
     def _deep_budget_snapshot(self, budget: dict[str, Any], round_no: int, task_count: int) -> dict[str, Any]:
@@ -355,7 +367,7 @@ class AShareAgentService:
         }
 
     def _deep_safe_json_loads(self, text: str) -> dict[str, Any]:
-        """从模型文本中提取 JSON 对象，兼容 fenced code block 与前后杂文本。"""
+        """Extract JSON object from model text, including fenced code or mixed text wrappers."""
         clean = str(text or "").strip()
         if not clean:
             raise ValueError("empty model payload")
@@ -369,7 +381,7 @@ class AShareAgentService:
                 return obj
         except Exception:
             pass
-        # 宽松兜底：截取第一个 JSON 对象片段再解析。
+        # 瀹芥澗鍏滃簳锛氭埅鍙栫涓€涓?JSON 瀵硅薄鐗囨鍐嶈В鏋愩€?
         start = clean.find("{")
         end = clean.rfind("}")
         if start >= 0 and end > start:
@@ -408,7 +420,7 @@ class AShareAgentService:
         }
 
     def _deep_validate_intel_payload(self, payload: Any) -> dict[str, Any]:
-        """校验并标准化 LLM WebSearch 情报输出，防止前端消费不稳定结构。"""
+        """Validate and normalize LLM WebSearch intel payload to a stable schema."""
         if not isinstance(payload, dict):
             raise ValueError("intel payload must be an object")
         normalized: dict[str, Any] = {
@@ -421,13 +433,13 @@ class AShareAgentService:
             "decision_adjustment": {},
             "citations": [],
             "confidence_note": str(payload.get("confidence_note", "")).strip(),
-            # 诊断字段：统一返回，便于前端明确“是否命中外部实时情报”与失败原因。
+            # 璇婃柇瀛楁锛氱粺涓€杩斿洖锛屼究浜庡墠绔槑纭€滄槸鍚﹀懡涓閮ㄥ疄鏃舵儏鎶モ€濅笌澶辫触鍘熷洜銆?
             "intel_status": str(payload.get("intel_status", "external_ok")).strip() or "external_ok",
             "fallback_reason": str(payload.get("fallback_reason", "")).strip()[:120],
             "fallback_error": str(payload.get("fallback_error", "")).strip()[:320],
             "trace_id": str(payload.get("trace_id", "")).strip()[:80],
             "external_enabled": bool(payload.get("external_enabled", True)),
-            # provider_count 为诊断字段，解析失败时回退 0，避免影响主流程。
+            # provider_count 涓鸿瘖鏂瓧娈碉紝瑙ｆ瀽澶辫触鏃跺洖閫€ 0锛岄伩鍏嶅奖鍝嶄富娴佺▼銆?
             "provider_count": 0,
             "provider_names": [],
             "websearch_tool_requested": bool(payload.get("websearch_tool_requested", False)),
@@ -468,7 +480,7 @@ class AShareAgentService:
             if bias not in {"buy", "hold", "reduce"}:
                 bias = "hold"
             raw_adj = decision.get("confidence_adjustment", 0.0)
-            # 兼容模型输出文本强弱（例如 "down"/"up"），避免 float 强转异常导致整段降级。
+            # 鍏煎妯″瀷杈撳嚭鏂囨湰寮哄急锛堜緥濡?"down"/"up"锛夛紝閬垮厤 float 寮鸿浆寮傚父瀵艰嚧鏁存闄嶇骇銆?
             try:
                 conf_adj = float(raw_adj or 0.0)
             except Exception:
@@ -480,7 +492,7 @@ class AShareAgentService:
                 elif "neutral" in text or "hold" in text:
                     conf_adj = 0.0
                 else:
-                    # 若文本里含数字（如 "-0.1"、"0.08"），尝试提取首个浮点值。
+                    # 鑻ユ枃鏈噷鍚暟瀛楋紙濡?"-0.1"銆?0.08"锛夛紝灏濊瘯鎻愬彇棣栦釜娴偣鍊笺€?
                     hit = re.search(r"-?\\d+(?:\\.\\d+)?", text)
                     conf_adj = float(hit.group(0)) if hit else 0.0
             conf_adj = max(-0.5, min(0.5, conf_adj))
@@ -508,7 +520,7 @@ class AShareAgentService:
         return normalized
 
     def _deep_infer_intel_fallback_reason(self, message: str) -> str:
-        """根据异常文本映射稳定原因码，避免前端只能看到含糊报错。"""
+        """Map raw exception text to stable fallback reason codes for frontend diagnostics."""
         msg = (message or "").strip().lower()
         if "unsupported tool type" in msg:
             return "websearch_tool_unsupported"
@@ -527,7 +539,7 @@ class AShareAgentService:
         return "provider_or_parse_error"
 
     def _deep_enabled_provider_names(self) -> list[str]:
-        """返回当前已启用 provider 名单，用于诊断输出。"""
+        """Return enabled external provider names for observability output."""
         return [str(p.name)[:64] for p in self.llm_gateway.providers if bool(getattr(p, "enabled", True))]
 
     def _deep_local_intel_fallback(
@@ -545,48 +557,52 @@ class AShareAgentService:
         websearch_tool_requested: bool = False,
         websearch_tool_applied: bool = False,
     ) -> dict[str, Any]:
-        """当外部 WebSearch 不可用时，用本地信号生成可解释的降级情报。"""
+        """Build deterministic fallback intel payload when external websearch is unavailable."""
         providers = list(provider_names or self._deep_enabled_provider_names())
         ann = [x for x in self.ingestion_store.announcements if str(x.get("stock_code", "")).upper() == stock_code][-3:]
-        calendar_items = [
-            {
-                "title": "央行议息窗口（关注流动性预期）",
-                "summary": "建议在会议前后观察利率预期变化对估值与风险偏好的影响。",
-                "impact_direction": "uncertain",
-                "impact_horizon": "1w",
-                "why_relevant_to_stock": f"{stock_code} 对市场风险偏好与资金成本变化较敏感。",
-                "url": "",
-                "published_at": datetime.now(timezone.utc).isoformat(),
-                "source_type": "other",
-            }
-        ]
+        calendar_items: list[dict[str, Any]] = []
         for item in ann:
             calendar_items.append(
                 {
-                    "title": str(item.get("title", "公司公告")).strip()[:220],
-                    "summary": str(item.get("content", "建议核对公告正文")).strip()[:320],
+                    "title": str(item.get("title", "Company Announcement"))[:220],
+                    "summary": str(item.get("content", "Check announcement details"))[:320],
                     "impact_direction": "mixed",
                     "impact_horizon": "1w",
-                    "why_relevant_to_stock": f"{stock_code} 直接公告事项，需核实披露细节。",
-                    "url": str(item.get("source_url", "")).strip()[:420],
-                    "published_at": str(item.get("event_time", "")).strip()[:64],
+                    "why_relevant_to_stock": f"Direct event related to {stock_code}",
+                    "url": str(item.get("source_url", ""))[:420],
+                    "published_at": str(item.get("event_time", ""))[:64],
                     "source_type": "official",
                 }
             )
+        if not calendar_items:
+            calendar_items.append(
+                {
+                    "title": "Macro Window",
+                    "summary": "External websearch unavailable; monitor macro/policy calendar manually.",
+                    "impact_direction": "uncertain",
+                    "impact_horizon": "1w",
+                    "why_relevant_to_stock": f"Fallback mode for {stock_code}",
+                    "url": "",
+                    "published_at": datetime.now(timezone.utc).isoformat(),
+                    "source_type": "other",
+                }
+            )
+
         bias = "hold"
-        if trend.get("momentum_20", 0.0) > 0 and float(quote.get("pct_change", 0.0)) > 0:
+        if float(trend.get("momentum_20", 0.0) or 0.0) > 0 and float(quote.get("pct_change", 0.0) or 0.0) > 0:
             bias = "buy"
-        elif trend.get("max_drawdown_60", 0.0) > 0.2:
+        elif float(trend.get("max_drawdown_60", 0.0) or 0.0) > 0.2:
             bias = "reduce"
+
         return {
             "as_of": datetime.now(timezone.utc).isoformat(),
             "macro_signals": [
                 {
-                    "title": "本地降级情报模式",
-                    "summary": "未获取外部 WebSearch 实时情报，当前结论仅基于本地行情、趋势与公告快照。",
+                    "title": "Fallback Intel Mode",
+                    "summary": "External websearch unavailable; output is based on local data only.",
                     "impact_direction": "uncertain",
                     "impact_horizon": "1w",
-                    "why_relevant_to_stock": f"问题：{question[:120]}",
+                    "why_relevant_to_stock": f"Question: {question[:120]}",
                     "url": "",
                     "published_at": datetime.now(timezone.utc).isoformat(),
                     "source_type": "other",
@@ -597,17 +613,17 @@ class AShareAgentService:
             "calendar_watchlist": calendar_items,
             "impact_chain": [
                 {
-                    "event": "本地降级模式",
-                    "transmission_path": "数据可得性下降 -> 结论置信度下降",
-                    "industry_impact": "行业级外部冲击信息缺失",
-                    "stock_impact": f"{stock_code} 的事件前瞻判断能力下降",
-                    "price_factor": "短期波动解释能力下降",
+                    "event": "Fallback Mode",
+                    "transmission_path": "Lower external evidence availability -> lower confidence",
+                    "industry_impact": "Potentially missing industry-level realtime shocks",
+                    "stock_impact": f"Reduced forward-looking certainty for {stock_code}",
+                    "price_factor": "Short-term volatility interpretation becomes weaker",
                 }
             ],
             "decision_adjustment": {
                 "signal_bias": bias,
                 "confidence_adjustment": -0.12,
-                "rationale": "外部实时情报不可用，按降级策略下调置信度。",
+                "rationale": "Confidence discounted due to unavailable realtime websearch",
             },
             "citations": [],
             "confidence_note": "external_websearch_unavailable",
@@ -631,42 +647,24 @@ class AShareAgentService:
         trend: dict[str, Any],
         quant_20: dict[str, Any],
     ) -> str:
-        """构建 WebSearch 情报提示词，要求模型输出严格 JSON。"""
+        """Build strict JSON prompt for external realtime websearch intel."""
         context = {
             "stock_code": stock_code,
             "question": question,
             "quote": {"price": quote.get("price"), "pct_change": quote.get("pct_change")},
             "trend": trend,
             "quant_20": quant_20,
-            "scope": "中国为主 + 全球关键事件",
+            "scope": "CN market primary + global key events",
             "lookback_hours": 72,
             "lookahead_days": 30,
         }
         return (
-            "你是A股资深投研情报官。请使用模型的 web search 能力，"
-            "检索并总结会影响该股票的宏观、行业、国际与未来会议事件。\n"
-            "必须返回严格 JSON，不要返回 markdown，不要返回多余文本。\n"
-            "要求：\n"
-            "1) 每条情报要有 title/summary/impact_direction/impact_horizon/why_relevant_to_stock/url/published_at/source_type。\n"
-            "2) 覆盖字段：macro_signals, industry_forward_events, stock_specific_catalysts, calendar_watchlist。\n"
-            "3) 给出 impact_chain（事件到股价因子的传导链）。\n"
-            "4) 给出 decision_adjustment: {signal_bias, confidence_adjustment, rationale}。\n"
-            "5) 给出 citations，至少 3 条，优先官方与主流媒体。\n"
-            "JSON schema:\n"
-            "{"
-            "\"as_of\":\"...\","
-            "\"macro_signals\":[],"
-            "\"industry_forward_events\":[],"
-            "\"stock_specific_catalysts\":[],"
-            "\"calendar_watchlist\":[],"
-            "\"impact_chain\":[],"
-            "\"decision_adjustment\":{},"
-            "\"citations\":[],"
-            "\"confidence_note\":\"...\""
-            "}\n"
+            "You are an A-share realtime intelligence analyst. Use web search tools. "
+            "Return STRICT JSON only (no markdown) with keys: as_of, macro_signals, "
+            "industry_forward_events, stock_specific_catalysts, calendar_watchlist, impact_chain, "
+            "decision_adjustment, citations, confidence_note. "
             f"context={json.dumps(context, ensure_ascii=False)}"
         )
-
     def _deep_fetch_intel_via_llm_websearch(
         self,
         *,
@@ -676,7 +674,7 @@ class AShareAgentService:
         trend: dict[str, Any],
         quant_20: dict[str, Any],
     ) -> dict[str, Any]:
-        """通过 LLM WebSearch 拉取实时情报；失败时回落到本地降级情报。"""
+        """Fetch real-time intel through LLM WebSearch; fall back to local intel when unavailable."""
         trace_id = self.traces.new_trace()
         enabled_provider_names = self._deep_enabled_provider_names()
         if not self.settings.llm_external_enabled:
@@ -720,7 +718,7 @@ class AShareAgentService:
             stock_codes=[stock_code],
             trace_id=trace_id,
         )
-        # 显式要求 Responses API 挂载 web-search tool，避免“仅靠提示词触发搜索”的不确定性。
+        # 鏄惧紡瑕佹眰 Responses API 鎸傝浇 web-search tool锛岄伩鍏嶁€滀粎闈犳彁绀鸿瘝瑙﹀彂鎼滅储鈥濈殑涓嶇‘瀹氭€с€?
         websearch_overrides = {
             "tools": [{"type": "web_search_preview"}],
         }
@@ -740,7 +738,7 @@ class AShareAgentService:
                 raw = self.llm_gateway.generate(state, prompt, request_overrides=websearch_overrides)
                 tool_applied = True
             except Exception as tool_ex:  # noqa: BLE001
-                # 若 provider 不支持 tools 字段，降级为“prompt-only”尝试，避免完全不可用。
+                # 鑻?provider 涓嶆敮鎸?tools 瀛楁锛岄檷绾т负鈥減rompt-only鈥濆皾璇曪紝閬垮厤瀹屽叏涓嶅彲鐢ㄣ€?
                 reason = self._deep_infer_intel_fallback_reason(str(tool_ex))
                 if reason != "websearch_tool_unsupported":
                     raise
@@ -752,7 +750,7 @@ class AShareAgentService:
                 raw = self.llm_gateway.generate(state, prompt)
             parsed = self._deep_safe_json_loads(raw)
             normalized = self._deep_validate_intel_payload(parsed)
-            # 保障至少有一条可追溯引用，避免“无来源高确信”。
+            # 淇濋殰鑷冲皯鏈変竴鏉″彲杩芥函寮曠敤锛岄伩鍏嶁€滄棤鏉ユ簮楂樼‘淇♀€濄€?
             if len(normalized.get("citations", [])) < 1:
                 raise ValueError("intel citations is empty")
             normalized["intel_status"] = "external_ok"
@@ -810,7 +808,7 @@ class AShareAgentService:
         replan_triggered: bool,
         stop_reason: str,
     ) -> dict[str, Any]:
-        """将仲裁结果与情报层融合成业务可执行摘要。"""
+        """Merge arbitration result and intel layer into business summary output."""
         decision = intel.get("decision_adjustment", {}) if isinstance(intel, dict) else {}
         citations = list(intel.get("citations", [])) if isinstance(intel, dict) else []
         signal = str(arbitration.get("consensus_signal", "hold")).strip().lower()
@@ -832,11 +830,11 @@ class AShareAgentService:
             "signal": signal,
             "confidence": round(confidence, 4),
             "disagreement_score": float(arbitration.get("disagreement_score", 0.0)),
-            "trigger_condition": str(decision.get("rationale", "关注情报催化与趋势共振。"))[:280],
+            "trigger_condition": str(decision.get("rationale", "Watch intel catalysts and trend confirmation"))[:280],
             "invalidation_condition": (
-                "若关键风险事件落地偏负面、分歧持续扩大或预算风控触发，则信号失效。"
+                "Signal invalidates when key risk events land negatively, divergence keeps widening, or budget risk controls trigger."
             ),
-            "review_time_hint": str(next_event.get("published_at", "")) or "T+1 日内复核",
+            "review_time_hint": str(next_event.get("published_at", "")) or "Re-check within T+1",
             "top_conflict_sources": list(arbitration.get("conflict_sources", []))[:4],
             "replan_triggered": bool(replan_triggered),
             "stop_reason": stop_reason,
@@ -856,9 +854,8 @@ class AShareAgentService:
             "intel_citation_count": len(citations),
             "analysis_dimensions": dimensions,
         }
-
-    @staticmethod
     def _deep_build_analysis_dimensions(
+        self,
         *,
         opinions: list[dict[str, Any]],
         regime: dict[str, Any],
@@ -879,37 +876,37 @@ class AShareAgentService:
             {
                 "dimension": "industry",
                 "score": round(float(quant_op.get("confidence", 0.5) or 0.5), 4),
-                "summary": str(pm_op.get("reason", "行业景气与叙事需结合基本面验证。"))[:180],
+                "summary": str(pm_op.get("reason", "Need to verify industry narrative with fundamentals."))[:180],
                 "signals": [str(x.get("title", ""))[:60] for x in industry_events[:3] if str(x.get("title", "")).strip()],
             },
             {
                 "dimension": "competition",
                 "score": round(float(critic_op.get("confidence", 0.5) or 0.5), 4),
-                "summary": "竞争格局需结合份额变化与盈利能力对比。",
+                "summary": "Competition should be checked with share shifts and profitability trends.",
                 "signals": [str(x.get("summary", ""))[:60] for x in catalysts[:2] if str(x.get("summary", "")).strip()],
             },
             {
                 "dimension": "supply_chain",
                 "score": round(float(macro_op.get("confidence", 0.5) or 0.5), 4),
-                "summary": "关注上下游传导链路与成本压力释放。",
+                "summary": "Track upstream/downstream transmission and cost pressure release.",
                 "signals": [str(x.get("to", ""))[:60] for x in impact_chain[:3] if str(x.get("to", "")).strip()],
             },
             {
                 "dimension": "risk",
                 "score": round(float(risk_op.get("confidence", 0.5) or 0.5), 4),
-                "summary": str(risk_op.get("reason", "优先关注回撤、波动与下行尾部风险。"))[:180],
+                "summary": str(risk_op.get("reason", "Prioritize drawdown, volatility, and left-tail risk."))[:180],
                 "signals": [str(regime.get("risk_bias", ""))[:40]],
             },
             {
                 "dimension": "macro",
                 "score": round(float(regime.get("regime_confidence", 0.0) or 0.0), 4),
-                "summary": str(regime.get("regime_rationale", "宏观与政策节奏将影响风险偏好。"))[:180],
+                "summary": str(regime.get("regime_rationale", "Macro and policy cadence may change risk appetite."))[:180],
                 "signals": [str(x.get("title", ""))[:60] for x in list(intel.get("macro_signals", []))[:3] if str(x.get("title", "")).strip()],
             },
             {
                 "dimension": "execution",
                 "score": round(float(exec_op.get("confidence", 0.5) or 0.5), 4),
-                "summary": str(exec_op.get("reason", "执行层需控制仓位节奏与流动性冲击。"))[:180],
+                "summary": str(exec_op.get("reason", "Execution should control cadence, sizing, and liquidity shocks."))[:180],
                 "signals": [str(exec_op.get("signal", "hold"))],
             },
         ]
@@ -1096,9 +1093,9 @@ class AShareAgentService:
         latency_ms = int((time.perf_counter() - started_at) * 1000)
         safe_error = str(error_message or "").strip()[:260] or "unknown error"
         answer = (
-            "本次查询触发系统降级，已返回最小可用结果。"
-            "请稍后重试，或缩小问题范围（减少股票数量/问题长度）。"
-            f" 错误码：{error_code}。"
+            "This query hit degraded mode. A minimum viable result is returned."
+            " Please retry later or reduce request scope (fewer symbols / shorter question)."
+            f" Error code: {error_code}."
         )
         response = {
             "trace_id": trace_id,
@@ -1197,16 +1194,16 @@ class AShareAgentService:
         return self.web.query_history_clear(token)
 
     def query_stream_events(self, payload: dict[str, Any], chunk_size: int = 80):
-        """以事件流形式输出问答结果，便于前端逐段渲染。"""
+        """Stream query result as events for frontend incremental rendering."""
         _ = chunk_size
         started_at = time.perf_counter()
         req = QueryRequest(**payload)
         selected_runtime = self._select_runtime(str(payload.get("workflow_runtime", "")))
-        # 先发送 start，确保前端在任何耗时步骤前就能感知“任务已启动”。
+        # 鍏堝彂閫?start锛岀‘淇濆墠绔湪浠讳綍鑰楁椂姝ラ鍓嶅氨鑳芥劅鐭モ€滀换鍔″凡鍚姩鈥濄€?
         yield {"event": "start", "data": {"status": "started", "phase": "init"}}
-        # 与同步 query 保持一致：先做数据刷新与动态语料装载。
+        # 涓庡悓姝?query 淇濇寔涓€鑷达細鍏堝仛鏁版嵁鍒锋柊涓庡姩鎬佽鏂欒杞姐€?
         if req.stock_codes:
-            yield {"event": "progress", "data": {"phase": "data_refresh", "message": "正在刷新行情/公告/历史数据"}}
+            yield {"event": "progress", "data": {"phase": "data_refresh", "message": "姝ｅ湪鍒锋柊琛屾儏/鍏憡/鍘嗗彶鏁版嵁"}}
             try:
                 quote_refresh = [c for c in req.stock_codes if self._needs_quote_refresh(c)]
                 ann_refresh = [c for c in req.stock_codes if self._needs_announcement_refresh(c)]
@@ -1232,11 +1229,11 @@ class AShareAgentService:
                 if self._needs_macro_refresh():
                     self.ingest_macro_indicators(limit=8)
             except Exception:
-                # 刷新失败不阻断主流程，只向前端透出 warning 便于定位时延与降级行为。
+                # 鍒锋柊澶辫触涓嶉樆鏂富娴佺▼锛屽彧鍚戝墠绔€忓嚭 warning 渚夸簬瀹氫綅鏃跺欢涓庨檷绾ц涓恒€?
                 yield {"event": "progress", "data": {"phase": "data_refresh", "status": "degraded"}}
                 pass
             yield {"event": "progress", "data": {"phase": "data_refresh", "status": "done"}}
-        yield {"event": "progress", "data": {"phase": "retriever", "message": "正在准备检索语料"}}
+        yield {"event": "progress", "data": {"phase": "retriever", "message": "Preparing retrieval corpus"}}
         self.workflow.retriever = self._build_runtime_retriever(req.stock_codes)
         enriched_question = self._augment_question_with_history_context(req.question, req.stock_codes)
         regime_context = self._build_a_share_regime_context(req.stock_codes)
@@ -1261,9 +1258,9 @@ class AShareAgentService:
             },
         }
         yield {"event": "stream_runtime", "data": {"runtime": runtime_name}}
-        yield {"event": "progress", "data": {"phase": "model", "message": "开始模型流式输出"}}
-        # 为了避免“模型首 token 迟迟不来时前端无反馈”，
-        # 在独立线程消费 runtime 事件，并在主协程周期性发送 model_wait 心跳。
+        yield {"event": "progress", "data": {"phase": "model", "message": "Starting model streaming output"}}
+        # 涓轰簡閬垮厤鈥滄ā鍨嬮 token 杩熻繜涓嶆潵鏃跺墠绔棤鍙嶉鈥濓紝
+        # 鍦ㄧ嫭绔嬬嚎绋嬫秷璐?runtime 浜嬩欢锛屽苟鍦ㄤ富鍗忕▼鍛ㄦ湡鎬у彂閫?model_wait 蹇冭烦銆?
         event_queue: queue.Queue[Any] = queue.Queue()
         done_sentinel = object()
         runtime_error: dict[str, str] = {}
@@ -1289,7 +1286,7 @@ class AShareAgentService:
                     "event": "progress",
                     "data": {
                         "phase": "model_wait",
-                        "message": "模型推理中，等待首个增量输出",
+                        "message": "妯″瀷鎺ㄧ悊涓紝绛夊緟棣栦釜澧為噺杈撳嚭",
                         "wait_ms": wait_ms,
                     },
                 }
@@ -1324,7 +1321,7 @@ class AShareAgentService:
             state=state,
             query_type="query_stream",
         )
-        # 结果沉淀事件：便于前端/运维确认本轮问答已进入共享语料池。
+        # 缁撴灉娌夋穩浜嬩欢锛氫究浜庡墠绔?杩愮淮纭鏈疆闂瓟宸茶繘鍏ュ叡浜鏂欐睜銆?
         yield {"event": "knowledge_persisted", "data": {"trace_id": trace_id}}
         yield {
             "event": "analysis_brief",
@@ -1339,19 +1336,17 @@ class AShareAgentService:
         citations: list[dict[str, Any]],
         regime_context: dict[str, Any] | None = None,
     ) -> tuple[str, list[dict[str, Any]]]:
-        """生成带数据支撑的增强回答（实时+历史+双Agent讨论）。"""
+        """Generate enhanced answer with market snapshots, trend context, and evidence references."""
         lines: list[str] = []
         merged = list(citations)
 
         lines.append("## Conclusion Summary")
-        lines.append("## 结论摘要")
         lines.append(base_answer)
         lines.append("")
+
         regime = regime_context if isinstance(regime_context, dict) else {}
         if regime:
-            lines.append(
-                "## A-share Regime Snapshot"
-            )
+            lines.append("## A-share Regime Snapshot")
             lines.append(
                 "- "
                 f"label=`{regime.get('regime_label', 'unknown')}` | "
@@ -1359,46 +1354,51 @@ class AShareAgentService:
                 f"risk_bias=`{regime.get('risk_bias', 'neutral')}`"
             )
             lines.append(f"- rationale: {regime.get('regime_rationale', '')}")
+
         lines.append("## Data Snapshot and History Trend")
-        lines.append("## 数据证据分析")
         for code in stock_codes:
             realtime = self._latest_quote(code)
-            # 问答主链路尽量使用更长窗口，减少“样本稀疏”判断误差。
+            # Keep a wider history window to reduce sparse-sample bias in trend judgment.
             bars = self._history_bars(code, limit=260)
             summary_3m = self._history_3m_summary(code)
+
             if not realtime or len(bars) < 30:
-                lines.append(f"- {code}: 数据不足（实时或历史样本不足），仅给出保守判断。 [insufficient_data]")
+                lines.append(f"- {code}: insufficient data (realtime or history sample too small).")
                 continue
+
             trend = self._trend_metrics(bars)
             lines.append(
-                f"- {code}: 最新价 `{realtime['price']:.3f}`，当日涨跌 `{realtime['pct_change']:.2f}%`，"
-                f"20日趋势 `{trend['ma20_slope']:.4f}`，60日趋势 `{trend['ma60_slope']:.4f}`，"
-                f"20日波动 `{trend['volatility_20']:.4f}`。"
+                f"- {code}: latest `{realtime['price']:.3f}`, day change `{realtime['pct_change']:.2f}%`, "
+                f"MA20 slope `{trend['ma20_slope']:.4f}`, MA60 slope `{trend['ma60_slope']:.4f}`, "
+                f"volatility(20d) `{trend['volatility_20']:.4f}`."
             )
             lines.append(
-                f"  解释: MA20>{'MA60' if trend['ma20'] >= trend['ma60'] else 'MA60以下'}，"
-                f"近20日动量 `{trend['momentum_20']:.4f}`，最大回撤 `{trend['max_drawdown_60']:.4f}`。"
+                f"  Interpretation: MA20 is {'above' if trend['ma20'] >= trend['ma60'] else 'below'} MA60, "
+                f"momentum(20d) `{trend['momentum_20']:.4f}`, max drawdown(60d) `{trend['max_drawdown_60']:.4f}`."
             )
+
             if int(summary_3m.get("sample_count", 0)) >= 60:
                 lines.append(
-                    "  三个月窗口: "
-                    f"`{summary_3m.get('start_date','')}` -> `{summary_3m.get('end_date','')}`，"
-                    f"连续样本 `{int(summary_3m.get('sample_count', 0))}` 条，"
-                    f"收盘 `{float(summary_3m.get('start_close', 0.0)):.3f}` -> "
-                    f"`{float(summary_3m.get('end_close', 0.0)):.3f}`，"
-                    f"区间 `{float(summary_3m.get('pct_change', 0.0)) * 100:.2f}%`。"
+                    "  3-month window "
+                    f"`{summary_3m.get('start_date', '')}` -> `{summary_3m.get('end_date', '')}`, "
+                    f"samples `{int(summary_3m.get('sample_count', 0))}`, "
+                    f"close `{float(summary_3m.get('start_close', 0.0)):.3f}` -> "
+                    f"`{float(summary_3m.get('end_close', 0.0)):.3f}`, "
+                    f"range `{float(summary_3m.get('pct_change', 0.0)) * 100:.2f}%`."
                 )
+
             merged.append(
                 {
                     "source_id": realtime.get("source_id", "unknown"),
                     "source_url": realtime.get("source_url", ""),
                     "event_time": realtime.get("ts"),
                     "reliability_score": realtime.get("reliability_score", 0.7),
-                    "excerpt": f"{code} 实时: price={realtime['price']}, pct={realtime['pct_change']}",
+                    "excerpt": f"{code} realtime: price={realtime['price']}, pct={realtime['pct_change']}",
                     "retrieval_track": "quote_snapshot",
                     "rerank_score": float(realtime.get("reliability_score", 0.7) or 0.7),
                 }
             )
+
             if bars:
                 merged.append(
                     {
@@ -1406,12 +1406,13 @@ class AShareAgentService:
                         "source_url": bars[-1].get("source_url", ""),
                         "event_time": bars[-1].get("trade_date"),
                         "reliability_score": bars[-1].get("reliability_score", 0.9),
-                        "excerpt": f"{code} 历史K线样本 {len(bars)} 条，最近交易日 {bars[-1].get('trade_date','')}",
+                        "excerpt": f"{code} history sample count={len(bars)}, latest trade date {bars[-1].get('trade_date', '')}",
                         "retrieval_track": "history_daily",
                         "rerank_score": float(bars[-1].get("reliability_score", 0.9) or 0.9),
                     }
                 )
-            # 额外补充三个月窗口首末点引用，避免模型仅看到“离散两点”却不知完整窗口样本量。
+
+            # Add a dedicated 3-month context citation to avoid sparse-point misinterpretation.
             if int(summary_3m.get("sample_count", 0)) >= 2:
                 merged.append(
                     {
@@ -1420,9 +1421,9 @@ class AShareAgentService:
                         "event_time": summary_3m.get("end_date", ""),
                         "reliability_score": 0.92,
                         "excerpt": (
-                            f"{code} 近3个月样本 {int(summary_3m.get('sample_count', 0))} 条，"
-                            f"区间 {summary_3m.get('start_date','')}->{summary_3m.get('end_date','')}，"
-                            f"收盘 {float(summary_3m.get('start_close', 0.0)):.3f}->{float(summary_3m.get('end_close', 0.0)):.3f}"
+                            f"{code} 3m sample={int(summary_3m.get('sample_count', 0))}, "
+                            f"range {summary_3m.get('start_date', '')}->{summary_3m.get('end_date', '')}, "
+                            f"close {float(summary_3m.get('start_close', 0.0)):.3f}->{float(summary_3m.get('end_close', 0.0)):.3f}"
                         ),
                         "retrieval_track": "history_3m_window",
                         "rerank_score": 0.92,
@@ -1431,42 +1432,41 @@ class AShareAgentService:
 
         pm_section = self._pm_agent_view(question, stock_codes)
         dev_section = self._dev_manager_view(stock_codes)
+
         lines.append("")
         lines.append("## PM Agent View")
-        lines.append("## PM Agent 观点（产品侧）")
         lines.extend(pm_section)
         lines.append("")
         lines.append("## Dev Manager Agent View")
-        lines.append("## 开发经理 Agent 观点（工程侧）")
         lines.extend(dev_section)
 
-        # 业务可读性补充：告诉用户“本轮结论是否命中了共享知识资产”。
         shared_hits = [
             c
             for c in merged
             if str(c.get("source_id", "")).startswith("doc::")
             or str(c.get("source_id", "")) == "qa_memory_summary"
         ]
+
         lines.append("")
         lines.append("## Shared Knowledge Hits")
-        lines.append("## 共享知识命中")
         if shared_hits:
-            lines.append(f"- 命中条数: `{len(shared_hits)}`")
+            lines.append(f"- hit count: `{len(shared_hits)}`")
             for idx, item in enumerate(shared_hits[:4], start=1):
                 lines.append(
-                    f"- [{idx}] source=`{item.get('source_id','unknown')}` | "
-                    f"{item.get('excerpt', '')[:140]}"
+                    f"- [{idx}] source=`{item.get('source_id', 'unknown')}` | "
+                    f"{str(item.get('excerpt', ''))[:140]}"
                 )
         else:
-            lines.append("- 本轮未命中共享知识资产，结论主要来自实时行情/公告/历史序列。")
+            lines.append("- no shared knowledge asset hit in this answer; evidence came from realtime/history feeds.")
+
         lines.append("")
         lines.append("## Evidence References")
-        lines.append("## 引用清单")
         for idx, c in enumerate(merged[:10], start=1):
             lines.append(
-                f"- [{idx}] `{c.get('source_id','unknown')}` | {c.get('source_url','')} | "
-                f"score={float(c.get('reliability_score',0.0)):.2f} | {c.get('excerpt','')}"
+                f"- [{idx}] `{c.get('source_id', 'unknown')}` | {c.get('source_url', '')} | "
+                f"score={float(c.get('reliability_score', 0.0)):.2f} | {c.get('excerpt', '')}"
             )
+
         return "\n".join(lines), merged[:10]
 
     def _build_analysis_brief(
@@ -1475,7 +1475,7 @@ class AShareAgentService:
         citations: list[dict[str, Any]],
         regime_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """构造结构化证据摘要，供前端可视化展示。"""
+        """Build structured evidence cards for frontend analysis panels."""
         by_code: list[dict[str, Any]] = []
         now = datetime.now(timezone.utc)
         for code in stock_codes:
@@ -1540,10 +1540,10 @@ class AShareAgentService:
         evidence_pack: list[dict[str, Any]],
         citations: list[dict[str, Any]],
     ) -> None:
-        """记录线上查询样本，供 RAG 持续评测使用。"""
+        """Record online retrieval samples for iterative RAG evaluation."""
         predicted = [str(x.get("source_id", "")) for x in evidence_pack[:5] if x.get("source_id")]
         positive = [str(x.get("source_id", "")) for x in citations if x.get("source_id")]
-        # 保序去重
+        # 淇濆簭鍘婚噸
         pred_u = list(dict.fromkeys(predicted))
         pos_u = list(dict.fromkeys(positive))
         if not query_text.strip() or not pred_u:
@@ -1593,7 +1593,7 @@ class AShareAgentService:
                 continue
             excerpt = str(raw.get("excerpt", raw.get("text", ""))).strip()
             if not excerpt:
-                excerpt = f"{source_id} 证据摘要"
+                excerpt = f"{source_id} 璇佹嵁鎽樿"
             dedup_key = (source_id, excerpt[:120])
             if dedup_key in seen:
                 continue
@@ -1644,7 +1644,7 @@ class AShareAgentService:
         citations: list[dict[str, Any]],
         latency_ms: int,
     ) -> None:
-        """记录召回/选用轨迹，便于线上排查“召回命中但答案未使用”问题。"""
+        """Record retrieved-vs-selected trace for debugging citation usage quality."""
         retrieved_ids = [
             self._trace_source_identity(x)
             for x in evidence_pack[:12]
@@ -1675,7 +1675,7 @@ class AShareAgentService:
         state: AgentState,
         query_type: str,
     ) -> None:
-        """把问答结果写入共享语料池（raw + redacted/summary 双轨）。"""
+        """Persist query result into shared QA memory with raw/redacted/summary tracks."""
         answer_text = str(state.report or "").strip()
         if not answer_text:
             return
@@ -1706,7 +1706,7 @@ class AShareAgentService:
 
     @staticmethod
     def _estimate_qa_quality(answer_text: str, citations: list[dict[str, Any]], risk_flags: list[str]) -> float:
-        """轻量质量评分：用于共享语料的上线门禁。"""
+        """Lightweight QA quality score used for deciding shared-memory eligibility."""
         score = 0.25
         score += min(0.35, len(citations) * 0.08)
         length = len(answer_text)
@@ -1727,7 +1727,7 @@ class AShareAgentService:
 
     @staticmethod
     def _build_qa_summary(answer_redacted: str, citations: list[dict[str, Any]], *, query_type: str) -> str:
-        """构造可检索摘要：优先结构化前缀 + 截断正文。"""
+        """Build retrieval-friendly summary: structured prefix plus clipped redacted answer."""
         source_ids = [str(x.get("source_id", "")) for x in citations if str(x.get("source_id", "")).strip()]
         source_head = ",".join(list(dict.fromkeys(source_ids))[:4]) or "unknown"
         head = f"[{query_type}] sources={source_head}; "
@@ -1754,7 +1754,7 @@ class AShareAgentService:
         }
 
     def _build_runtime_retriever(self, stock_codes: list[str]):
-        """统一构建查询期 retriever：可按配置启用向量语义增强。"""
+        """Build runtime retriever, optionally enabling semantic vector retrieval."""
         corpus = self._build_runtime_corpus(stock_codes)
         if not self.settings.rag_vector_enabled:
             return HybridRetriever(corpus=corpus)
@@ -1766,7 +1766,7 @@ class AShareAgentService:
         return HybridRetrieverV2(corpus=corpus, semantic_search_fn=_semantic_search)
 
     def _build_summary_vector_records(self, stock_codes: list[str]) -> list[VectorSummaryRecord]:
-        """把持久化资产映射为“摘要索引记录”，用于 summary-first 检索。"""
+        """Map persisted assets into summary index records for summary-first retrieval."""
         symbols = {str(x).upper() for x in stock_codes}
         rows: list[VectorSummaryRecord] = []
         doc_rows = self.web.rag_doc_chunk_list_internal(status="active", limit=2500)
@@ -1832,7 +1832,7 @@ class AShareAgentService:
     def _refresh_summary_vector_index(self, stock_codes: list[str], force: bool = False) -> dict[str, Any]:
         records = self._build_summary_vector_records(stock_codes)
         signature = self._summary_vector_signature(records)
-        # 减少重复 rebuild：签名未变化时复用现有索引。
+        # 鍑忓皯閲嶅 rebuild锛氱鍚嶆湭鍙樺寲鏃跺鐢ㄧ幇鏈夌储寮曘€?
         if not force and signature == self._vector_signature and self.vector_store.record_count:
             return {"status": "reused", "indexed_count": self.vector_store.record_count, "backend": self.vector_store.backend}
         result = self.vector_store.rebuild(records)
@@ -1848,7 +1848,7 @@ class AShareAgentService:
         return f"{len(records)}:{hash('|'.join(parts))}"
 
     def _semantic_summary_origin_hits(self, query: str, top_k: int = 8) -> list[RetrievalItem]:
-        """摘要先召回 -> 原文回补：返回 summary hit 与 origin backfill hit。"""
+        """Summary-first recall with optional origin backfill to preserve full-answer evidence."""
         hits = self.vector_store.search(query, top_k=max(1, top_k))
         out: list[RetrievalItem] = []
         for hit in hits:
@@ -1878,7 +1878,7 @@ class AShareAgentService:
                     metadata=dict(meta),
                 )
             )
-            # 回补原文：让最终证据更可读且可用于生成更完整答案。
+            # 鍥炶ˉ鍘熸枃锛氳鏈€缁堣瘉鎹洿鍙涓斿彲鐢ㄤ簬鐢熸垚鏇村畬鏁寸瓟妗堛€?
             if parent_text:
                 backfill_meta = dict(meta)
                 backfill_meta.update({"origin_backfill": True, "retrieval_track": "origin_backfill"})
@@ -1896,19 +1896,19 @@ class AShareAgentService:
         return out
 
     def _build_runtime_corpus(self, stock_codes: list[str]) -> list[RetrievalItem]:
-        """把摄取层数据转换为检索语料。"""
-        symbols = set(stock_codes)
+        """Convert ingested datasets into runtime retrieval corpus items."""
+        symbols = {str(x).upper() for x in stock_codes if str(x).strip()}
         corpus = HybridRetriever()._default_corpus()
 
-        # 行情快照 -> 文本事实
+        # Quote snapshots -> textual evidence.
         for q in self.ingestion_store.quotes[-80:]:
-            code = str(q.get("stock_code", ""))
+            code = str(q.get("stock_code", "")).upper()
             if symbols and code not in symbols:
                 continue
             ts = self._parse_time(str(q.get("ts", "")))
             text = (
-                f"{code} 行情快照：现价 {q.get('price')}，涨跌幅 {q.get('pct_change')}%，"
-                f"成交量 {q.get('volume')}，成交额 {q.get('turnover')}。"
+                f"{code} quote snapshot: price={q.get('price')}, pct_change={q.get('pct_change')}%, "
+                f"volume={q.get('volume')}, turnover={q.get('turnover')}"
             )
             corpus.append(
                 RetrievalItem(
@@ -1917,18 +1917,18 @@ class AShareAgentService:
                     source_url=str(q.get("source_url", "")),
                     score=0.0,
                     event_time=ts,
-                    reliability_score=float(q.get("reliability_score", 0.6)),
+                    reliability_score=float(q.get("reliability_score", 0.6) or 0.6),
                     metadata={"retrieval_track": "quote_snapshot"},
                 )
             )
 
-        # 公告 -> 文本事实
+        # Announcements -> textual evidence.
         for a in self.ingestion_store.announcements[-120:]:
-            code = str(a.get("stock_code", ""))
+            code = str(a.get("stock_code", "")).upper()
             if symbols and code not in symbols:
                 continue
             event_time = self._parse_time(str(a.get("event_time", "")))
-            text = f"{code} 公告：{a.get('title', '')}。{a.get('content', '')}"
+            text = f"{code} announcement: {a.get('title', '')}. {a.get('content', '')}"
             corpus.append(
                 RetrievalItem(
                     text=text,
@@ -1936,21 +1936,22 @@ class AShareAgentService:
                     source_url=str(a.get("source_url", "")),
                     score=0.0,
                     event_time=event_time,
-                    reliability_score=float(a.get("reliability_score", 0.9)),
+                    reliability_score=float(a.get("reliability_score", 0.9) or 0.9),
                     metadata={"retrieval_track": "announcement_event"},
                 )
             )
 
-        # 历史K线 -> 文本事实（趋势查询时关键证据）
+        # Daily bars -> textual evidence.
         history_by_code: dict[str, list[dict[str, Any]]] = {}
         for b in self.ingestion_store.history_bars[-2000:]:
-            code = str(b.get("stock_code", ""))
+            code = str(b.get("stock_code", "")).upper()
             if symbols and code not in symbols:
                 continue
             history_by_code.setdefault(code, []).append(b)
             text = (
-                f"{code} 历史K线 {b.get('trade_date','')} 开{b.get('open')} 高{b.get('high')} "
-                f"低{b.get('low')} 收{b.get('close')} 量{b.get('volume')}"
+                f"{code} daily bar {b.get('trade_date', '')}: "
+                f"open={b.get('open')} high={b.get('high')} low={b.get('low')} "
+                f"close={b.get('close')} volume={b.get('volume')}"
             )
             corpus.append(
                 RetrievalItem(
@@ -1959,11 +1960,12 @@ class AShareAgentService:
                     source_url=str(b.get("source_url", "")),
                     score=0.0,
                     event_time=self._parse_time(str(b.get("trade_date", ""))),
-                    reliability_score=float(b.get("reliability_score", 0.9)),
+                    reliability_score=float(b.get("reliability_score", 0.9) or 0.9),
                     metadata={"retrieval_track": "history_daily"},
                 )
             )
-        # 为每个标的增加“最近三个月连续窗口摘要”，避免模型只看到离散点后误判样本稀疏。
+
+        # Add rolling 3-month summary evidence per stock.
         for code, rows in history_by_code.items():
             if not rows:
                 continue
@@ -1977,8 +1979,9 @@ class AShareAgentService:
             end_close = float(end.get("close", 0.0) or 0.0)
             pct_change = (end_close / start_close - 1.0) if start_close > 0 else 0.0
             text = (
-                f"{code} 最近三个月连续日线样本={len(window)}，区间={start.get('trade_date')}到{end.get('trade_date')}，"
-                f"收盘从{start_close:.3f}到{end_close:.3f}，区间涨跌={pct_change * 100:.2f}%。"
+                f"{code} 3m rolling window: sample={len(window)}, "
+                f"range={start.get('trade_date', '')}->{end.get('trade_date', '')}, "
+                f"close={start_close:.3f}->{end_close:.3f}, pct_change={pct_change * 100:.2f}%"
             )
             corpus.append(
                 RetrievalItem(
@@ -1992,15 +1995,15 @@ class AShareAgentService:
                 )
             )
 
-        # 财务快照 -> 文本事实（估值、盈利质量、杠杆水平）。
+        # Financial snapshots -> textual evidence.
         for fin in self.ingestion_store.financial_snapshots[-600:]:
-            code = str(fin.get("stock_code", ""))
+            code = str(fin.get("stock_code", "")).upper()
             if symbols and code not in symbols:
                 continue
             text = (
-                f"{code} 财务快照：ROE {fin.get('roe')}，毛利率 {fin.get('gross_margin')}%，"
-                f"营收同比 {fin.get('revenue_yoy')}%，净利同比 {fin.get('net_profit_yoy')}%，"
-                f"PE(TTM) {fin.get('pe_ttm')}，PB(MRQ) {fin.get('pb_mrq')}。"
+                f"{code} financial snapshot: roe={fin.get('roe')}, gross_margin={fin.get('gross_margin')}%, "
+                f"revenue_yoy={fin.get('revenue_yoy')}%, net_profit_yoy={fin.get('net_profit_yoy')}%, "
+                f"pe_ttm={fin.get('pe_ttm')}, pb_mrq={fin.get('pb_mrq')}"
             )
             corpus.append(
                 RetrievalItem(
@@ -2009,18 +2012,17 @@ class AShareAgentService:
                     source_url=str(fin.get("source_url", "")),
                     score=0.0,
                     event_time=self._parse_time(str(fin.get("ts", ""))),
-                    reliability_score=float(fin.get("reliability_score", 0.75)),
+                    reliability_score=float(fin.get("reliability_score", 0.75) or 0.75),
                     metadata={"retrieval_track": "financial_snapshot"},
                 )
             )
 
-        # 已索引文档分块 -> 文本事实
         # News events -> textual evidence.
         for row in self.ingestion_store.news_items[-1200:]:
-            code = str(row.get("stock_code", ""))
+            code = str(row.get("stock_code", "")).upper()
             if symbols and code not in symbols:
                 continue
-            text = f"{code} 新闻：{row.get('title', '')}。{row.get('content', '')}"
+            text = f"{code} news: {row.get('title', '')}. {row.get('content', '')}"
             corpus.append(
                 RetrievalItem(
                     text=text,
@@ -2028,17 +2030,20 @@ class AShareAgentService:
                     source_url=str(row.get("source_url", "")),
                     score=0.0,
                     event_time=self._parse_time(str(row.get("event_time", ""))),
-                    reliability_score=float(row.get("reliability_score", 0.65)),
+                    reliability_score=float(row.get("reliability_score", 0.65) or 0.65),
                     metadata={"retrieval_track": "news_event"},
                 )
             )
 
         # Research reports -> textual evidence.
         for row in self.ingestion_store.research_reports[-800:]:
-            code = str(row.get("stock_code", ""))
+            code = str(row.get("stock_code", "")).upper()
             if symbols and code not in symbols:
                 continue
-            text = f"{code} 研报：{row.get('title', '')}。机构={row.get('org_name', '')}。作者={row.get('author', '')}。"
+            text = (
+                f"{code} research report: {row.get('title', '')}. "
+                f"org={row.get('org_name', '')}. author={row.get('author', '')}."
+            )
             corpus.append(
                 RetrievalItem(
                     text=text,
@@ -2046,14 +2051,14 @@ class AShareAgentService:
                     source_url=str(row.get("source_url", "")),
                     score=0.0,
                     event_time=self._parse_time(str(row.get("published_at", ""))),
-                    reliability_score=float(row.get("reliability_score", 0.7)),
+                    reliability_score=float(row.get("reliability_score", 0.7) or 0.7),
                     metadata={"retrieval_track": "research_report"},
                 )
             )
 
         # Macro indicators -> global evidence.
         for row in self.ingestion_store.macro_indicators[-400:]:
-            text = f"宏观指标 {row.get('metric_name', '')}={row.get('metric_value', '')}，日期={row.get('report_date', '')}"
+            text = f"macro indicator {row.get('metric_name', '')}={row.get('metric_value', '')}, date={row.get('report_date', '')}"
             corpus.append(
                 RetrievalItem(
                     text=text,
@@ -2061,19 +2066,19 @@ class AShareAgentService:
                     source_url=str(row.get("source_url", "")),
                     score=0.0,
                     event_time=self._parse_time(str(row.get("event_time", ""))),
-                    reliability_score=float(row.get("reliability_score", 0.7)),
+                    reliability_score=float(row.get("reliability_score", 0.7) or 0.7),
                     metadata={"retrieval_track": "macro_indicator"},
                 )
             )
 
         # Fund flow snapshots -> textual evidence.
         for row in self.ingestion_store.fund_snapshots[-600:]:
-            code = str(row.get("stock_code", ""))
+            code = str(row.get("stock_code", "")).upper()
             if symbols and code not in symbols:
                 continue
             text = (
-                f"{code} 资金流向：主力={row.get('main_inflow')}，小单={row.get('small_inflow')}，"
-                f"中单={row.get('middle_inflow')}，大单={row.get('large_inflow')}。"
+                f"{code} fund flow: main={row.get('main_inflow')}, small={row.get('small_inflow')}, "
+                f"middle={row.get('middle_inflow')}, large={row.get('large_inflow')}"
             )
             corpus.append(
                 RetrievalItem(
@@ -2082,11 +2087,12 @@ class AShareAgentService:
                     source_url=str(row.get("source_url", "")),
                     score=0.0,
                     event_time=self._parse_time(str(row.get("ts", ""))),
-                    reliability_score=float(row.get("reliability_score", 0.65)),
+                    reliability_score=float(row.get("reliability_score", 0.65) or 0.65),
                     metadata={"retrieval_track": "fund_flow"},
                 )
             )
 
+        # In-memory uploaded docs chunks.
         for doc in self.ingestion_store.docs.values():
             if not doc.get("indexed"):
                 continue
@@ -2107,7 +2113,7 @@ class AShareAgentService:
                     )
                 )
 
-        # 持久化文档 chunk（白名单/审核后生效）-> 在线检索语料。
+        # Persisted active doc chunks.
         persisted_chunks = self.web.rag_doc_chunk_list_internal(status="active", limit=1200)
         for row in persisted_chunks:
             row_codes = {str(x).upper() for x in row.get("stock_codes", [])}
@@ -2133,7 +2139,7 @@ class AShareAgentService:
                 )
             )
 
-        # 共享 QA 摘要语料（全站共享）-> 在线检索语料。
+        # Shared QA summaries as retrieval candidates.
         qa_rows = self.web.rag_qa_memory_list_internal(retrieval_enabled=1, limit=1500, offset=0)
         for row in qa_rows:
             row_code = str(row.get("stock_code", "")).upper()
@@ -2152,12 +2158,13 @@ class AShareAgentService:
                     reliability_score=float(max(0.5, min(1.0, row.get("quality_score", 0.65) or 0.65))),
                     metadata={
                         "memory_id": str(row.get("memory_id", "")),
-                        # 为 Phase-B“摘要召回 -> 原文回补”预留 parent 文本。
+                        # Keep parent answer for two-stage recall then answer backfill.
                         "parent_answer_text": str(row.get("answer_text", "")),
                         "retrieval_track": "qa_summary",
                     },
                 )
             )
+
         return corpus
 
     @staticmethod
@@ -2165,7 +2172,7 @@ class AShareAgentService:
         if not value:
             return datetime.now(timezone.utc)
         try:
-            # 支持 ISO 时间与 YYYY-MM-DD 日期两种格式。
+            # 鏀寔 ISO 鏃堕棿涓?YYYY-MM-DD 鏃ユ湡涓ょ鏍煎紡銆?
             if len(value) == 10 and value.count("-") == 2:
                 return datetime.fromisoformat(value + "T00:00:00+00:00")
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -2200,7 +2207,7 @@ class AShareAgentService:
     ) -> bool:
         code = stock_code.upper().replace(".", "")
         now = datetime.now(timezone.utc)
-        # 若本地历史样本不足三个月（约90个交易日窗口），也强制刷新一次。
+        # 鑻ユ湰鍦板巻鍙叉牱鏈笉瓒充笁涓湀锛堢害90涓氦鏄撴棩绐楀彛锛夛紝涔熷己鍒跺埛鏂颁竴娆°€?
         sample_count = sum(1 for b in self.ingestion_store.history_bars if str(b.get("stock_code", "")).upper() == code)
         if sample_count < max(30, int(min_samples)):
             return True
@@ -2279,7 +2286,7 @@ class AShareAgentService:
         return rows[-limit:]
 
     def _history_3m_summary(self, stock_code: str) -> dict[str, Any]:
-        """提炼最近三个月（约90日）历史窗口，供模型与前端输出更稳健的连续样本描述。"""
+        """Extract recent ~3 month history window summary for stable trend explanations."""
         bars = self._history_bars(stock_code, limit=90)
         if len(bars) < 2:
             return {"sample_count": len(bars), "start_date": "", "end_date": "", "start_close": 0.0, "end_close": 0.0, "pct_change": 0.0}
@@ -2298,7 +2305,7 @@ class AShareAgentService:
         }
 
     def _augment_question_with_history_context(self, question: str, stock_codes: list[str]) -> str:
-        """在模型输入前注入三个月连续样本摘要，减少“离散样本误判”。"""
+        """Inject 3-month continuous sample summary into model input context."""
         extras: list[str] = []
         for code in stock_codes:
             summary = self._history_3m_summary(code)
@@ -2306,17 +2313,17 @@ class AShareAgentService:
             if sample_count < 30:
                 continue
             extras.append(
-                f"{code}: 最近三个月连续日线样本 {sample_count} 条，"
-                f"区间 {summary.get('start_date','')} -> {summary.get('end_date','')}，"
-                f"收盘 {float(summary.get('start_close', 0.0)):.3f} -> {float(summary.get('end_close', 0.0)):.3f}，"
-                f"区间涨跌 {float(summary.get('pct_change', 0.0)) * 100:.2f}%。"
+                f"{code}: 最近三个月连续日线样本 {sample_count} 条, "
+                f"区间 {summary.get('start_date', '')} -> {summary.get('end_date', '')}, "
+                f"收盘 {float(summary.get('start_close', 0.0)):.3f} -> {float(summary.get('end_close', 0.0)):.3f}, "
+                f"区间涨跌 {float(summary.get('pct_change', 0.0)) * 100:.2f}%"
             )
         if not extras:
             return question
         return (
             f"{question}\n"
             "【系统补充：连续样本上下文】\n"
-            "以下为历史连续样本摘要，请优先基于该窗口判断，避免把结论建立在离散点上：\n"
+            "以下为连续历史样本摘要，请优先基于窗口判断，避免稀疏点误判：\n"
             + "\n".join(f"- {line}" for line in extras)
         )
 
@@ -2539,23 +2546,23 @@ class AShareAgentService:
         return max_dd
 
     def _pm_agent_view(self, question: str, stock_codes: list[str]) -> list[str]:
-        targets = ",".join(stock_codes) if stock_codes else "未指定"
+        targets = ",".join(stock_codes) if stock_codes else "unspecified"
         return [
-            f"- 用户目标: 围绕 `{targets}` 回答 `{question}`，输出可验证的数据结论。",
-            "- 产品判断: 需要同时展示实时快照与历史趋势，避免仅凭单点行情下结论。",
-            "- 信息缺口: 若关键财报指标缺失，需明确提示并建议补充文档/财报源。",
+            f"- User objective: answer `{question}` around `{targets}` with verifiable evidence.",
+            "- Product judgment: show both realtime snapshot and history trend, avoid single-point conclusions.",
+            "- Information gap: if key indicators are missing, explicitly note and suggest data backfill.",
         ]
 
     def _dev_manager_view(self, stock_codes: list[str]) -> list[str]:
-        targets = ",".join(stock_codes) if stock_codes else "未指定"
+        targets = ",".join(stock_codes) if stock_codes else "unspecified"
         return [
-            f"- 本轮实现: 已接入历史K线免费源并用于 `{targets}` 趋势计算。",
-            "- 工程计划: 下一步补充财报结构化字段（营收/利润/现金流）与异常检测。",
-            "- 质量门禁: 每次发布前验证数据新鲜度、引用覆盖率、趋势指标完整性。",
+            f"- Current implementation: connected free historical feeds and trend metrics for `{targets}`.",
+            "- Engineering plan: backfill structured financial fields and anomaly detection checks.",
+            "- Quality gate: validate freshness, citation coverage, and trend-indicator completeness per release.",
         ]
 
     def report_generate(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """基于问答结果生成报告并缓存。"""
+        """Generate report based on query result and cache it for retrieval/export."""
         req = ReportRequest(**payload)
         run_id = str(payload.get("run_id", "")).strip()
         pool_snapshot_id = str(payload.get("pool_snapshot_id", "")).strip()
@@ -2567,6 +2574,39 @@ class AShareAgentService:
                 "stock_codes": [req.stock_code],
             }
         )
+        code = str(req.stock_code or "").strip().upper()
+        overview = self.market_overview(code)
+        predict_snapshot = self.predict_run({"stock_codes": [code], "horizons": ["5d", "20d"]})
+        try:
+            intel = self.analysis_intel_card(code, horizon="30d", risk_profile="neutral")
+        except Exception:
+            intel = {}
+        history_sample_size = len(list(overview.get("history", []) or []))
+        quality_reasons: list[str] = []
+        if len(list(query_result.get("citations", []) or [])) < 3:
+            quality_reasons.append("citations_insufficient")
+        if history_sample_size < 60:
+            quality_reasons.append("history_sample_insufficient")
+        if str(predict_snapshot.get("data_quality", "")).strip() != "real":
+            quality_reasons.append("predict_degraded")
+        quality_gate = {
+            "status": "pass" if not quality_reasons else "degraded",
+            "score": round(max(0.0, 1.0 - 0.18 * float(len(quality_reasons))), 4),
+            "reasons": quality_reasons,
+        }
+        report_data_pack_summary = {
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "history_sample_size": history_sample_size,
+            "predict_quality": str(predict_snapshot.get("data_quality", "unknown")),
+            "predict_degrade_reasons": list(predict_snapshot.get("degrade_reasons", []) or []),
+            "intel_signal": str(intel.get("overall_signal", "")),
+            "intel_confidence": float(intel.get("confidence", 0.0) or 0.0),
+            "news_count": len(list(overview.get("news", []) or [])),
+            "research_count": len(list(overview.get("research", []) or [])),
+            "macro_count": len(list(overview.get("macro", []) or [])),
+        }
+        generation_mode = "fallback"
+        generation_error = ""
         report_id = str(uuid.uuid4())
         evidence_refs = [
             {
@@ -2584,16 +2624,145 @@ class AShareAgentService:
                 "title": "证据清单",
                 "content": "\n".join(f"- {x['source_id']}: {x['excerpt']}" for x in evidence_refs[:8]),
             },
-            {"section_id": "risk", "title": "风险与反证", "content": "需结合估值、流动性、政策扰动进行反证校验。"},
+            {"section_id": "risk", "title": "风险与反证", "content": "结合估值、流动性与政策扰动进行反证校验。"},
             {"section_id": "action", "title": "操作建议", "content": "建议分批验证信号稳定性，避免一次性重仓。"},
         ]
+        for row in list(intel.get("evidence", []) or [])[:6]:
+            evidence_refs.append(
+                {
+                    "source_id": str(row.get("source_id", "")),
+                    "source_url": str(row.get("source_url", "")),
+                    "reliability_score": float(row.get("reliability_score", 0.0) or 0.0),
+                    "excerpt": str(row.get("summary", row.get("title", "")))[:240],
+                }
+            )
+        dedup_evidence: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for row in evidence_refs:
+            key = (str(row.get("source_id", "")), str(row.get("excerpt", ""))[:120])
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            dedup_evidence.append(row)
+        evidence_refs = dedup_evidence[:14]
+
+        report_sections.extend(
+            [
+                {
+                    "section_id": "data_quality_gate",
+                    "title": "閺佺増宓佺拹銊╁櫤闂傘劎",
+                    "content": f"status={quality_gate['status']}; score={quality_gate['score']}; reasons={','.join(quality_reasons) or 'none'}",
+                },
+                {
+                    "section_id": "signal_context",
+                    "title": "信号上下文",
+                    "content": json.dumps(
+                        {
+                            "predict_quality": str(predict_snapshot.get("data_quality", "unknown")),
+                            "predict_degrade_reasons": list(predict_snapshot.get("degrade_reasons", []) or []),
+                            "intel_signal": str(intel.get("overall_signal", "")),
+                            "intel_confidence": float(intel.get("confidence", 0.0) or 0.0),
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+                {
+                    "section_id": "scenario_matrix",
+                    "title": "閹懏娅欓幒銊︾川",
+                    "content": json.dumps(list(intel.get("scenario_matrix", []) or [])[:6], ensure_ascii=False),
+                },
+            ]
+        )
+
+        if self.settings.llm_external_enabled and self.llm_gateway.providers:
+            llm_prompt = (
+                "娴ｇ姵妲哥挧鍕箒閼诧紕銈ㄩ惍鏃傗敀閸涙ǜ鈧倽顕潏鎾冲毉娑撱儲鐗?JSON閿涘苯瀵橀崥顐㈢摟濞?executive_summary/core_logic/"
+                "valuation_and_financial/catalysts_and_calendar/risk_matrix/scenario_analysis/execution_plan/"
+                "quality_disclaimer閵?context="
+                + json.dumps(
+                    {
+                        "stock_code": code,
+                        "report_type": req.report_type,
+                        "query_answer": query_result.get("answer", ""),
+                        "financial": overview.get("financial", {}),
+                        "trend": overview.get("trend", {}),
+                        "predict": {
+                            "quality": predict_snapshot.get("data_quality", ""),
+                            "horizons": ((predict_snapshot.get("results", []) or [{}])[0].get("horizons", []) if predict_snapshot.get("results") else []),
+                        },
+                        "intel": {
+                            "signal": intel.get("overall_signal", ""),
+                            "confidence": intel.get("confidence", 0.0),
+                            "risk_watch": intel.get("risk_watch", []),
+                            "catalysts": intel.get("key_catalysts", []),
+                        },
+                        "quality_gate": quality_gate,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            state = AgentState(
+                user_id="report-generator",
+                question=f"report:{code}",
+                stock_codes=[code],
+                trace_id=self.traces.new_trace(),
+            )
+            try:
+                raw = self.llm_gateway.generate(state, llm_prompt)
+                parsed = self._deep_safe_json_loads(raw)
+                if isinstance(parsed, dict) and parsed:
+                    generation_mode = "llm"
+                    llm_sections: list[dict[str, Any]] = []
+                    summary_text = str(parsed.get("executive_summary", "")).strip()
+                    if summary_text:
+                        llm_sections.append({"section_id": "executive_summary_v2", "title": "閹笛嗩攽閹芥顩?LLM)", "content": summary_text[:1400]})
+                    core_logic = list(parsed.get("core_logic", []) or [])
+                    if core_logic:
+                        llm_sections.append(
+                            {
+                                "section_id": "core_logic_v2",
+                                "title": "閺嶇绺鹃柅鏄忕帆(LLM)",
+                                "content": "\n".join(f"- {str(x)}" for x in core_logic[:8]),
+                            }
+                        )
+                    risk_matrix = list(parsed.get("risk_matrix", []) or [])
+                    if risk_matrix:
+                        llm_sections.append(
+                            {
+                                "section_id": "risk_matrix_v2",
+                                "title": "妞嬪酣娅撻惌鈺呮█(LLM)",
+                                "content": json.dumps(risk_matrix[:8], ensure_ascii=False),
+                            }
+                        )
+                    scenario = list(parsed.get("scenario_analysis", []) or [])
+                    if scenario:
+                        llm_sections.append(
+                            {
+                                "section_id": "scenario_v2",
+                                "title": "閹懏娅欓幒銊︾川(LLM)",
+                                "content": json.dumps(scenario[:6], ensure_ascii=False),
+                            }
+                        )
+                    if llm_sections:
+                        report_sections.extend(llm_sections)
+            except Exception as ex:
+                generation_error = str(ex)[:240]
+
         markdown = (
             f"# {req.stock_code} 分析报告\n\n"
             f"## 结论\n{query_result['answer']}\n\n"
-            f"## 证据\n"
+            "## 证据\n"
             + "\n".join(f"- {c['source_id']}: {c['excerpt']}" for c in query_result["citations"])
-            + "\n\n## 风险与反证\n需结合估值、流动性、政策扰动进行反证校验。"
+            + "\n\n## 风险与反证\n结合估值、流动性与政策扰动进行反证校验。"
             + "\n\n## 操作建议\n建议分批验证信号稳定性，避免一次性重仓。"
+        )
+        markdown += (
+            "\n\n## Data Quality Gate\n"
+            f"- status: {quality_gate['status']}\n"
+            f"- score: {float(quality_gate.get('score', 0.0) or 0.0):.2f}\n"
+            f"- reasons: {','.join(quality_reasons) or 'none'}\n"
+            f"- generation_mode: {generation_mode}\n"
+            + (f"- generation_error: {generation_error}\n" if generation_error else "")
         )
         self._reports[report_id] = {
             "report_id": report_id,
@@ -2605,6 +2774,16 @@ class AShareAgentService:
             "template_id": template_id,
             "evidence_refs": evidence_refs,
             "report_sections": report_sections,
+            "quality_gate": quality_gate,
+            "report_data_pack_summary": report_data_pack_summary,
+            "confidence_attribution": {
+                "citation_count": len(list(query_result.get("citations", []) or [])),
+                "history_sample_size": history_sample_size,
+                "predict_quality": str(predict_snapshot.get("data_quality", "unknown")),
+                "quality_score": float(quality_gate.get("score", 0.0) or 0.0),
+            },
+            "generation_mode": generation_mode,
+            "generation_error": generation_error,
         }
         user_id = None
         tenant_id = None
@@ -2638,30 +2817,375 @@ class AShareAgentService:
         resp["template_id"] = template_id
         resp["evidence_refs"] = evidence_refs
         resp["report_sections"] = report_sections
-        return resp
+        resp["quality_gate"] = quality_gate
+        resp["report_data_pack_summary"] = report_data_pack_summary
+        resp["confidence_attribution"] = {
+            "citation_count": len(list(query_result.get("citations", []) or [])),
+            "history_sample_size": history_sample_size,
+            "predict_quality": str(predict_snapshot.get("data_quality", "unknown")),
+            "quality_score": float(quality_gate.get("score", 0.0) or 0.0),
+        }
+        resp["generation_mode"] = generation_mode
+        resp["generation_error"] = generation_error
+        resp["stock_code"] = str(req.stock_code)
+        resp["report_type"] = str(req.report_type)
+        resp["result_level"] = "full"
+        resp["degrade"] = {
+            "active": bool(quality_reasons),
+            "code": "quality_degraded" if quality_reasons else "",
+            "reasons": list(dict.fromkeys(quality_reasons)),
+            "missing_data": list(dict.fromkeys(quality_reasons)),
+            "confidence_penalty": round(min(0.7, 0.15 * float(len(quality_reasons))), 4),
+            "user_message": "Report contains degraded segments; please review quality gate and evidence coverage."
+            if quality_reasons
+            else "Report quality is normal.",
+        }
+        sanitized = self._sanitize_report_payload(resp)
+        self._reports[report_id] = dict(sanitized)
+        return sanitized
 
     def report_get(self, report_id: str) -> dict[str, Any]:
-        """按 ID 查询报告。"""
+        """Get report by report_id."""
         report = self._reports.get(report_id)
         if not report:
             return {"error": "not_found", "report_id": report_id}
-        return report
+        return self._sanitize_report_payload(dict(report))
+
+    def _sanitize_report_text(self, raw: str) -> str:
+        """Normalize known mojibake fragments in report-facing Chinese text."""
+        text = str(raw or "")
+        replacements = {
+            # Common mojibake fragments observed in report fields.
+            "缂佹捁顔戦幗妯款洣": "Executive Summary",
+            "鐠囦焦宓佸〒鍛礋": "Evidence List",
+            "妞嬪酣娅撴稉搴″冀鐠?": "Risks And Counterpoints",
+            "閹垮秳缍斿楦款唴": "Action Plan",
+            "闁轰胶澧楀畵浣烘嫻閵娾晛娅ら梻鍌樺妿": "Data Quality Gate",
+            "闁圭瑳鍡╂斀闁硅姤顭堥々?LLM)": "LLM Summary",
+            "闁哄秶顭堢缓楣冩焻閺勫繒甯?LLM)": "Core Logic (LLM)",
+            "濡炲閰ｅ▍鎾绘儗閳哄懏鈻?LLM)": "Risk Matrix (LLM)",
+            "闁诡垰鎳忓▍娆撳箳閵婏妇宸?LLM)": "Scenario Analysis (LLM)",
+            "閺嶇绺鹃柅鏄忕帆(LLM)": "Core Logic (LLM)",
+            "閹躲儱鎲℃稉顓炵妇": "Report Center",
+            "閸掑棙鐎介幎銉ユ啞": "Analysis Report",
+            "妞嬪酣娅撴稉搴″冀鐠囦箺n": "Risks And Counterpoints\n",
+            # Also cover visible mojibake strings from historical payloads.
+            "缁撹鎽樿": "Executive Summary",
+            "璇佹嵁娓呭崟": "Evidence List",
+            "椋庨櫓涓庡弽璇?": "Risks And Counterpoints",
+            "鎿嶄綔寤鸿": "Action Plan",
+            "閺佺増宓佺拹銊╁櫤闂傘劎": "Data Quality Gate",
+            "閹笛嗩攽閹芥顩?LLM)": "LLM Summary",
+            "妞嬪酣娅撻惌鈺呮█(LLM)": "Risk Matrix (LLM)",
+            "閹懏娅欓幒銊︾川(LLM)": "Scenario Analysis (LLM)",
+        }
+        for bad, good in replacements.items():
+            text = text.replace(bad, good)
+        return text
+
+    def _sanitize_report_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Ensure report payload is readable and contains degrade metadata."""
+        body = dict(payload)
+        body["markdown"] = self._sanitize_report_text(str(body.get("markdown", "")))
+
+        sections: list[dict[str, Any]] = []
+        for row in list(body.get("report_sections", []) or []):
+            if not isinstance(row, dict):
+                continue
+            section = dict(row)
+            section["title"] = self._sanitize_report_text(str(section.get("title", "")))
+            section["content"] = self._sanitize_report_text(str(section.get("content", "")))
+            sections.append(section)
+        if sections:
+            body["report_sections"] = sections
+
+        degrade = body.get("degrade")
+        if not isinstance(degrade, dict):
+            reasons = list((body.get("quality_gate", {}) or {}).get("reasons", []) or [])
+            degrade = {
+                "active": bool(reasons),
+                "code": "quality_degraded" if reasons else "",
+                "reasons": reasons,
+                "missing_data": reasons,
+                "confidence_penalty": round(min(0.7, 0.15 * float(len(reasons))), 4),
+                "user_message": "Report contains degraded segments; please review quality gate and evidence coverage."
+                if reasons
+                else "Report quality is normal.",
+            }
+        body["degrade"] = degrade
+        if "result_level" not in body:
+            body["result_level"] = "full"
+        return body
+
+    def _build_report_task_partial_result(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Build a minimal usable report result for async task partial_ready state."""
+        req = ReportRequest(**payload)
+        query_result = self.query(
+            {
+                "user_id": req.user_id,
+                "question": f"璇峰厛缁欏嚭 {req.stock_code} {req.period} 鐨勬牳蹇冪粨璁轰笌璇佹嵁鎽樿",
+                "stock_codes": [str(req.stock_code).strip().upper()],
+            }
+        )
+        citations = list(query_result.get("citations", []) or [])
+        citation_lines = "\n".join(
+            f"- {str(item.get('source_id', ''))}: {str(item.get('excerpt', ''))}"
+            for item in citations[:8]
+        )
+        markdown = (
+            f"# {str(req.stock_code).strip().upper()} Analysis Report (Partial)\n\n"
+            f"## Summary\n{str(query_result.get('answer', '')).strip() or 'No summary available'}\n\n"
+            "## Evidence\n"
+            + (citation_lines or "- No evidence")
+            + "\n\n## Note\nThis is a minimum viable report. Full report is still running."
+        )
+        result = {
+            "report_id": f"partial-{uuid.uuid4().hex[:10]}",
+            "trace_id": str(query_result.get("trace_id", "")),
+            "stock_code": str(req.stock_code).strip().upper(),
+            "report_type": str(req.report_type),
+            "markdown": markdown,
+            "citations": citations,
+            "quality_gate": {
+                "status": "degraded",
+                "score": 0.55,
+                "reasons": ["partial_result"],
+            },
+            "report_data_pack_summary": {
+                "as_of": datetime.now(timezone.utc).isoformat(),
+                "history_sample_size": 0,
+                "predict_quality": "pending",
+                "predict_degrade_reasons": ["pending_full_pipeline"],
+                "intel_signal": "pending",
+                "intel_confidence": 0.0,
+                "news_count": 0,
+                "research_count": 0,
+                "macro_count": 0,
+            },
+            "generation_mode": "partial",
+            "generation_error": "",
+            "degrade": {
+                "active": True,
+                "code": "partial_result",
+                "reasons": ["partial_result"],
+                "missing_data": ["full_report_pending"],
+                "confidence_penalty": 0.45,
+                "user_message": "Minimum viable report returned. Full report is still being generated.",
+            },
+            "result_level": "partial",
+            "stage_progress": {"stage": "partial_ready", "progress": 0.45},
+        }
+        return self._sanitize_report_payload(result)
+
+    def _report_task_snapshot(self, task: dict[str, Any]) -> dict[str, Any]:
+        """Project internal task state to API-safe payload."""
+        has_full = bool(task.get("result_full"))
+        has_partial = bool(task.get("result_partial"))
+        level = "full" if has_full else "partial" if has_partial else "none"
+        return {
+            "task_id": str(task.get("task_id", "")),
+            "status": str(task.get("status", "queued")),
+            "progress": round(max(0.0, min(1.0, float(task.get("progress", 0.0) or 0.0))), 4),
+            "current_stage": str(task.get("current_stage", "")),
+            "stage_message": str(task.get("stage_message", "")),
+            "created_at": str(task.get("created_at", "")),
+            "updated_at": str(task.get("updated_at", "")),
+            "started_at": str(task.get("started_at", "")),
+            "completed_at": str(task.get("completed_at", "")),
+            "result_level": level,
+            "has_partial_result": has_partial,
+            "has_full_result": has_full,
+            "error_code": str(task.get("error_code", "")),
+            "error_message": str(task.get("error_message", "")),
+        }
+
+    def _run_report_task(self, task_id: str) -> None:
+        """Background worker for async report tasks."""
+        with self._report_task_lock:
+            task = self._report_tasks.get(task_id)
+            if not task:
+                return
+            if bool(task.get("cancel_requested", False)):
+                now_iso = datetime.now(timezone.utc).isoformat()
+                task["status"] = "cancelled"
+                task["updated_at"] = now_iso
+                task["completed_at"] = now_iso
+                task["stage_message"] = "Task was cancelled before start"
+                return
+            now_iso = datetime.now(timezone.utc).isoformat()
+            task["status"] = "running"
+            task["started_at"] = now_iso
+            task["updated_at"] = now_iso
+            task["current_stage"] = "partial"
+            task["stage_message"] = "Generating minimum viable result"
+            task["progress"] = max(float(task.get("progress", 0.0) or 0.0), 0.1)
+
+        try:
+            with self._report_task_lock:
+                task_payload = dict(self._report_tasks.get(task_id, {}).get("payload", {}))
+
+            partial = self._build_report_task_partial_result(task_payload)
+            with self._report_task_lock:
+                current = self._report_tasks.get(task_id)
+                if not current:
+                    return
+                if bool(current.get("cancel_requested", False)):
+                    now = datetime.now(timezone.utc).isoformat()
+                    current["status"] = "cancelled"
+                    current["updated_at"] = now
+                    current["completed_at"] = now
+                    current["stage_message"] = "Task cancelled"
+                    return
+                current["status"] = "partial_ready"
+                current["current_stage"] = "full_report"
+                current["stage_message"] = "Partial result ready; generating full report"
+                current["progress"] = max(float(current.get("progress", 0.0) or 0.0), 0.45)
+                current["result_partial"] = partial
+                current["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+            full = self.report_generate(task_payload)
+            with self._report_task_lock:
+                current = self._report_tasks.get(task_id)
+                if not current:
+                    return
+                if bool(current.get("cancel_requested", False)):
+                    now = datetime.now(timezone.utc).isoformat()
+                    current["status"] = "cancelled"
+                    current["updated_at"] = now
+                    current["completed_at"] = now
+                    current["stage_message"] = "Task cancelled"
+                    return
+                current["status"] = "completed"
+                current["current_stage"] = "done"
+                current["stage_message"] = "Report generation completed"
+                current["progress"] = 1.0
+                current["result_full"] = self._sanitize_report_payload(full if isinstance(full, dict) else {})
+                if not current.get("result_partial"):
+                    current["result_partial"] = current["result_full"]
+                now = datetime.now(timezone.utc).isoformat()
+                current["updated_at"] = now
+                current["completed_at"] = now
+        except Exception as ex:  # noqa: BLE001
+            with self._report_task_lock:
+                current = self._report_tasks.get(task_id)
+                if not current:
+                    return
+                now = datetime.now(timezone.utc).isoformat()
+                current["status"] = "failed"
+                current["current_stage"] = "failed"
+                current["stage_message"] = "Report task failed"
+                current["error_code"] = "report_task_failed"
+                current["error_message"] = str(ex)[:260]
+                current["updated_at"] = now
+                current["completed_at"] = now
+
+    def report_task_create(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create async report task and return status immediately."""
+        req = ReportRequest(**payload)
+        task_id = f"rpt-{uuid.uuid4().hex[:12]}"
+        now_iso = datetime.now(timezone.utc).isoformat()
+        task_payload = {
+            "user_id": str(req.user_id),
+            "stock_code": str(req.stock_code).strip().upper(),
+            "period": str(req.period),
+            "report_type": str(req.report_type),
+            "run_id": str(payload.get("run_id", "")).strip(),
+            "pool_snapshot_id": str(payload.get("pool_snapshot_id", "")).strip(),
+            "template_id": str(payload.get("template_id", "default")).strip() or "default",
+        }
+        token = str(payload.get("token", "")).strip()
+        if token:
+            task_payload["token"] = token
+
+        with self._report_task_lock:
+            self._report_tasks[task_id] = {
+                "task_id": task_id,
+                "status": "queued",
+                "progress": 0.0,
+                "current_stage": "queued",
+                "stage_message": "Task queued",
+                "created_at": now_iso,
+                "updated_at": now_iso,
+                "started_at": "",
+                "completed_at": "",
+                "error_code": "",
+                "error_message": "",
+                "cancel_requested": False,
+                "payload": task_payload,
+                "result_partial": None,
+                "result_full": None,
+            }
+        self._report_task_executor.submit(self._run_report_task, task_id)
+        return self.report_task_get(task_id)
+
+    def report_task_get(self, task_id: str) -> dict[str, Any]:
+        """Get async report task status."""
+        key = str(task_id or "").strip()
+        if not key:
+            return {"error": "not_found", "task_id": key}
+        with self._report_task_lock:
+            task = self._report_tasks.get(key)
+            if not task:
+                return {"error": "not_found", "task_id": key}
+            return self._report_task_snapshot(task)
+
+    def report_task_result(self, task_id: str) -> dict[str, Any]:
+        """Get best available report result for one task."""
+        key = str(task_id or "").strip()
+        if not key:
+            return {"error": "not_found", "task_id": key}
+        with self._report_task_lock:
+            task = self._report_tasks.get(key)
+            if not task:
+                return {"error": "not_found", "task_id": key}
+            full = task.get("result_full")
+            partial = task.get("result_partial")
+            if isinstance(full, dict):
+                return {"task_id": key, "status": str(task.get("status", "")), "result_level": "full", "result": full}
+            if isinstance(partial, dict):
+                return {"task_id": key, "status": str(task.get("status", "")), "result_level": "partial", "result": partial}
+            return {"task_id": key, "status": str(task.get("status", "")), "result_level": "none", "result": None}
+
+    def report_task_cancel(self, task_id: str) -> dict[str, Any]:
+        """Cancel async report task."""
+        key = str(task_id or "").strip()
+        if not key:
+            return {"error": "not_found", "task_id": key}
+        with self._report_task_lock:
+            task = self._report_tasks.get(key)
+            if not task:
+                return {"error": "not_found", "task_id": key}
+            status = str(task.get("status", ""))
+            if status in {"completed", "failed", "cancelled"}:
+                return self._report_task_snapshot(task)
+            task["cancel_requested"] = True
+            now_iso = datetime.now(timezone.utc).isoformat()
+            task["updated_at"] = now_iso
+            if status == "queued":
+                task["status"] = "cancelled"
+                task["current_stage"] = "cancelled"
+                task["stage_message"] = "Task cancelled"
+                task["completed_at"] = now_iso
+            else:
+                task["status"] = "cancelling"
+                task["stage_message"] = "Cancel requested; waiting for safe stop"
+            return self._report_task_snapshot(task)
 
     def ingest_market_daily(self, stock_codes: list[str]) -> dict[str, Any]:
-        """触发行情日级数据摄取。"""
+        """Trigger market-daily ingestion."""
         return self.ingestion.ingest_market_daily(stock_codes)
 
     def ingest_announcements(self, stock_codes: list[str]) -> dict[str, Any]:
-        """触发公告数据摄取。"""
+        """Trigger announcements ingestion."""
         return self.ingestion.ingest_announcements(stock_codes)
 
     def ingest_financials(self, stock_codes: list[str]) -> dict[str, Any]:
-        """触发财务快照数据摄取。"""
+        """Trigger financial snapshot ingestion."""
 
         return self.ingestion.ingest_financials(stock_codes)
 
     def ingest_news(self, stock_codes: list[str], limit: int = 20) -> dict[str, Any]:
-        """触发新闻数据摄取，并将长文本同步进本地 RAG 索引。"""
+        """Trigger news ingestion and sync rows into local RAG index."""
 
         result = self.ingestion.ingest_news(stock_codes, limit=limit)
         # News text contributes to event-driven analysis, so we index it as lightweight docs.
@@ -2676,7 +3200,7 @@ class AShareAgentService:
         return result
 
     def ingest_research_reports(self, stock_codes: list[str], limit: int = 20) -> dict[str, Any]:
-        """触发研报数据摄取，并同步进入本地文档索引。"""
+        """Trigger research-report ingestion and sync rows into local RAG index."""
 
         result = self.ingestion.ingest_research_reports(stock_codes, limit=limit)
         self._index_text_rows_to_rag(
@@ -2690,12 +3214,12 @@ class AShareAgentService:
         return result
 
     def ingest_macro_indicators(self, limit: int = 20) -> dict[str, Any]:
-        """触发宏观指标摄取。"""
+        """Trigger macro-indicator ingestion."""
 
         return self.ingestion.ingest_macro_indicators(limit=limit)
 
     def ingest_fund_snapshots(self, stock_codes: list[str]) -> dict[str, Any]:
-        """触发资金流向快照摄取。"""
+        """Trigger fund snapshot ingestion."""
 
         return self.ingestion.ingest_fund_snapshots(stock_codes)
 
@@ -2739,7 +3263,7 @@ class AShareAgentService:
                 continue
 
     def docs_upload(self, doc_id: str, filename: str, content: str, source: str) -> dict[str, Any]:
-        """上传文档原文。"""
+        """Upload raw document content."""
         result = self.ingestion.upload_doc(doc_id, filename, content, source)
         doc = self.ingestion.store.docs.get(doc_id, {})
         self.web.doc_upsert(
@@ -2768,7 +3292,7 @@ class AShareAgentService:
         return result
 
     def docs_index(self, doc_id: str) -> dict[str, Any]:
-        """执行文档分块索引。"""
+        """Index one uploaded document into chunks and write to retrieval stores."""
         result = self.ingestion.index_doc(doc_id)
         doc = self.ingestion.store.docs.get(doc_id, {})
         if str(result.get("status", "")) != "indexed":
@@ -2790,7 +3314,7 @@ class AShareAgentService:
                 # Product requirement: index completion should not create review gate.
                 needs_review=False,
             )
-            # 文档索引完成后，把 chunk 持久化到 RAG 资产库，供后续检索与治理复用。
+            # 鏂囨。绱㈠紩瀹屾垚鍚庯紝鎶?chunk 鎸佷箙鍖栧埌 RAG 璧勪骇搴擄紝渚涘悗缁绱笌娌荤悊澶嶇敤銆?
             self._persist_doc_chunks_to_rag(doc_id, doc)
             self.web.doc_pipeline_run_add(
                 doc_id=doc_id,
@@ -3012,7 +3536,7 @@ class AShareAgentService:
         }
 
     def rag_upload_from_payload(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """统一处理 RAG 附件上传：解码 -> 去重 -> docs_upload -> (可选)index -> 资产入库。"""
+        """Unified RAG upload flow: parse -> de-duplicate -> docs_upload -> optional index -> persist asset."""
         filename = str(payload.get("filename", "")).strip()
         if not filename:
             raise ValueError("filename is required")
@@ -3065,7 +3589,7 @@ class AShareAgentService:
 
         doc_id = str(payload.get("doc_id", "")).strip()
         if not doc_id:
-            # 用 hash 前缀生成稳定 doc_id，便于后续跨入口追踪同一文件。
+            # 鐢?hash 鍓嶇紑鐢熸垚绋冲畾 doc_id锛屼究浜庡悗缁法鍏ュ彛杩借釜鍚屼竴鏂囦欢銆?
             doc_id = f"ragdoc-{file_sha256[:12]}"
             if force_reupload:
                 doc_id = f"{doc_id}-{uuid.uuid4().hex[:4]}"
@@ -3135,7 +3659,7 @@ class AShareAgentService:
             if not normalized:
                 continue
             # Use sentence-like fragments so users can quickly understand preview intent.
-            for part in re.split(r"[。！？!?；;\n]", normalized):
+            for part in re.split(r"[銆傦紒锛??锛?\n]", normalized):
                 piece = self._rag_preview_trim(part, max_len=42)
                 if len(piece) < 12:
                     continue
@@ -3150,13 +3674,13 @@ class AShareAgentService:
             normalized = str(code or "").strip().upper()
             if not normalized:
                 continue
-            candidates.append(f"{normalized} 关键结论")
-            candidates.append(f"{normalized} 风险提示")
+            candidates.append(f"{normalized} 鍏抽敭缁撹")
+            candidates.append(f"{normalized} 椋庨櫓鎻愮ず")
         for tag in tags[:2]:
             normalized = str(tag or "").strip()
             if not normalized:
                 continue
-            candidates.append(f"{normalized} 核心信息")
+            candidates.append(f"{normalized} 鏍稿績淇℃伅")
 
         deduped: list[str] = []
         seen: set[str] = set()
@@ -3168,7 +3692,7 @@ class AShareAgentService:
             deduped.append(query.strip())
             if len(deduped) >= max_queries:
                 break
-        return deduped or ["文档核心结论"]
+        return deduped or ["鏂囨。鏍稿績缁撹"]
 
     def rag_retrieval_preview(
         self,
@@ -3309,7 +3833,7 @@ class AShareAgentService:
         }
 
     def rag_workflow_upload_and_index(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """业务入口：上传并立即索引，返回阶段时间线，便于前端给出可解释反馈。"""
+        """Business entrypoint: upload then index immediately and return timeline for frontend progress."""
         req = dict(payload or {})
         req["auto_index"] = True
         started = datetime.now(timezone.utc)
@@ -3416,7 +3940,7 @@ class AShareAgentService:
         return ""
 
     def _extract_text_from_upload_bytes(self, *, filename: str, raw_bytes: bytes, content_type: str = "") -> tuple[str, str]:
-        """从附件字节提取文本内容；无第三方解析器时执行可回退的轻量策略。"""
+        """Extract text from uploaded bytes; use lightweight fallbacks when third-party parsers are unavailable."""
         ext = ""
         idx = str(filename).rfind(".")
         if idx >= 0:
@@ -3466,7 +3990,7 @@ class AShareAgentService:
                     return text, ",".join(note_parts)
             except Exception:  # noqa: BLE001
                 note_parts.append("pdf_parser_unavailable")
-            # 无 pdf 解析库时的兜底：尝试抽取可见 ASCII 串，至少保留部分可检索内容。
+            # 鏃?pdf 瑙ｆ瀽搴撴椂鐨勫厹搴曪細灏濊瘯鎶藉彇鍙 ASCII 涓诧紝鑷冲皯淇濈暀閮ㄥ垎鍙绱㈠唴瀹广€?
             ascii_chunks = re.findall(rb"[A-Za-z0-9][A-Za-z0-9 ,.;:%()\-_/]{16,}", raw_bytes)
             decoded = " ".join(x.decode("latin1", errors="ignore") for x in ascii_chunks)
             note_parts.append("pdf_ascii_fallback")
@@ -3476,7 +4000,7 @@ class AShareAgentService:
         return self._decode_text_bytes(raw_bytes), ",".join(note_parts)
 
     def _persist_doc_chunks_to_rag(self, doc_id: str, doc: dict[str, Any]) -> None:
-        """把内存态文档 chunk 同步到 Web 持久层。"""
+        """Persist in-memory document chunks into the web-layer RAG storage."""
         chunks = [str(x) for x in doc.get("chunks", []) if str(x).strip()]
         if not chunks:
             return
@@ -3496,7 +4020,7 @@ class AShareAgentService:
                     "chunk_id": f"{doc_id}-c{idx}",
                     "chunk_no": idx,
                     "chunk_text": chunk,
-                    # 双轨中的“摘要/脱敏轨”：在线检索默认使用 redacted 文本。
+                    # 鍙岃建涓殑鈥滄憳瑕?鑴辨晱杞ㄢ€濓細鍦ㄧ嚎妫€绱㈤粯璁や娇鐢?redacted 鏂囨湰銆?
                     "chunk_text_redacted": self._redact_text(chunk),
                     "stock_codes": stock_codes,
                     "industry_tags": [],
@@ -3513,13 +4037,13 @@ class AShareAgentService:
 
     @staticmethod
     def _extract_stock_codes_from_text(text: str) -> list[str]:
-        """从文本中提取 SH/SZ 股票代码，用于检索时的标的过滤。"""
+        """Extract SH/SZ stock codes from free text for retrieval filtering."""
         items = re.findall(r"\b(?:SH|SZ)\d{6}\b", str(text or "").upper())
         return list(dict.fromkeys(items))
 
     @staticmethod
     def _redact_text(text: str) -> str:
-        """轻量脱敏：去除邮箱/手机号/连续证件号，降低共享语料风险。"""
+        """Lightweight redaction to remove email/phone/ID patterns from shared text."""
         value = str(text or "")
         value = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[REDACTED_EMAIL]", value)
         value = re.sub(r"\b1\d{10}\b", "[REDACTED_PHONE]", value)
@@ -3527,7 +4051,7 @@ class AShareAgentService:
         return value
 
     def evals_run(self, samples: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-        """运行评测并返回门禁结果。"""
+        """Run evals and return gate results."""
         result = self.eval_service.run_eval(samples)
         stable_prompt = self.prompts.get_stable_prompt("fact_qa")
         self.prompts.save_eval_result(
@@ -3547,20 +4071,20 @@ class AShareAgentService:
         return result
 
     def evals_get(self, eval_run_id: str) -> dict[str, Any]:
-        """查询评测任务状态。"""
+        """Get eval run status."""
         return {"eval_run_id": eval_run_id, "status": "not_persisted_in_mvp"}
 
     def scheduler_run(self, job_name: str) -> dict[str, Any]:
-        """手动触发一次调度任务运行。"""
+        """Manually trigger one scheduler job."""
         return self.scheduler.run_once(job_name)
 
     def scheduler_status(self) -> dict[str, Any]:
-        """查询所有调度任务状态。"""
+        """Return status for all scheduler jobs."""
         return self.scheduler.list_status()
 
     # ---------- Prediction domain methods ----------
     def predict_run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """执行量化预测任务。"""
+        """Run quant prediction task."""
         stock_codes = payload.get("stock_codes", [])
         pool_id = str(payload.get("pool_id", "")).strip()
         token = str(payload.get("token", "")).strip()
@@ -3572,7 +4096,74 @@ class AShareAgentService:
         if pool_id:
             result["pool_id"] = pool_id
         result["segment_metrics"] = self._predict_segment_metrics(result.get("results", []))
+        quality = self._predict_attach_quality(result)
+        # Expose metric provenance explicitly to avoid mixing simulated metrics into live confidence.
+        latest_eval = self.prediction.eval_latest()
+        metric_mode = str(latest_eval.get("metric_mode", "simulated")).strip() or "simulated"
+        result["metric_mode"] = metric_mode
+        result["metrics_note"] = str(latest_eval.get("metrics_note", ""))
+        if quality.get("data_quality") == "real" and metric_mode == "live":
+            result["metrics_live"] = dict(latest_eval.get("metrics", {}) or {})
+            result["metrics_simulated"] = {}
+        else:
+            result["metrics_live"] = {}
+            result["metrics_simulated"] = dict(latest_eval.get("metrics", {}) or {})
         return result
+
+    def _predict_attach_quality(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Derive prediction data quality labels for business UI rendering."""
+        items = list(result.get("results", []))
+        if not items:
+            payload = {
+                "data_quality": "degraded",
+                "degrade_reasons": ["empty_prediction_result"],
+                "source_coverage": {"total": 0, "real_history_count": 0, "synthetic_count": 0, "real_history_ratio": 0.0},
+            }
+            result.update(payload)
+            return payload
+
+        all_reasons: list[str] = []
+        real_history_count = 0
+        synthetic_count = 0
+        for item in items:
+            source = dict(item.get("source", {}) or {})
+            history_mode = str(source.get("history_data_mode", "unknown")).strip() or "unknown"
+            sample_size = int(source.get("history_sample_size", 0) or 0)
+            source_id = str(source.get("source_id", "")).strip().lower()
+            reasons: list[str] = []
+
+            # Quality gate rule: non-real history must be treated as degraded.
+            if history_mode != "real_history":
+                reasons.append("history_not_real")
+            if sample_size < 60:
+                reasons.append("history_sample_insufficient")
+            if bool(source.get("history_degraded", False)):
+                reasons.append("history_fetch_degraded")
+            if "mock" in source_id:
+                reasons.append("quote_source_mock")
+            if history_mode == "real_history":
+                real_history_count += 1
+            else:
+                synthetic_count += 1
+
+            dedup_reasons = list(dict.fromkeys(reasons))
+            item["data_quality"] = "degraded" if dedup_reasons else "real"
+            item["degrade_reasons"] = dedup_reasons
+            all_reasons.extend(dedup_reasons)
+
+        total = max(1, len(items))
+        quality = {
+            "data_quality": "real" if not all_reasons else "degraded",
+            "degrade_reasons": list(dict.fromkeys(all_reasons)),
+            "source_coverage": {
+                "total": len(items),
+                "real_history_count": real_history_count,
+                "synthetic_count": synthetic_count,
+                "real_history_ratio": round(float(real_history_count) / float(total), 4),
+            },
+        }
+        result.update(quality)
+        return quality
 
     def _predict_segment_metrics(self, items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
         if not items:
@@ -3627,19 +4218,19 @@ class AShareAgentService:
         return out
 
     def predict_get(self, run_id: str) -> dict[str, Any]:
-        """查询预测任务详情。"""
+        """Get prediction task details."""
         return self.prediction.get_prediction(run_id)
 
     def factor_snapshot(self, stock_code: str) -> dict[str, Any]:
-        """查询单股票因子快照。"""
+        """Get factor snapshot for one stock."""
         return self.prediction.get_factor_snapshot(stock_code)
 
     def predict_eval_latest(self) -> dict[str, Any]:
-        """查询最近一次预测评测摘要。"""
+        """Get latest prediction evaluation summary."""
         return self.prediction.eval_latest()
 
     def market_overview(self, stock_code: str) -> dict[str, Any]:
-        """返回单标的结构化行情总览（实时+历史+公告+趋势）。"""
+        """Return structured market overview: realtime, history, announcements, and trends."""
         code = stock_code.upper().replace(".", "")
         if self._needs_quote_refresh(code):
             self.ingest_market_daily([code])
@@ -3712,8 +4303,8 @@ class AShareAgentService:
         key_catalysts: list[dict[str, Any]] = []
         risk_watch: list[dict[str, Any]] = []
 
-        positive_keywords = ("增长", "增持", "中标", "回购", "改善", "突破", "上调", "buy", "outperform")
-        negative_keywords = ("下滑", "减持", "诉讼", "处罚", "亏损", "风险", "下调", "sell", "underperform")
+        positive_keywords = ("澧為暱", "澧炴寔", "涓爣", "鍥炶喘", "鏀瑰杽", "绐佺牬", "涓婅皟", "buy", "outperform")
+        negative_keywords = ("涓嬫粦", "鍑忔寔", "璇夎", "澶勭綒", "浜忔崯", "椋庨櫓", "涓嬭皟", "sell", "underperform")
 
         def add_evidence(
             *,
@@ -3795,8 +4386,8 @@ class AShareAgentService:
         for row in macro[-4:]:
             metric_name = str(row.get("metric_name", "")).strip()
             metric_value = str(row.get("metric_value", "")).strip()
-            title = metric_name or "宏观指标"
-            summary = f"{metric_name}={metric_value}，报告日={row.get('report_date', '')}".strip("，")
+            title = metric_name or "macro_indicator"
+            summary = f"{metric_name}={metric_value}, report_date={row.get('report_date', '')}".strip(",")
             add_evidence(
                 kind="macro",
                 title=title,
@@ -3811,13 +4402,13 @@ class AShareAgentService:
 
         if fund_row:
             fund_summary = (
-                f"主力={float(fund_row.get('main_inflow', 0.0) or 0.0):.2f}, "
-                f"大单={float(fund_row.get('large_inflow', 0.0) or 0.0):.2f}, "
-                f"小单={float(fund_row.get('small_inflow', 0.0) or 0.0):.2f}"
+                f"涓诲姏={float(fund_row.get('main_inflow', 0.0) or 0.0):.2f}, "
+                f"澶у崟={float(fund_row.get('large_inflow', 0.0) or 0.0):.2f}, "
+                f"灏忓崟={float(fund_row.get('small_inflow', 0.0) or 0.0):.2f}"
             )
             add_evidence(
                 kind="fund",
-                title="资金流向",
+                title="璧勯噾娴佸悜",
                 summary=fund_summary,
                 source_id=str(fund_row.get("source_id", "")),
                 source_url=str(fund_row.get("source_url", "")),
@@ -3825,7 +4416,7 @@ class AShareAgentService:
                 reliability_score=float(fund_row.get("reliability_score", 0.0) or 0.0),
                 retrieval_track="fund_flow",
             )
-            classify_row("资金流向", fund_summary, fund_row, kind="fund", default_signal="neutral")
+            classify_row("璧勯噾娴佸悜", fund_summary, fund_row, kind="fund", default_signal="neutral")
 
         for row in events[-3:]:
             title = str(row.get("title", "")).strip()
@@ -3914,7 +4505,7 @@ class AShareAgentService:
             event_calendar.append(
                 {
                     "date": str(row.get("event_time", ""))[:10],
-                    "title": str(row.get("title", "公司公告"))[:120],
+                    "title": str(row.get("title", "鍏徃鍏憡"))[:120],
                     "event_type": "company",
                     "source_id": str(row.get("source_id", "")),
                 }
@@ -3923,7 +4514,7 @@ class AShareAgentService:
             event_calendar.append(
                 {
                     "date": str(row.get("report_date", row.get("event_time", "")))[:10],
-                    "title": f"{str(row.get('metric_name', '宏观指标'))} {str(row.get('metric_value', ''))}".strip(),
+                    "title": f"{str(row.get('metric_name', '瀹忚鎸囨爣'))} {str(row.get('metric_value', ''))}".strip(),
                     "event_type": "macro",
                     "source_id": str(row.get("source_id", "")),
                 }
@@ -3932,7 +4523,7 @@ class AShareAgentService:
             event_calendar.append(
                 {
                     "date": (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d"),
-                    "title": "下一交易日复核窗口",
+                    "title": "Next trading day re-check window",
                     "event_type": "review",
                     "source_id": "system",
                 }
@@ -3988,19 +4579,19 @@ class AShareAgentService:
             degrade_level = "degraded"
         elif degrade_reasons:
             degrade_level = "watch"
-        # 降级时下调置信度，避免“证据弱但动作过激”。
+        # 闄嶇骇鏃朵笅璋冪疆淇″害锛岄伩鍏嶁€滆瘉鎹急浣嗗姩浣滆繃婵€鈥濄€?
         if degrade_level == "degraded":
             confidence = max(0.30, confidence - 0.18)
         elif degrade_level == "watch":
             confidence = max(0.33, confidence - 0.08)
 
-        cadence = "一次性观察"
+        cadence = "single-step execution"
         if signal == "buy":
-            cadence = "分3笔建仓（40%/30%/30%）"
+            cadence = "build in 3 batches (40%/30%/30%)"
         elif signal == "hold":
-            cadence = "维持仓位，T+1复核后再调整"
+            cadence = "maintain position and re-check on T+1"
         elif signal == "reduce":
-            cadence = "分2笔降仓（60%/40%）"
+            cadence = "reduce in 2 batches (60%/40%)"
         review_hours = 6 if risk_level == "high" else 24 if risk_level == "medium" else 48
 
         execution_plan = {
@@ -4013,17 +4604,17 @@ class AShareAgentService:
         }
 
         trigger_conditions = [
-            "趋势维持（MA20>=MA60 且 20日动量不转负）",
-            "资金流向不显著恶化（主力净流入不连续转负）",
-            "核心证据更新频率维持（日内/日级别有新证据）",
+            "Trend remains intact (MA20>=MA60 and 20-day momentum non-negative)",
+            "Fund flow does not deteriorate significantly",
+            "Core evidence keeps updating at daily cadence",
         ]
         invalidation_conditions = [
-            "关键风险事件落地且方向偏负面",
-            "趋势反转（MA20<MA60 且动量连续走弱）",
-            "波动或回撤超过风险阈值（volatility_20 / max_drawdown_60）",
+            "Key risk events land with clear negative direction",
+            "Trend reverses (MA20<MA60 with weakening momentum)",
+            "Volatility or drawdown breaches the configured threshold",
         ]
         if risk_level == "high":
-            trigger_conditions.append("仅在风险收敛后考虑恢复仓位节奏")
+            trigger_conditions.append("Only re-add exposure after risk converges")
         return {
             "stock_code": code,
             "time_horizon": horizon,
@@ -4379,25 +4970,25 @@ class AShareAgentService:
         for item in reflections[:5]:
             reflection_brief.append(str(item.get("reflection_content", ""))[:120])
         return (
-            "你是A股投资复盘助手。请只输出一个JSON对象，不要输出Markdown。\n"
+            "浣犳槸A鑲℃姇璧勫鐩樺姪鎵嬨€傝鍙緭鍑轰竴涓狫SON瀵硅薄锛屼笉瑕佽緭鍑篗arkdown銆俓n"
             "JSON schema:\n"
             "{\n"
-            '  "summary": "一句话总结，<=120字",\n'
-            '  "insights": ["洞察1", "洞察2"],\n'
-            '  "lessons": ["教训1", "教训2"],\n'
+            '  "summary": "涓€鍙ヨ瘽鎬荤粨锛?=120瀛?,\n'
+            '  "insights": ["娲炲療1", "娲炲療2"],\n'
+            '  "lessons": ["鏁欒1", "鏁欒2"],\n'
             '  "confidence": 0.0\n'
             "}\n\n"
-            f"日志类型: {journal.get('journal_type', '')}\n"
-            f"股票: {journal.get('stock_code', '')}\n"
-            f"决策类型: {journal.get('decision_type', '')}\n"
-            f"日志标题: {journal.get('title', '')}\n"
-            f"日志正文: {journal.get('content', '')}\n"
-            f"历史复盘摘要: {json.dumps(reflection_brief, ensure_ascii=False)}\n"
-            f"关注重点: {focus}\n"
-            "要求:\n"
-            "1) 洞察聚焦可执行改进，不给买卖指令。\n"
-            "2) 每条洞察/教训控制在40字内。\n"
-            "3) confidence范围[0,1]。"
+            f"鏃ュ織绫诲瀷: {journal.get('journal_type', '')}\n"
+            f"鑲＄エ: {journal.get('stock_code', '')}\n"
+            f"鍐崇瓥绫诲瀷: {journal.get('decision_type', '')}\n"
+            f"鏃ュ織鏍囬: {journal.get('title', '')}\n"
+            f"鏃ュ織姝ｆ枃: {journal.get('content', '')}\n"
+            f"鍘嗗彶澶嶇洏鎽樿: {json.dumps(reflection_brief, ensure_ascii=False)}\n"
+            f"鍏虫敞閲嶇偣: {focus}\n"
+            "瑕佹眰:\n"
+            "1) 娲炲療鑱氱劍鍙墽琛屾敼杩涳紝涓嶇粰涔板崠鎸囦护銆俓n"
+            "2) 姣忔潯娲炲療/鏁欒鎺у埗鍦?0瀛楀唴銆俓n"
+            "3) confidence range must be within [0,1]."
         )
 
     def _journal_validate_ai_reflection_payload(self, payload: Any) -> dict[str, Any]:
@@ -4410,9 +5001,9 @@ class AShareAgentService:
         lessons = self._journal_normalize_items(payload.get("lessons", []))
         confidence = max(0.0, min(1.0, float(payload.get("confidence", 0.0) or 0.0)))
         if not insights:
-            insights = ["建议复核证据完整性与触发条件，避免单因子决策。"]
+            insights = ["Review evidence completeness and trigger conditions before making decisions."]
         if not lessons:
-            lessons = ["执行前明确失效条件和复核时间，降低主观偏差。"]
+            lessons = ["Define invalidation conditions and re-check schedule before execution."]
         return {
             "summary": summary[:600],
             "insights": insights,
@@ -4424,14 +5015,14 @@ class AShareAgentService:
         stock = str(journal.get("stock_code", "")).strip()
         decision = str(journal.get("decision_type", "")).strip() or "unknown"
         return {
-            "summary": f"{stock or '该标的'}的{decision}决策已记录，建议围绕触发条件与失效条件做闭环复盘。",
+            "summary": f"Journal for {stock or 'this ticker'} ({decision}) recorded. Re-check trigger and invalidation conditions.",
             "insights": [
-                "将决策依据拆成可验证指标，避免叙事先行。",
-                "补充仓位约束与止损阈值，降低执行偏差。",
+                "Break decision basis into verifiable indicators instead of narrative-first reasoning.",
+                "Add position constraints and stop-loss thresholds to reduce execution bias.",
             ],
             "lessons": [
-                "复盘时对比预期与实际差异，更新下次决策模板。",
-                "记录失败样本与边界条件，优先优化高频错误。",
+                "Compare expected vs actual outcomes and update the next decision template.",
+                "Capture failed samples and boundary conditions to prioritize high-impact fixes.",
             ],
             "confidence": 0.46,
         }
@@ -4507,7 +5098,7 @@ class AShareAgentService:
             prompt = self._journal_build_ai_reflection_prompt(
                 journal=journal,
                 reflections=reflections,
-                focus=focus or "请强调执行偏差、证据缺口和可执行改进。",
+                focus=focus or "Please emphasize execution bias, evidence gaps, and actionable improvements.",
             )
             try:
                 raw = self.llm_gateway.generate(state, prompt)
@@ -4535,10 +5126,10 @@ class AShareAgentService:
             error_code=error_code,
             error_message=error_message,
         )
-        # 输出生成耗时，方便后续排查“AI复盘慢/失败”的具体链路。
+        # 杈撳嚭鐢熸垚鑰楁椂锛屾柟渚垮悗缁帓鏌モ€淎I澶嶇洏鎱?澶辫触鈥濈殑鍏蜂綋閾捐矾銆?
         latency_ms = int((time.perf_counter() - started_at) * 1000)
         result["latency_ms"] = latency_ms
-        # 每次生成都记录质量日志，便于运维统计 fallback/failed 比例与延迟分布。
+        # 姣忔鐢熸垚閮借褰曡川閲忔棩蹇楋紝渚夸簬杩愮淮缁熻 fallback/failed 姣斾緥涓庡欢杩熷垎甯冦€?
         try:
             _ = self.web.journal_ai_generation_log_add(
                 token,
@@ -4577,11 +5168,9 @@ class AShareAgentService:
             "然后",
             "这个",
             "那个",
-            "进行",
             "需要",
             "已经",
             "当前",
-            "本次",
             "计划",
             "复盘",
             "日志",
@@ -4627,7 +5216,7 @@ class AShareAgentService:
         limit: int = 400,
         timeline_days: int = 30,
     ) -> dict[str, Any]:
-        # 聚合层统一输出业务洞察，前端无需再拼接多个接口。
+        # 鑱氬悎灞傜粺涓€杈撳嚭涓氬姟娲炲療锛屽墠绔棤闇€鍐嶆嫾鎺ュ涓帴鍙ｃ€?
         safe_window_days = max(7, min(3650, int(window_days)))
         safe_limit = max(20, min(2000, int(limit)))
         safe_timeline_days = max(7, min(safe_window_days, int(timeline_days)))
@@ -4690,7 +5279,11 @@ class AShareAgentService:
         return self.web.report_versions(token, report_id)
 
     def report_export(self, token: str, report_id: str) -> dict[str, Any]:
-        return self.web.report_export(token, report_id)
+        payload = self.web.report_export(token, report_id)
+        if "error" in payload:
+            return payload
+        payload["markdown"] = self._sanitize_report_text(str(payload.get("markdown", "")))
+        return payload
 
     def docs_list(self, token: str) -> list[dict[str, Any]]:
         return self.web.docs_list(token)
@@ -4700,7 +5293,7 @@ class AShareAgentService:
 
     def docs_review_action(self, token: str, doc_id: str, action: str, comment: str = "") -> dict[str, Any]:
         result = self.web.docs_review_action(token, doc_id, action, comment)
-        # 审核动作需要同步到 chunk 生效状态，避免“文档状态已改但检索仍命中旧片段”。
+        # 瀹℃牳鍔ㄤ綔闇€瑕佸悓姝ュ埌 chunk 鐢熸晥鐘舵€侊紝閬垮厤鈥滄枃妗ｇ姸鎬佸凡鏀逛絾妫€绱粛鍛戒腑鏃х墖娈碘€濄€?
         if action == "approve":
             self.web.rag_doc_chunk_set_status_by_doc(doc_id=doc_id, status="active")
             self.web.rag_upload_asset_set_status(doc_id=doc_id, status="active", parse_note="review_approved")
@@ -4750,7 +5343,7 @@ class AShareAgentService:
         *,
         context_window: int = 1,
     ) -> dict[str, Any]:
-        """Return chunk detail with nearby context for定位查看."""
+        """Return chunk detail with nearby context for瀹氫綅鏌ョ湅."""
         return self.web.rag_doc_chunk_get_detail(
             token,
             chunk_id=chunk_id,
@@ -4938,7 +5531,7 @@ class AShareAgentService:
         )
 
     def _deep_round_try_acquire(self, session_id: str) -> bool:
-        """会话级互斥：同一 session 同时仅允许一个 round 在执行。"""
+        """Session-level mutex: allow only one round per session at the same time."""
         with self._deep_round_mutex:
             if session_id in self._deep_round_inflight:
                 return False
@@ -4946,7 +5539,7 @@ class AShareAgentService:
             return True
 
     def _deep_round_release(self, session_id: str) -> None:
-        """释放会话执行锁，确保异常路径也不会永久占用。"""
+        """Release the session round lock even on exceptional paths."""
         with self._deep_round_mutex:
             self._deep_round_inflight.discard(session_id)
 
@@ -4960,7 +5553,7 @@ class AShareAgentService:
         round_no: int,
         event_seq: int,
     ) -> dict[str, Any]:
-        """统一补齐 DeepThink 流事件的元字段，避免前后端协议分叉。"""
+        """Attach common metadata fields to each DeepThink stream event."""
         payload = dict(data)
         payload.setdefault("session_id", session_id)
         payload.setdefault("round_id", round_id)
@@ -4990,13 +5583,13 @@ class AShareAgentService:
         title = f"DeepThink R{round_no} {stock_code or 'UNASSIGNED'} {signal}".strip()
         content_lines = [
             f"[DeepThink] session={session_id}, round={round_id}, round_no={round_no}",
-            f"问题: {question}",
-            f"结论: signal={signal}, confidence={confidence:.4f}, disagreement={float(business_summary.get('disagreement_score', 0.0) or 0.0):.4f}",
-            f"触发条件: {str(business_summary.get('trigger_condition', ''))}",
-            f"失效条件: {str(business_summary.get('invalidation_condition', ''))}",
-            f"复核建议: {str(business_summary.get('review_time_hint', 'T+1 日内复核'))}",
-            f"风险偏好: {str(business_summary.get('risk_bias', ''))}, 市场状态: {str(business_summary.get('market_regime', ''))}",
-            f"冲突源: {','.join(str(x) for x in list(business_summary.get('top_conflict_sources', []))[:6]) or 'none'}",
+            f"闂: {question}",
+            f"缁撹: signal={signal}, confidence={confidence:.4f}, disagreement={float(business_summary.get('disagreement_score', 0.0) or 0.0):.4f}",
+            f"瑙﹀彂鏉′欢: {str(business_summary.get('trigger_condition', ''))}",
+            f"澶辨晥鏉′欢: {str(business_summary.get('invalidation_condition', ''))}",
+            f"澶嶆牳寤鸿: {str(business_summary.get('review_time_hint', 'T+1 鏃ュ唴澶嶆牳'))}",
+            f"椋庨櫓鍋忓ソ: {str(business_summary.get('risk_bias', ''))}, 甯傚満鐘舵€? {str(business_summary.get('market_regime', ''))}",
+            f"鍐茬獊婧? {','.join(str(x) for x in list(business_summary.get('top_conflict_sources', []))[:6]) or 'none'}",
         ]
         tags = [
             "deepthink",
@@ -5100,12 +5693,12 @@ class AShareAgentService:
             }
 
     def deep_think_run_round_stream_events(self, session_id: str, payload: dict[str, Any] | None = None):
-        """V2 真流式执行：执行过程中逐步产出事件，并在结束时返回会话快照。"""
+        """V2 true streaming execution: emit round events incrementally and return session snapshot on completion."""
         payload = payload or {}
         started_at = time.perf_counter()
         session = self.web.deep_think_get_session(session_id)
         if not session:
-            # 统一以 done 收口，便于前端和测试代码复用同一结束逻辑。
+            # 缁熶竴浠?done 鏀跺彛锛屼究浜庡墠绔拰娴嬭瘯浠ｇ爜澶嶇敤鍚屼竴缁撴潫閫昏緫銆?
             yield {"event": "done", "data": {"ok": False, "error": "not_found", "session_id": session_id}}
             return {"error": "not_found", "session_id": session_id}
         if str(session.get("status", "")) == "completed":
@@ -5131,7 +5724,7 @@ class AShareAgentService:
         stream_events: list[dict[str, Any]] = []
 
         def emit(event_name: str, data: dict[str, Any], *, persist: bool = True) -> dict[str, Any]:
-            # 所有事件统一走此入口，保证 event_seq 与元字段完整。
+            # 鎵€鏈変簨浠剁粺涓€璧版鍏ュ彛锛屼繚璇?event_seq 涓庡厓瀛楁瀹屾暣銆?
             nonlocal event_seq, first_event_ms
             event_seq += 1
             event = self._deep_stream_event(
@@ -5183,10 +5776,10 @@ class AShareAgentService:
                 "consensus_signal": "hold",
                 "disagreement_score": 0.0,
                 "conflict_sources": [],
-                "counter_view": "无显著反方观点",
+                "counter_view": "no significant counter view",
             }
 
-            # 先发 round_started，确保前端在计算前就能拿到“已开始执行”的反馈。
+            # 鍏堝彂 round_started锛岀‘淇濆墠绔湪璁＄畻鍓嶅氨鑳芥嬁鍒扳€滃凡寮€濮嬫墽琛屸€濈殑鍙嶉銆?
             yield emit(
                 "round_started",
                 {
@@ -5209,7 +5802,7 @@ class AShareAgentService:
                 "progress",
                 {
                     "stage": "planning",
-                    "message": "任务拆解完成，开始执行多 Agent 协商。",
+                    "message": "Task planning completed. Starting multi-agent execution.",
                 },
             )
 
@@ -5223,14 +5816,14 @@ class AShareAgentService:
                         agent="supervisor_agent",
                         signal="hold",
                         confidence=0.92,
-                        reason="预算已触顶，停止继续推理并输出保守结论。",
+                        reason="Budget cap reached. Stop additional reasoning and return conservative output.",
                         evidence_ids=[],
                         risk_tags=["budget_exceeded"],
                     )
                 )
                 arbitration = self._arbitrate_opinions(opinions)
             else:
-                yield emit("progress", {"stage": "data_refresh", "message": "刷新行情与历史样本。"})
+                yield emit("progress", {"stage": "data_refresh", "message": "Refreshing market and history samples"})
                 if self._needs_quote_refresh(code):
                     self.ingest_market_daily([code])
                 if self._needs_history_refresh(code):
@@ -5264,8 +5857,8 @@ class AShareAgentService:
                 pred = self.predict_run({"stock_codes": [code], "horizons": ["20d"]})
                 horizon_map = {h["horizon"]: h for h in pred["results"][0]["horizons"]} if pred.get("results") else {}
                 quant_20 = horizon_map.get("20d", {})
-                # 引入实时情报阶段：由模型侧 websearch 能力输出结构化情报。
-                yield emit("progress", {"stage": "intel_search", "message": "正在检索宏观/行业/未来事件情报。"})
+                # 寮曞叆瀹炴椂鎯呮姤闃舵锛氱敱妯″瀷渚?websearch 鑳藉姏杈撳嚭缁撴瀯鍖栨儏鎶ャ€?
+                yield emit("progress", {"stage": "intel_search", "message": "Collecting macro/industry/future-event intelligence"})
                 intel_payload = self._deep_fetch_intel_via_llm_websearch(
                     stock_code=code,
                     question=question,
@@ -5299,7 +5892,7 @@ class AShareAgentService:
                         },
                     },
                 )
-                # 单独下发状态事件，便于前端或测试脚本快速判断是否命中外部实时检索。
+                # 鍗曠嫭涓嬪彂鐘舵€佷簨浠讹紝渚夸簬鍓嶇鎴栨祴璇曡剼鏈揩閫熷垽鏂槸鍚﹀懡涓閮ㄥ疄鏃舵绱€?
                 yield emit(
                     "intel_status",
                     {
@@ -5312,7 +5905,7 @@ class AShareAgentService:
                 )
                 yield emit("calendar_watchlist", {"items": list(intel_payload.get("calendar_watchlist", []))[:8]})
 
-                yield emit("progress", {"stage": "debate", "message": "生成多 Agent 观点。"})
+                yield emit("progress", {"stage": "debate", "message": "Generating multi-agent viewpoints"})
                 rule_core = self._build_rule_based_debate_opinions(question, trend, quote, quant_20)
                 core_opinions = rule_core
                 if self.settings.llm_external_enabled and self.llm_gateway.providers:
@@ -5320,7 +5913,7 @@ class AShareAgentService:
                     if llm_core:
                         core_opinions = llm_core
 
-                # 将实时情报引用 URL 纳入证据链，后续导出与解释可追溯。
+                # 灏嗗疄鏃舵儏鎶ュ紩鐢?URL 绾冲叆璇佹嵁閾撅紝鍚庣画瀵煎嚭涓庤В閲婂彲杩芥函銆?
                 intel_urls = [str(x.get("url", "")).strip() for x in list(intel_payload.get("citations", [])) if isinstance(x, dict)]
                 evidence_ids = [x for x in {str(quote.get("source_id", "")), str((bars[-1] if bars else {}).get("source_id", "")), *intel_urls} if x]
                 extra_opinions = [
@@ -5328,7 +5921,7 @@ class AShareAgentService:
                         agent="macro_agent",
                         signal="buy" if trend.get("ma60_slope", 0.0) > 0 and trend.get("momentum_20", 0.0) > 0 else "hold",
                         confidence=0.63,
-                        reason=f"宏观侧评估：ma60_slope={trend.get('ma60_slope', 0.0):.4f}, momentum_20={trend.get('momentum_20', 0.0):.4f}",
+                        reason=f"瀹忚渚ц瘎浼帮細ma60_slope={trend.get('ma60_slope', 0.0):.4f}, momentum_20={trend.get('momentum_20', 0.0):.4f}",
                         evidence_ids=evidence_ids,
                         risk_tags=["macro_regime_check"],
                     ),
@@ -5339,7 +5932,7 @@ class AShareAgentService:
                         else "hold",
                         confidence=0.61,
                         reason=(
-                            f"执行层建议：pct_change={float(quote.get('pct_change', 0.0)):.2f}, "
+                            f"鎵ц灞傚缓璁細pct_change={float(quote.get('pct_change', 0.0)):.2f}, "
                             f"volatility_20={trend.get('volatility_20', 0.0):.4f}"
                         ),
                         evidence_ids=evidence_ids,
@@ -5349,7 +5942,7 @@ class AShareAgentService:
                         agent="compliance_agent",
                         signal="reduce" if trend.get("max_drawdown_60", 0.0) > 0.2 else "hold",
                         confidence=0.78,
-                        reason=f"合规与风控底线：max_drawdown_60={trend.get('max_drawdown_60', 0.0):.4f}",
+                        reason=f"鍚堣涓庨鎺у簳绾匡細max_drawdown_60={trend.get('max_drawdown_60', 0.0):.4f}",
                         evidence_ids=evidence_ids,
                         risk_tags=["compliance_guardrail"],
                     ),
@@ -5357,7 +5950,7 @@ class AShareAgentService:
                         agent="critic_agent",
                         signal="hold",
                         confidence=0.7,
-                        reason="质检视角：已检查证据数量、信号冲突与风险标签完整性。",
+                        reason="Critic review completed: checked evidence coverage, signal conflicts, and risk-marker completeness.",
                         evidence_ids=evidence_ids,
                         risk_tags=["critic_review"],
                     ),
@@ -5385,7 +5978,7 @@ class AShareAgentService:
                                 agent="macro_agent",
                                 signal=intel_signal,
                                 confidence=intel_conf,
-                                reason=f"实时情报融合：{str(intel_decision.get('rationale', '未提供详细解释'))}",
+                                reason=f"Realtime intel fusion: {str(intel_decision.get('rationale', 'no rationale'))}",
                                 evidence_ids=evidence_ids,
                                 risk_tags=["intel_websearch"],
                             )
@@ -5398,7 +5991,7 @@ class AShareAgentService:
                         {
                             "task_id": f"r{round_no}-replan-1",
                             "agent": "critic_agent",
-                            "title": "触发补证重规划：查找冲突证据并解释分歧",
+                            "title": "Trigger evidence re-plan: locate conflict evidence and explain divergence",
                             "priority": "high",
                         }
                     )
@@ -5408,7 +6001,7 @@ class AShareAgentService:
                     agent="supervisor_agent",
                     signal=str(pre_arb["consensus_signal"]),
                     confidence=round(1.0 - float(pre_arb["disagreement_score"]), 4),
-                    reason=f"监督者仲裁：冲突源={','.join(pre_arb['conflict_sources']) or 'none'}",
+                    reason=f"Supervisor arbitration: conflict_sources={' , '.join(pre_arb['conflict_sources']) or 'none'}",
                     evidence_ids=evidence_ids,
                     risk_tags=["supervisor_arbitration"],
                 )
@@ -5417,7 +6010,7 @@ class AShareAgentService:
                 if budget_usage["warn"]:
                     arbitration["conflict_sources"] = list(dict.fromkeys(list(arbitration["conflict_sources"]) + ["budget_warning"]))
 
-            # 逐条输出 Agent 增量与最终观点，保证前端能持续刷新。
+            # 閫愭潯杈撳嚭 Agent 澧為噺涓庢渶缁堣鐐癸紝淇濊瘉鍓嶇鑳芥寔缁埛鏂般€?
             for opinion in opinions:
                 reason = str(opinion.get("reason", ""))
                 pivot = max(1, min(len(reason), len(reason) // 2))
@@ -5464,7 +6057,7 @@ class AShareAgentService:
                 stop_reason=stop_reason,
             )
             yield emit("business_summary", dict(business_summary))
-            # DeepThink -> Journal 自动落库：round_id 作为幂等键，避免重复写入。
+            # DeepThink -> Journal 鑷姩钀藉簱锛歳ound_id 浣滀负骞傜瓑閿紝閬垮厤閲嶅鍐欏叆銆?
             journal_link = self._deep_auto_link_journal_entry(
                 session_id=session_id,
                 round_id=round_id,
@@ -5494,7 +6087,7 @@ class AShareAgentService:
                 opinions=opinions,
                 session_status=session_status,
             )
-            # 业务摘要通过会话快照透传给同步接口调用方，便于前端直接展示。
+            # 涓氬姟鎽樿閫氳繃浼氳瘽蹇収閫忎紶缁欏悓姝ユ帴鍙ｈ皟鐢ㄦ柟锛屼究浜庡墠绔洿鎺ュ睍绀恒€?
             snapshot["business_summary"] = business_summary
             snapshot["journal_link"] = journal_link
 
@@ -5550,7 +6143,7 @@ class AShareAgentService:
                 },
             )
 
-            # 统一按生成顺序落库，确保重放事件与实时事件顺序一致。
+            # 缁熶竴鎸夌敓鎴愰『搴忚惤搴擄紝纭繚閲嶆斁浜嬩欢涓庡疄鏃朵簨浠堕『搴忎竴鑷淬€?
             self.web.deep_think_replace_round_events(
                 session_id=session_id,
                 round_id=round_id,
@@ -5578,7 +6171,7 @@ class AShareAgentService:
             return snapshot
         except Exception as ex:  # noqa: BLE001
             message = str(ex) or "deep_think_round_failed"
-            # 失败场景也发 error + done，前端可统一处理结束态。
+            # 澶辫触鍦烘櫙涔熷彂 error + done锛屽墠绔彲缁熶竴澶勭悊缁撴潫鎬併€?
             error_event = emit("error", {"ok": False, "error": message}, persist=False)
             done_event = emit("done", {"ok": False, "error": message}, persist=False)
             yield error_event
@@ -5601,7 +6194,7 @@ class AShareAgentService:
             self._deep_round_release(session_id)
 
     def deep_think_run_round(self, session_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        # V1 兼容路径：复用同一执行核心，但消费掉流事件，仅返回最终快照。
+        # V1 鍏煎璺緞锛氬鐢ㄥ悓涓€鎵ц鏍稿績锛屼絾娑堣垂鎺夋祦浜嬩欢锛屼粎杩斿洖鏈€缁堝揩鐓с€?
         gen = self.deep_think_run_round_stream_events(session_id, payload)
         snapshot: dict[str, Any] = {"error": "round_failed", "session_id": session_id}
         while True:
@@ -5925,7 +6518,7 @@ class AShareAgentService:
                     "data_json": json.dumps(item.get("data", {}), ensure_ascii=False),
                 }
             )
-        # 为 Windows Excel 兼容写入 UTF-8 BOM，避免中文列值乱码。
+        # 涓?Windows Excel 鍏煎鍐欏叆 UTF-8 BOM锛岄伩鍏嶄腑鏂囧垪鍊间贡鐮併€?
         csv_content = "\ufeff" + output.getvalue()
         if emit_audit:
             self._emit_deep_archive_audit(
@@ -5953,7 +6546,7 @@ class AShareAgentService:
         format: str = "csv",
         limit: int = 400,
     ) -> dict[str, Any]:
-        """导出业务可读摘要（面向投研/交易），与审计事件导出分离。"""
+        """Export business-facing summary rows for PM/trading usage, separate from raw event export."""
         export_format = str(format or "csv").strip().lower() or "csv"
         if export_format not in {"csv", "json"}:
             raise ValueError("format must be one of: csv, json")
@@ -5963,7 +6556,7 @@ class AShareAgentService:
         safe_limit = max(20, min(2000, int(limit)))
         round_id_clean = str(round_id or "").strip()
         rows: list[dict[str, Any]] = []
-        # 优先使用业务摘要事件，确保导出的是对用户有意义的决策结果。
+        # 浼樺厛浣跨敤涓氬姟鎽樿浜嬩欢锛岀‘淇濆鍑虹殑鏄鐢ㄦ埛鏈夋剰涔夌殑鍐崇瓥缁撴灉銆?
         summary_snapshot = self.deep_think_list_events(
             session_id,
             round_id=round_id_clean or None,
@@ -5999,7 +6592,7 @@ class AShareAgentService:
                         "created_at": str(item.get("created_at", "")),
                     }
                 )
-        # 若历史轮次无 business_summary 事件，兜底使用会话 round 快照生成可读摘要。
+        # 鑻ュ巻鍙茶疆娆℃棤 business_summary 浜嬩欢锛屽厹搴曚娇鐢ㄤ細璇?round 蹇収鐢熸垚鍙鎽樿銆?
         if not rows:
             rounds = list(session.get("rounds", []))
             if round_id_clean:
@@ -6015,9 +6608,9 @@ class AShareAgentService:
                         "stock_code": ",".join(str(x) for x in session.get("stock_codes", [])),
                         "signal": str(round_item.get("consensus_signal", "hold")),
                         "confidence": round(1.0 - float(round_item.get("disagreement_score", 0.0) or 0.0), 4),
-                        "trigger_condition": str(top_opinion.get("reason", "建议结合更多实时情报复核。")),
-                        "invalidation_condition": "若风险因子放大或关键信号反转，则本结论失效。",
-                        "review_time_hint": "T+1 日内复核",
+                        "trigger_condition": str(top_opinion.get("reason", "Re-check with fresher intelligence before action")), 
+                        "invalidation_condition": "Signal invalidates if risk factors worsen or key signals reverse.",
+                        "review_time_hint": "T+1 鏃ュ唴澶嶆牳",
                         "top_conflict_sources": ",".join(str(x) for x in list(round_item.get("conflict_sources", []))[:4]),
                         "replan_triggered": bool(round_item.get("replan_triggered", False)),
                         "stop_reason": str(round_item.get("stop_reason", "")),
@@ -6059,15 +6652,15 @@ class AShareAgentService:
             "format": "csv",
             "media_type": "text/csv; charset=utf-8",
             "filename": f"deepthink-business-{session_id}-{round_value}.csv",
-            # 同样加 BOM，确保业务用户在 Excel 中直接可读。
+            # 鍚屾牱鍔?BOM锛岀‘淇濅笟鍔＄敤鎴峰湪 Excel 涓洿鎺ュ彲璇汇€?
             "content": "\ufeff" + output.getvalue(),
             "count": len(rows),
         }
 
     def deep_think_intel_self_test(self, *, stock_code: str, question: str = "") -> dict[str, Any]:
-        """DeepThink 情报链路自检：验证外部开关/provider/websearch 与 fallback 原因。"""
+        """DeepThink intel self-test: verify provider/websearch path and fallback reasons."""
         code = (stock_code or "SH600000").upper().replace(".", "")
-        probe_question = (question or f"请做 {code} 的未来30日宏观+行业+事件情报自检").strip()
+        probe_question = (question or f"Please run a 30-day macro/industry/event intel self-test for {code}").strip()
         provider_rows = [
             {
                 "name": str(p.name),
@@ -6077,7 +6670,7 @@ class AShareAgentService:
             }
             for p in self.llm_gateway.providers
         ]
-        # 尽量使用接近真实链路的数据快照，避免“自检通过但实战失败”的偏差。
+        # 灏介噺浣跨敤鎺ヨ繎鐪熷疄閾捐矾鐨勬暟鎹揩鐓э紝閬垮厤鈥滆嚜妫€閫氳繃浣嗗疄鎴樺け璐モ€濈殑鍋忓樊銆?
         if self._needs_quote_refresh(code):
             self.ingest_market_daily([code])
         if self._needs_history_refresh(code):
@@ -6135,7 +6728,7 @@ class AShareAgentService:
         }
 
     def deep_think_trace_events(self, trace_id: str, *, limit: int = 80) -> dict[str, Any]:
-        """输出 trace 事件明细，便于排查外部检索降级原因。"""
+        """Return trace event details to debug retrieval/runtime downgrade causes."""
         safe_trace_id = str(trace_id or "").strip()
         if not safe_trace_id:
             return {"trace_id": "", "count": 0, "events": []}
@@ -6752,6 +7345,107 @@ class AShareAgentService:
         items = sorted(items, key=lambda x: (str(x.get("category", "")), str(x.get("source_id", ""))))[:safe_limit]
         return {"count": len(items), "items": items}
 
+    def business_data_health(self, *, stock_code: str = "", limit: int = 200) -> dict[str, Any]:
+        """Return business-readable datasource health summary for frontend modules."""
+        try:
+            health = self.datasource_health("", limit=limit)
+        except Exception:
+            # Fallback to catalog-only snapshot when role checks block observability APIs.
+            health = {"count": 0, "items": self._build_datasource_catalog()}
+        rows = list(health.get("items", []))
+        category_map: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            category = str(row.get("category", "")).strip() or "unknown"
+            category_map.setdefault(category, []).append(row)
+
+        # Keep the mapping explicit so the frontend can explain module impact in plain language.
+        module_categories: dict[str, list[str]] = {
+            "predict": ["quote", "history", "financial"],
+            "reports": ["quote", "history", "financial", "news", "research", "macro", "fund", "announcement"],
+            "deep-think": ["quote", "history", "financial", "news", "research", "macro", "fund", "announcement"],
+            "analysis-studio": ["quote", "history", "financial", "news", "research", "macro", "fund", "announcement"],
+        }
+        module_health: list[dict[str, Any]] = []
+        global_reasons: list[str] = []
+        for module, categories in module_categories.items():
+            expected = max(1, len(categories))
+            healthy_count = 0
+            missing_categories: list[str] = []
+            stale_categories: list[str] = []
+            failed_categories: list[str] = []
+            for category in categories:
+                candidates = category_map.get(category, [])
+                if not candidates:
+                    missing_categories.append(category)
+                    continue
+                top = sorted(
+                    candidates,
+                    key=lambda x: (
+                        float(x.get("success_rate", 0.0) or 0.0),
+                        -float(x.get("failure_rate", 1.0) or 1.0),
+                    ),
+                    reverse=True,
+                )[0]
+                failure_rate = float(top.get("failure_rate", 0.0) or 0.0)
+                staleness = top.get("staleness_minutes")
+                staleness_minutes = int(staleness) if isinstance(staleness, (int, float)) else None
+                if failure_rate >= 0.6:
+                    failed_categories.append(category)
+                elif staleness_minutes is not None and staleness_minutes > 240:
+                    stale_categories.append(category)
+                else:
+                    healthy_count += 1
+
+            coverage = round(float(healthy_count) / float(expected), 4)
+            status = "ok" if coverage >= 0.85 else "degraded" if coverage >= 0.5 else "critical"
+            reasons: list[str] = []
+            if missing_categories:
+                reasons.append(f"missing:{','.join(missing_categories)}")
+            if stale_categories:
+                reasons.append(f"stale:{','.join(stale_categories)}")
+            if failed_categories:
+                reasons.append(f"failed:{','.join(failed_categories)}")
+            module_health.append(
+                {
+                    "module": module,
+                    "status": status,
+                    "coverage": coverage,
+                    "healthy_categories": healthy_count,
+                    "expected_categories": expected,
+                    "degrade_reasons": reasons,
+                }
+            )
+            global_reasons.extend(reasons)
+
+        status_rank = {"ok": 0, "degraded": 1, "critical": 2}
+        overall_status = "ok"
+        for row in module_health:
+            if status_rank.get(str(row.get("status", "")), 0) > status_rank.get(overall_status, 0):
+                overall_status = str(row.get("status", "ok"))
+
+        stock = str(stock_code or "").strip().upper()
+        stock_snapshot = {}
+        if stock:
+            stock_snapshot = {
+                "stock_code": stock,
+                "has_quote": bool(self._latest_quote(stock)),
+                "history_sample_size": len(self._history_bars(stock, limit=260)),
+                "has_financial": bool(self._latest_financial_snapshot(stock)),
+                "news_count": len([x for x in self.ingestion_store.news_items if str(x.get("stock_code", "")).upper() == stock][-20:]),
+                "research_count": len(
+                    [x for x in self.ingestion_store.research_reports if str(x.get("stock_code", "")).upper() == stock][-20:]
+                ),
+            }
+
+        return {
+            "status": overall_status,
+            "module_health": module_health,
+            "degrade_reasons": list(dict.fromkeys(global_reasons)),
+            "category_health_count": len(rows),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "stock_snapshot": stock_snapshot,
+        }
+
     @staticmethod
     def _infer_datasource_category(source_id: str) -> str:
         sid = str(source_id or "").strip().lower()
@@ -6855,7 +7549,7 @@ class AShareAgentService:
         }
 
     def ops_source_health(self, token: str) -> list[dict[str, Any]]:
-        # 基于 scheduler 状态刷新 source health 快照
+        # 鍩轰簬 scheduler 鐘舵€佸埛鏂?source health 蹇収
         status = self.scheduler_status()
         for name, s in status.items():
             circuit = bool(s.get("circuit_open_until"))
@@ -6895,7 +7589,7 @@ class AShareAgentService:
         )
 
     def ops_agent_debate(self, stock_code: str, question: str = "") -> dict[str, Any]:
-        """多 Agent 分歧分析：优先使用真实大模型并行辩论，失败回退规则引擎。"""
+        """Run a multi-agent debate, preferring real LLM responses with rule-engine fallback."""
         code = stock_code.upper().replace(".", "")
         if self._needs_quote_refresh(code):
             self.ingest_market_daily([code])
@@ -6950,7 +7644,7 @@ class AShareAgentService:
         }
 
     def ops_rag_quality(self) -> dict[str, Any]:
-        """RAG 质量面板数据：聚合指标 + 用例明细。"""
+        """RAG quality dashboard data: aggregate metrics plus per-case details."""
         dataset = default_retrieval_dataset()
         retriever = self._build_runtime_retriever([])
         evaluator = RetrievalEvaluator(retriever)
@@ -6996,11 +7690,11 @@ class AShareAgentService:
         }
 
     def ops_rag_reindex(self, token: str, *, limit: int = 2000) -> dict[str, Any]:
-        """向量索引重建入口：重建摘要索引并回传统计信息。"""
+        """Rebuild summary vector index and return operation metadata."""
         self.web.require_role(token, {"admin", "ops"})
-        del limit  # 当前实现按实时资产全集重建，后续可扩展增量重建窗口。
+        del limit  # 褰撳墠瀹炵幇鎸夊疄鏃惰祫浜у叏闆嗛噸寤猴紝鍚庣画鍙墿灞曞閲忛噸寤虹獥鍙ｃ€?
         result = self._refresh_summary_vector_index([], force=True)
-        # 记录最近一次重建时间，便于前端业务看板展示运维状态。
+        # 璁板綍鏈€杩戜竴娆￠噸寤烘椂闂达紝渚夸簬鍓嶇涓氬姟鐪嬫澘灞曠ず杩愮淮鐘舵€併€?
         self.web.rag_ops_meta_set(key="last_reindex_at", value=datetime.now(timezone.utc).isoformat())
         return {
             "status": "ok",
@@ -7017,7 +7711,7 @@ class AShareAgentService:
         candidate_version: str,
         variables: dict[str, Any],
     ) -> dict[str, Any]:
-        """Prompt 版本对比回放。"""
+        """Compare two prompt versions and return rendered diff replay."""
         base_prompt = self.prompts.get_prompt(prompt_id, base_version)
         cand_prompt = self.prompts.get_prompt(prompt_id, candidate_version)
         base_rendered, base_meta = self.prompt_runtime.build_from_prompt(base_prompt, variables)
@@ -7067,21 +7761,21 @@ class AShareAgentService:
                 "agent": "pm_agent",
                 "signal": pm_signal,
                 "confidence": 0.66,
-                "reason": f"基于趋势斜率与当日涨跌构建产品侧可解释观点，question={question or 'default'}",
+                "reason": f"鍩轰簬瓒嬪娍鏂滅巼涓庡綋鏃ユ定璺屾瀯寤轰骇鍝佷晶鍙В閲婅鐐癸紝question={question or 'default'}",
             },
             {
                 "agent": "quant_agent",
                 "signal": quant_signal,
                 "confidence": float(quant_20.get("up_probability", 0.5)),
-                "reason": f"来自20日预测：{quant_20.get('rationale', '')}",
+                "reason": f"鏉ヨ嚜20鏃ラ娴嬶細{quant_20.get('rationale', '')}",
             },
             {
                 "agent": "risk_agent",
                 "signal": risk_signal,
                 "confidence": 0.72,
                 "reason": (
-                    f"回撤={trend.get('max_drawdown_60', 0.0):.4f}, 波动={trend.get('volatility_20', 0.0):.4f}, "
-                    f"动量={trend.get('momentum_20', 0.0):.4f}"
+                    f"鍥炴挙={trend.get('max_drawdown_60', 0.0):.4f}, 娉㈠姩={trend.get('volatility_20', 0.0):.4f}, "
+                    f"鍔ㄩ噺={trend.get('momentum_20', 0.0):.4f}"
                 ),
             },
         ]
@@ -7095,9 +7789,9 @@ class AShareAgentService:
         quant_20: dict[str, Any],
         rule_defaults: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """并行调用真实模型生成多角色观点。"""
+        """Call LLM to generate multi-agent debate opinions."""
         context = {
-            "question": question or "请给出短中期观点",
+            "question": question or "璇风粰鍑虹煭涓湡瑙傜偣",
             "stock_code": stock_code,
             "quote": {"price": quote.get("price"), "pct_change": quote.get("pct_change")},
             "trend": trend,
@@ -7107,24 +7801,21 @@ class AShareAgentService:
             (
                 "pm_agent",
                 (
-                    "你是资深产品经理。请根据输入给出一个交易信号。"
-                    "严格返回 JSON: {\"signal\":\"buy|hold|reduce\",\"confidence\":0-1,\"reason\":\"...\"}\n"
+                    "You are a portfolio manager. Return JSON only with keys: signal, confidence, reason. "
                     f"context={json.dumps(context, ensure_ascii=False)}"
                 ),
             ),
             (
                 "quant_agent",
                 (
-                    "你是量化研究负责人。请根据输入给出一个交易信号。"
-                    "严格返回 JSON: {\"signal\":\"buy|hold|reduce\",\"confidence\":0-1,\"reason\":\"...\"}\n"
+                    "You are a quant analyst. Return JSON only with keys: signal, confidence, reason. "
                     f"context={json.dumps(context, ensure_ascii=False)}"
                 ),
             ),
             (
                 "risk_agent",
                 (
-                    "你是风控负责人。请根据输入给出一个交易信号。"
-                    "严格返回 JSON: {\"signal\":\"buy|hold|reduce\",\"confidence\":0-1,\"reason\":\"...\"}\n"
+                    "You are a risk controller. Return JSON only with keys: signal, confidence, reason. "
                     f"context={json.dumps(context, ensure_ascii=False)}"
                 ),
             ),
@@ -7284,10 +7975,12 @@ class AShareAgentService:
         return self.web.stock_universe_filters(token)
 
     def close(self) -> None:
-        """释放数据库连接等资源。"""
+        """Release database connections and other service resources."""
         self.memory.close()
         self.prompts.close()
         self.web.close()
+
+
 
 
 

@@ -258,6 +258,39 @@ class HttpApiTestCase(unittest.TestCase):
         get_code, loaded = self._get(f"/v1/report/{report_id}")
         self.assertEqual(get_code, 200)
         self.assertIn("markdown", loaded)
+        self.assertIn("quality_gate", report)
+        self.assertIn("report_data_pack_summary", report)
+        self.assertIn("generation_mode", report)
+        self.assertIn("confidence_attribution", report)
+
+    def test_report_task_endpoints(self) -> None:
+        code, created = self._post(
+            "/v1/report/tasks",
+            {
+                "user_id": "api-u-report-task",
+                "stock_code": "SH600000",
+                "period": "1y",
+                "report_type": "research",
+            },
+        )
+        self.assertEqual(code, 200)
+        task_id = str(created.get("task_id", ""))
+        self.assertTrue(task_id)
+
+        final_status = ""
+        for _ in range(120):
+            c_get, snapshot = self._get(f"/v1/report/tasks/{task_id}")
+            self.assertEqual(c_get, 200)
+            final_status = str(snapshot.get("status", ""))
+            if final_status in {"completed", "failed"}:
+                break
+            time.sleep(0.05)
+        self.assertIn(final_status, {"completed", "failed"})
+
+        c_result, result = self._get(f"/v1/report/tasks/{task_id}/result")
+        self.assertEqual(c_result, 200)
+        self.assertIn("result_level", result)
+        self.assertIn("status", result)
 
     def test_ingest_market_daily(self) -> None:
         code, body = self._post("/v1/ingest/market-daily", {"stock_codes": ["SH600000", "SZ000001"]})
@@ -326,6 +359,12 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertTrue(isinstance((target_health or {}).get("used_in_ui_modules", []), list))
         self.assertIn("last_used_at", target_health or {})
         self.assertIn("staleness_minutes", target_health or {})
+
+        c5, business = self._get("/v1/business/data-health?stock_code=SH600000&limit=200")
+        self.assertEqual(c5, 200)
+        self.assertIn("status", business)
+        self.assertIn("module_health", business)
+        self.assertIn("stock_snapshot", business)
 
     def test_docs_upload_and_index(self) -> None:
         upload_code, uploaded = self._post(
@@ -488,6 +527,11 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertIn("run_id", run)
         self.assertEqual(len(run["results"]), 2)
+        self.assertIn("data_quality", run)
+        self.assertIn("degrade_reasons", run)
+        self.assertIn("source_coverage", run)
+        self.assertIn("metric_mode", run)
+        self.assertIn("metrics_simulated", run)
 
         get_code, loaded = self._get(f"/v1/predict/{run['run_id']}")
         self.assertEqual(get_code, 200)
@@ -502,6 +546,7 @@ class HttpApiTestCase(unittest.TestCase):
         eval_code, latest = self._get("/v1/predict/evals/latest")
         self.assertEqual(eval_code, 200)
         self.assertIn("metrics", latest)
+        self.assertIn(str(latest.get("metric_mode", "")), {"simulated", "backtest_proxy"})
 
     def test_market_overview(self) -> None:
         code, body = self._get("/v1/market/overview/SH600000")

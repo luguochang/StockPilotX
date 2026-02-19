@@ -1,8 +1,8 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Alert, Button, Card, Col, Collapse, Flex, Form, Input, Row, Select, Table, Tabs, Tag, Typography, message } from "antd";
+import { Alert, Button, Card, Col, Collapse, Flex, Form, Input, Row, Select, Steps, Switch, Table, Tabs, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
@@ -67,32 +67,32 @@ type FilterForm = {
 const TEMPLATES: Record<TemplateId, { label: string; hint: string; journal_type: JournalType; decision_type: "buy" | "hold" | "reduce"; sentiment: "positive" | "neutral" | "negative"; tags: string[]; ai_focus: string; title_prefix: string }> = {
   decision: {
     label: "交易决策简报",
-    hint: "写核心观点、触发条件、失效条件",
+    hint: "写清核心观点、触发条件、失效条件。",
     journal_type: "decision",
     decision_type: "hold",
     sentiment: "neutral",
     tags: ["decision", "thesis"],
-    ai_focus: "优先检查触发和失效条件是否可验证",
+    ai_focus: "优先检查触发条件和失效条件是否可验证。",
     title_prefix: "交易决策",
   },
   risk: {
     label: "风险防守记录",
-    hint: "写风险来源、风控阈值和执行动作",
+    hint: "写清风险来源、风控阈值和执行动作。",
     journal_type: "reflection",
     decision_type: "reduce",
     sentiment: "negative",
     tags: ["risk", "drawdown"],
-    ai_focus: "优先检查风险识别盲区和风控阈值",
+    ai_focus: "优先检查风险识别盲区和风控阈值是否可执行。",
     title_prefix: "风险防守",
   },
   review: {
     label: "复盘改进记录",
-    hint: "写结果偏差、原因和下次改进动作",
+    hint: "写清结果偏差、原因和下次改进动作。",
     journal_type: "learning",
     decision_type: "hold",
     sentiment: "neutral",
     tags: ["review", "improvement"],
-    ai_focus: "优先输出可执行改进清单",
+    ai_focus: "优先输出可执行改进清单。",
     title_prefix: "交易复盘",
   },
 };
@@ -104,11 +104,20 @@ function parseCommaItems(raw: string): string[] {
     .filter((item) => item.length > 0);
 }
 
-async function parseOrThrow<T>(resp: Response): Promise<T> {
+function friendlyError(messageText: string, fallback: string): string {
+  const lower = messageText.toLowerCase();
+  if (!messageText) return fallback;
+  if (lower.includes("journal_type")) return "日志类型无效，请切换模板后重试。";
+  if (lower.includes("http 500")) return "服务暂时繁忙，请稍后重试。";
+  if (lower.includes("http 404")) return "接口未找到，请检查后端服务是否最新。";
+  return messageText;
+}
+
+async function parseOrThrow<T>(resp: Response, fallbackError: string): Promise<T> {
   const body = (await resp.json()) as T | { detail?: string; error?: string };
   if (!resp.ok) {
     const msg = typeof body === "object" && body ? ((body as { detail?: string; error?: string }).detail ?? (body as { detail?: string; error?: string }).error) : "";
-    throw new Error(msg || `HTTP ${resp.status}`);
+    throw new Error(friendlyError(msg || `HTTP ${resp.status}`, fallbackError));
   }
   return body as T;
 }
@@ -117,7 +126,10 @@ export default function JournalPage() {
   const [messageApi, contextHolder] = message.useMessage();
   const [createForm] = Form.useForm<CreateForm>();
   const [filterForm] = Form.useForm<FilterForm>();
+  const [wizardStep, setWizardStep] = useState(0);
+  const [expertMode, setExpertMode] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState<string[]>([]);
+  const [filterAdvancedOpen, setFilterAdvancedOpen] = useState<string[]>([]);
   const [listLoading, setListLoading] = useState(false);
   const [createLoading, setCreateLoading] = useState(false);
   const [reflectionLoading, setReflectionLoading] = useState(false);
@@ -152,7 +164,7 @@ export default function JournalPage() {
     {
       title: "类型",
       key: "type",
-      width: 150,
+      width: 160,
       render: (_, record) => (
         <Flex gap={6} wrap>
           <Tag color="blue">{record.journal_type}</Tag>
@@ -182,7 +194,7 @@ export default function JournalPage() {
     setListLoading(true);
     try {
       const resp = await fetch(`${API_BASE}/v1/journal?${query.toString()}`);
-      const body = await parseOrThrow<JournalItem[]>(resp);
+      const body = await parseOrThrow<JournalItem[]>(resp, "加载日志失败");
       setJournals(Array.isArray(body) ? body : []);
       if (selectedJournalId && !body.find((item) => item.journal_id === selectedJournalId)) setSelectedJournalId(null);
     } catch (error) {
@@ -196,7 +208,7 @@ export default function JournalPage() {
     setReflectionLoading(true);
     try {
       const resp = await fetch(`${API_BASE}/v1/journal/${journalId}/reflections?limit=80`);
-      const body = await parseOrThrow<ReflectionItem[]>(resp);
+      const body = await parseOrThrow<ReflectionItem[]>(resp, "加载复盘失败");
       setReflections(Array.isArray(body) ? body : []);
     } catch (error) {
       messageApi.error(error instanceof Error ? error.message : "加载复盘失败");
@@ -209,7 +221,7 @@ export default function JournalPage() {
     setAiLoading(true);
     try {
       const resp = await fetch(`${API_BASE}/v1/journal/${journalId}/ai-reflection`);
-      const body = await parseOrThrow<AiReflection | Record<string, never>>(resp);
+      const body = await parseOrThrow<AiReflection | Record<string, never>>(resp, "加载 AI 复盘失败");
       if (body && typeof body === "object" && "status" in body) setAiReflection(body as AiReflection);
       else setAiReflection(null);
     } catch (error) {
@@ -223,7 +235,7 @@ export default function JournalPage() {
     setInsightsLoading(true);
     try {
       const resp = await fetch(`${API_BASE}/v1/journal/insights?window_days=180&timeline_days=60&limit=600`);
-      const body = await parseOrThrow<Insights>(resp);
+      const body = await parseOrThrow<Insights>(resp, "加载洞察失败");
       setInsights(body);
     } catch (error) {
       messageApi.error(error instanceof Error ? error.message : "加载洞察失败");
@@ -237,8 +249,12 @@ export default function JournalPage() {
     try {
       const tpl = TEMPLATES[values.template_id];
       const stockCode = values.stock_code.trim().toUpperCase();
+      const thesis = values.thesis.trim();
+      if (!stockCode) throw new Error("请先选择股票代码。");
+      if (thesis.length < 8) throw new Error("核心观点至少 8 个字。");
+
       const tags = Array.from(new Set([...tpl.tags, ...parseCommaItems(values.custom_tags || "")])).slice(0, 12);
-      // Template-first payload: default flow only requires template + stock + thesis.
+      // Two-step wizard only asks for template/stock/thesis by default.
       const payload = {
         journal_type: values.journal_type || tpl.journal_type,
         title: values.custom_title.trim() || `${tpl.title_prefix} ${stockCode}`,
@@ -246,19 +262,26 @@ export default function JournalPage() {
         decision_type: values.decision_type || tpl.decision_type,
         tags,
         sentiment: values.sentiment || tpl.sentiment,
-        content: [`模板: ${tpl.label}`, `核心观点: ${values.thesis.trim()}`, "触发条件: （可补充）", "失效条件: （可补充）", "执行计划: （可补充）"].join("\n"),
+        content: [
+          `模板: ${tpl.label}`,
+          `核心观点: ${thesis}`,
+          "触发条件: （可补充）",
+          "失效条件: （可补充）",
+          "执行计划: （可补充）",
+        ].join("\n"),
       };
       const resp = await fetch(`${API_BASE}/v1/journal`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const created = await parseOrThrow<JournalItem>(resp);
+      const created = await parseOrThrow<JournalItem>(resp, "创建日志失败");
       messageApi.success("日志创建成功");
       createForm.setFieldValue("thesis", "");
       createForm.setFieldValue("custom_title", "");
       createForm.setFieldValue("custom_tags", "");
       setAiFocus(tpl.ai_focus);
+      setWizardStep(0);
       await Promise.all([loadJournals(), loadInsights()]);
       setSelectedJournalId(Number(created.journal_id));
     } catch (error) {
@@ -278,7 +301,7 @@ export default function JournalPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reflection_content: reflectionInput.trim() }),
       });
-      await parseOrThrow<ReflectionItem>(resp);
+      await parseOrThrow<ReflectionItem>(resp, "写入复盘失败");
       setReflectionInput("");
       messageApi.success("复盘已记录");
       await Promise.all([loadReflections(selectedJournalId), loadJournals(), loadInsights()]);
@@ -299,9 +322,9 @@ export default function JournalPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ focus }),
       });
-      const generated = await parseOrThrow<AiReflection>(resp);
+      const generated = await parseOrThrow<AiReflection>(resp, "生成 AI 复盘失败");
       setAiReflection(generated);
-      messageApi.success(generated.status === "ready" ? "AI复盘生成完成" : "AI复盘回退到本地模板");
+      messageApi.success(generated.status === "ready" ? "AI 复盘生成完成" : "AI 复盘已回退为本地模板");
       await Promise.all([loadJournals(), loadInsights()]);
     } catch (error) {
       messageApi.error(error instanceof Error ? error.message : "生成 AI 复盘失败");
@@ -355,7 +378,7 @@ export default function JournalPage() {
             <Tag color="processing" style={{ width: "fit-content" }}>Investment Journal Workspace</Tag>
             <Title level={2} style={{ margin: 0 }}>投资日志工作台</Title>
             <Paragraph style={{ margin: 0, color: "#475569", maxWidth: 820 }}>
-              默认只保留三项输入: 模板、股票、核心观点。其余参数进入可选高级设置，降低输入负担。
+              默认采用两步向导：先选模板和股票，再写一句核心观点。高级字段已收纳到专家模式，减少输入负担。
             </Paragraph>
           </Flex>
         </Card>
@@ -363,64 +386,108 @@ export default function JournalPage() {
 
       <Row gutter={[12, 12]}>
         <Col xs={24} xl={14}>
-          <Card className="premium-card" title="快速记录（模板优先）" style={{ marginBottom: 12 }}>
+          <Card className="premium-card" title="快速记录（两步向导）" style={{ marginBottom: 12 }}>
             <Form<CreateForm> layout="vertical" form={createForm} onFinish={handleCreate}>
-              <Row gutter={10}>
-                <Col xs={24} md={12}>
-                  <Form.Item name="template_id" label="模板" rules={[{ required: true, message: "请选择模板" }]}>
-                    <Select options={Object.entries(TEMPLATES).map(([key, val]) => ({ value: key, label: `${val.label} - ${val.hint}` }))} />
-                  </Form.Item>
-                </Col>
-                <Col xs={24} md={12}>
-                  <Form.Item name="stock_code" label="股票代码" rules={[{ required: true, message: "请输入股票代码" }]}>
-                    <Input placeholder="例如 SH600000" />
-                  </Form.Item>
-                </Col>
-              </Row>
-              <Form.Item name="thesis" label="核心观点" rules={[{ required: true, message: "请输入观点" }]}>
-                <Input.TextArea rows={5} placeholder={selectedTemplate.hint} />
-              </Form.Item>
-              <Collapse
+              <Steps
                 size="small"
-                activeKey={advancedOpen}
-                onChange={(keys) => setAdvancedOpen((Array.isArray(keys) ? keys : [keys]).map(String))}
-                items={[{ key: "advanced", label: "高级设置（可选）", children: (
-                  <Flex vertical gap={8}>
-                    <Form.Item name="custom_title" label="自定义标题"><Input placeholder="可留空，系统自动生成标题" /></Form.Item>
-                    <Form.Item name="custom_tags" label="补充标签（逗号分隔）"><Input placeholder="估值,风险,仓位" /></Form.Item>
-                    <Row gutter={10}>
-                      <Col xs={24} md={8}>
-                        <Form.Item name="journal_type" label="日志类型">
-                          <Select options={[{ label: "决策", value: "decision" }, { label: "复盘", value: "reflection" }, { label: "学习", value: "learning" }]} />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} md={8}>
-                        <Form.Item name="decision_type" label="决策方向">
-                          <Select options={[{ label: "买入", value: "buy" }, { label: "持有", value: "hold" }, { label: "减仓", value: "reduce" }]} />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} md={8}>
-                        <Form.Item name="sentiment" label="情绪标签">
-                          <Select options={[{ label: "积极", value: "positive" }, { label: "中性", value: "neutral" }, { label: "谨慎", value: "negative" }]} />
-                        </Form.Item>
-                      </Col>
-                    </Row>
-                  </Flex>
-                ) }]}
+                current={wizardStep}
+                items={[
+                  { title: "选择模板与股票" },
+                  { title: "填写核心观点" },
+                ]}
+                style={{ marginBottom: 12 }}
               />
-              <Button type="primary" htmlType="submit" loading={createLoading} style={{ marginTop: 12 }}>创建日志</Button>
+
+              {wizardStep === 0 ? (
+                <Row gutter={10}>
+                  <Col xs={24} md={12}>
+                    <Form.Item name="template_id" label="模板" rules={[{ required: true, message: "请选择模板" }]}>
+                      <Select options={Object.entries(TEMPLATES).map(([key, val]) => ({ value: key, label: `${val.label} - ${val.hint}` }))} />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Form.Item name="stock_code" label="股票代码" rules={[{ required: true, message: "请输入股票代码" }]}>
+                      <Input placeholder="例如 SH600000" />
+                    </Form.Item>
+                  </Col>
+                </Row>
+              ) : (
+                <Form.Item name="thesis" label="核心观点" rules={[{ required: true, message: "请输入核心观点" }, { min: 8, message: "至少输入 8 个字" }]}>
+                  <Input.TextArea rows={5} placeholder={selectedTemplate.hint} />
+                </Form.Item>
+              )}
+
+              <Flex align="center" justify="space-between" style={{ marginBottom: 10 }}>
+                <Flex gap={8}>
+                  {wizardStep > 0 ? <Button onClick={() => setWizardStep(0)}>上一步</Button> : null}
+                  {wizardStep === 0 ? <Button type="primary" onClick={() => setWizardStep(1)}>下一步</Button> : <Button type="primary" htmlType="submit" loading={createLoading}>创建日志</Button>}
+                </Flex>
+                <Flex gap={8} align="center">
+                  <Text type="secondary">专家模式</Text>
+                  <Switch checked={expertMode} onChange={setExpertMode} />
+                </Flex>
+              </Flex>
+
+              {expertMode ? (
+                <Collapse
+                  size="small"
+                  activeKey={advancedOpen}
+                  onChange={(keys) => setAdvancedOpen((Array.isArray(keys) ? keys : [keys]).map(String))}
+                  items={[{ key: "advanced", label: "专家字段（可选）", children: (
+                    <Flex vertical gap={8}>
+                      <Form.Item name="custom_title" label="自定义标题"><Input placeholder="可留空，系统自动生成标题" /></Form.Item>
+                      <Form.Item name="custom_tags" label="补充标签（逗号分隔）"><Input placeholder="估值, 风险, 仓位" /></Form.Item>
+                      <Row gutter={10}>
+                        <Col xs={24} md={8}>
+                          <Form.Item name="journal_type" label="日志类型">
+                            <Select options={[{ label: "决策", value: "decision" }, { label: "复盘", value: "reflection" }, { label: "学习", value: "learning" }]} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={8}>
+                          <Form.Item name="decision_type" label="决策方向">
+                            <Select options={[{ label: "买入", value: "buy" }, { label: "持有", value: "hold" }, { label: "减仓", value: "reduce" }]} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={8}>
+                          <Form.Item name="sentiment" label="情绪标签">
+                            <Select options={[{ label: "积极", value: "positive" }, { label: "中性", value: "neutral" }, { label: "谨慎", value: "negative" }]} />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                    </Flex>
+                  ) }]}
+                />
+              ) : null}
             </Form>
           </Card>
 
           <Card className="premium-card" title="日志列表">
             <Form<FilterForm> form={filterForm} layout="inline" onFinish={(values) => void loadJournals(values)}>
-              <Form.Item name="journal_type" label="类型">
-                <Select style={{ width: 140 }} options={[{ label: "全部", value: "" }, { label: "决策", value: "decision" }, { label: "复盘", value: "reflection" }, { label: "学习", value: "learning" }]} />
-              </Form.Item>
               <Form.Item name="stock_code" label="股票"><Input placeholder="SH600000" /></Form.Item>
-              <Form.Item name="limit" label="条数"><Select style={{ width: 100 }} options={[{ label: "20", value: 20 }, { label: "40", value: 40 }, { label: "80", value: 80 }]} /></Form.Item>
+              <Form.Item name="limit" label="条数"><Select style={{ width: 110 }} options={[{ label: "20", value: 20 }, { label: "40", value: 40 }, { label: "80", value: 80 }]} /></Form.Item>
               <Form.Item><Button htmlType="submit" loading={listLoading}>查询</Button></Form.Item>
             </Form>
+
+            <Collapse
+              size="small"
+              activeKey={filterAdvancedOpen}
+              onChange={(keys) => setFilterAdvancedOpen((Array.isArray(keys) ? keys : [keys]).map(String))}
+              style={{ marginTop: 10 }}
+              items={[
+                {
+                  key: "filter-advanced",
+                  label: "更多筛选（可选）",
+                  children: (
+                    <Form<FilterForm> form={filterForm} layout="inline">
+                      <Form.Item name="journal_type" label="类型">
+                        <Select style={{ width: 160 }} options={[{ label: "全部", value: "" }, { label: "决策", value: "decision" }, { label: "复盘", value: "reflection" }, { label: "学习", value: "learning" }]} />
+                      </Form.Item>
+                    </Form>
+                  ),
+                },
+              ]}
+            />
+
             <Table<JournalItem>
               style={{ marginTop: 12 }}
               rowKey="journal_id"
@@ -517,4 +584,3 @@ export default function JournalPage() {
     </main>
   );
 }
-

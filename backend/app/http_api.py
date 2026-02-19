@@ -349,6 +349,34 @@ def create_app() -> FastAPI:
     def report_generate(payload: dict):
         return svc.report_generate(payload)
 
+    @app.post("/v1/report/tasks")
+    def report_task_create(payload: dict):
+        try:
+            return svc.report_task_create(payload)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+
+    @app.get("/v1/report/tasks/{task_id}")
+    def report_task_get(task_id: str):
+        result = svc.report_task_get(task_id)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result)
+        return result
+
+    @app.get("/v1/report/tasks/{task_id}/result")
+    def report_task_result(task_id: str):
+        result = svc.report_task_result(task_id)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result)
+        return result
+
+    @app.post("/v1/report/tasks/{task_id}/cancel")
+    def report_task_cancel(task_id: str):
+        result = svc.report_task_cancel(task_id)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result)
+        return result
+
     @app.get("/v1/report/{report_id}")
     def report_get(report_id: str):
         result = svc.report_get(report_id)
@@ -400,6 +428,11 @@ def create_app() -> FastAPI:
             return svc.datasource_health(token, limit=limit)
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
+
+    @app.get("/v1/business/data-health")
+    def business_data_health(stock_code: str = "", limit: int = 200):
+        # Business-facing health endpoint intentionally returns simplified module-level quality view.
+        return svc.business_data_health(stock_code=stock_code, limit=limit)
 
     @app.post("/v1/datasources/fetch")
     def datasource_fetch(payload: dict, authorization: str | None = Header(default=None)):

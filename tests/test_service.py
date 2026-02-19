@@ -99,6 +99,37 @@ class ServiceTestCase(unittest.TestCase):
         )
         loaded = self.svc.report_get(generated["report_id"])
         self.assertIn("# SH600000", loaded["markdown"])
+        self.assertIn("quality_gate", generated)
+        self.assertIn("report_data_pack_summary", generated)
+        self.assertIn("generation_mode", generated)
+        self.assertIn("confidence_attribution", generated)
+        self.assertIn("quality_gate", loaded)
+        self.assertIn("report_data_pack_summary", loaded)
+
+    def test_report_task_lifecycle(self) -> None:
+        task = self.svc.report_task_create(
+            {"user_id": "u-task-1", "stock_code": "SH600000", "period": "1y", "report_type": "research"}
+        )
+        task_id = str(task.get("task_id", ""))
+        self.assertTrue(task_id)
+
+        # Poll for terminal or usable state; async task may expose partial result
+        # before full completion for better UX feedback.
+        final_status = ""
+        for _ in range(120):
+            snapshot = self.svc.report_task_get(task_id)
+            final_status = str(snapshot.get("status", ""))
+            if final_status in {"completed", "failed", "partial_ready"}:
+                break
+            time.sleep(0.05)
+        self.assertIn(final_status, {"completed", "failed", "partial_ready"})
+
+        result = self.svc.report_task_result(task_id)
+        self.assertIn("result_level", result)
+        self.assertIn("status", result)
+        if final_status in {"completed", "partial_ready"}:
+            self.assertIn(str(result.get("result_level", "")), {"partial", "full"})
+            self.assertIsInstance(result.get("result"), dict)
 
     def test_ingest_endpoints(self) -> None:
         daily = self.svc.ingest_market_daily(["SH600000", "SZ000001"])
@@ -149,6 +180,10 @@ class ServiceTestCase(unittest.TestCase):
         self.assertTrue(isinstance((target_health or {}).get("used_in_ui_modules", []), list))
         self.assertIn("last_used_at", target_health or {})
         self.assertIn("staleness_minutes", target_health or {})
+        business = self.svc.business_data_health(stock_code="SH600000", limit=200)
+        self.assertIn("status", business)
+        self.assertIn("module_health", business)
+        self.assertIn("stock_snapshot", business)
 
     def test_doc_upload_and_index(self) -> None:
         up = self.svc.docs_upload("d1", "demo.pdf", "财报正文" * 600, "user")
@@ -286,9 +321,15 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("run_id", run)
         self.assertEqual(len(run["results"]), 2)
         self.assertIn("history_data_mode", run["results"][0]["source"])
+        self.assertIn("data_quality", run)
+        self.assertIn("degrade_reasons", run)
+        self.assertIn("source_coverage", run)
+        self.assertIn("metric_mode", run)
+        self.assertIn("metrics_simulated", run)
         latest = self.svc.predict_eval_latest()
         self.assertEqual(latest["status"], "ok")
         self.assertIn("ic", latest["metrics"])
+        self.assertIn(str(latest.get("metric_mode", "")), {"simulated", "backtest_proxy"})
 
     def test_market_overview_contains_realtime_and_history(self) -> None:
         data = self.svc.market_overview("SH600000")
