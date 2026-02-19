@@ -101,10 +101,24 @@ class ServiceTestCase(unittest.TestCase):
         daily = self.svc.ingest_market_daily(["SH600000", "SZ000001"])
         ann = self.svc.ingest_announcements(["SH600000"])
         fin = self.svc.ingest_financials(["SH600000"])
+        news = self.svc.ingest_news(["SH600000"], limit=3)
+        research = self.svc.ingest_research_reports(["SH600000"], limit=3)
+        macro = self.svc.ingest_macro_indicators(limit=3)
+        fund = self.svc.ingest_fund_snapshots(["SH600000"])
         self.assertEqual(daily["failed_count"], 0)
         self.assertEqual(ann["success_count"], 1)
         self.assertEqual(fin["task_name"], "financial-snapshot")
         self.assertEqual(fin["success_count"], 1)
+        self.assertEqual(news["task_name"], "news-ingest")
+        self.assertGreaterEqual(news["success_count"], 1)
+        self.assertEqual(research["task_name"], "research-ingest")
+        self.assertGreaterEqual(research["success_count"], 1)
+        self.assertEqual(macro["task_name"], "macro-ingest")
+        self.assertGreaterEqual(macro["success_count"], 1)
+        self.assertEqual(fund["task_name"], "fund-ingest")
+        self.assertGreaterEqual(fund["success_count"], 1)
+        # Regression: news/research ingest should produce RAG docs for later retrieval.
+        self.assertGreaterEqual(len(self.svc.ingestion_store.docs), 1)
 
     def test_doc_upload_and_index(self) -> None:
         up = self.svc.docs_upload("d1", "demo.pdf", "财报正文" * 600, "user")
@@ -230,6 +244,10 @@ class ServiceTestCase(unittest.TestCase):
         data = self.svc.market_overview("SH600000")
         self.assertIn("realtime", data)
         self.assertIn("history", data)
+        self.assertIn("news", data)
+        self.assertIn("research", data)
+        self.assertIn("fund", data)
+        self.assertIn("macro", data)
         self.assertGreater(len(data["history"]), 30)
 
     def test_portfolio_lifecycle(self) -> None:

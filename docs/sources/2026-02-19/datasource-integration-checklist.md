@@ -85,23 +85,26 @@
 
 ## ROUND-AF：新闻/研报/宏观/基金迁移
 
-- [ ] 迁移并实现 `news/cls.py`
-- [ ] 迁移并实现 `news/tradingview.py`
-- [ ] 迁移并实现 `news/xueqiu_news.py`
-- [ ] 迁移并实现 `research/eastmoney_research.py`
-- [ ] 迁移并实现 `macro/eastmoney_macro.py`
-- [ ] 迁移并实现 `fund/ttjj.py`
-- [ ] 打通长文本入 RAG（摘要 + 原文切块）
-- [ ] 添加相关单测与入库校验
-- [ ] 记录技术文档（round-AF）
-- [ ] 提交 commit（round-AF）
+- [x] 迁移并实现 `news/cls.py`
+- [x] 迁移并实现 `news/tradingview.py`
+- [x] 迁移并实现 `news/xueqiu_news.py`
+- [x] 迁移并实现 `research/eastmoney_research.py`
+- [x] 迁移并实现 `macro/eastmoney_macro.py`
+- [x] 迁移并实现 `fund/ttjj.py`
+- [x] 打通长文本入 RAG（摘要 + 原文切块）
+- [x] 添加相关单测与入库校验
+- [x] 记录技术文档（round-AF）
+- [x] 提交 commit（round-AF）
 
 证据记录：
 
 - 自测命令：
-- 自测结果：
-- 技术文档路径：
-- Commit Hash：
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_datasource_intel_adapters.py tests/test_ingestion_extended_sources.py tests/test_datasources_factory.py`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "ingest_endpoints or market_overview_contains_realtime_and_history"`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "ingest_market_daily or ingest_announcements or ingest_financials or ingest_news or ingest_research or ingest_macro or ingest_fund"`
+- 自测结果：`21 passed` + `2 passed` + `7 passed`（其余为 deselected 子集）
+- 技术文档路径：`docs/sources/2026-02-19/round-AF-news-research-macro-fund-rag.md`
+- Commit Hash：见本轮 round-AF commit
 
 ## ROUND-AG：数据源管理 API 与可观测性
 
@@ -170,3 +173,4 @@ npx tsc --noEmit
 1. `2026-02-19 | ROUND-AC | 完成 datasources 骨架、factory、config 接入与基础回归测试 | hash: 89c8f01 | doc: docs/sources/2026-02-19/round-AC-datasource-scaffold-and-config.md`
 2. `2026-02-19 | ROUND-AD | 完成 quote 四源迁移、新 QuoteService 回退链及回归验证 | hash: 7b5feb0 | doc: docs/sources/2026-02-19/round-AD-quote-adapters-migration.md`
 3. `2026-02-19 | ROUND-AE | 完成 financial 双源迁移、摄取落库、Query/DeepThink 财务证据接入 | hash: 见本轮 round-AE commit | doc: docs/sources/2026-02-19/round-AE-financial-adapters-and-ingestion.md`
+4. `2026-02-19 | ROUND-AF | 完成 news/research/macro/fund 迁移、自动 RAG 入索引、ingest API 与回归测试 | hash: 见本轮 round-AF commit | doc: docs/sources/2026-02-19/round-AF-news-research-macro-fund-rag.md`

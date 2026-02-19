@@ -1,8 +1,10 @@
 # Fund Datasources
 
-Planned adapters:
+Implemented adapters:
 
 1. TTJJ fund adapter.
 
-Round-AC only scaffolds the directory.
+Service fallback order:
 
+1. TTJJ fund flow endpoint
+2. Mock fallback

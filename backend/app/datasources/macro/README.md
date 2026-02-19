@@ -1,8 +1,10 @@
 # Macro Datasources
 
-Planned adapters:
+Implemented adapters:
 
 1. Eastmoney macro indicator adapter.
 
-Round-AC only scaffolds the directory.
+Service fallback order:
 
+1. Eastmoney macro indicators
+2. Mock fallback

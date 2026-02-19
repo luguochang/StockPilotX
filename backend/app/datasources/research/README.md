@@ -1,8 +1,10 @@
 # Research Datasources
 
-Planned adapters:
+Implemented adapters:
 
 1. Eastmoney research report adapter.
 
-Round-AC only scaffolds the directory.
+Service fallback order:
 
+1. Eastmoney research
+2. Mock fallback

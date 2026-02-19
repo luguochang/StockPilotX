@@ -1,4 +1,6 @@
 from __future__ import annotations
 
-# Round-AF will add concrete macro adapters here.
+from backend.app.datasources.macro.eastmoney_macro import EastmoneyMacroAdapter
+from backend.app.datasources.macro.service import MacroService, MockMacroAdapter
 
+__all__ = ["MacroService", "MockMacroAdapter", "EastmoneyMacroAdapter"]

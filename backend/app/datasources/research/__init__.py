@@ -1,4 +1,6 @@
 from __future__ import annotations
 
-# Round-AF will add concrete research adapters here.
+from backend.app.datasources.research.eastmoney_research import EastmoneyResearchAdapter
+from backend.app.datasources.research.service import MockResearchAdapter, ResearchService
 
+__all__ = ["ResearchService", "MockResearchAdapter", "EastmoneyResearchAdapter"]

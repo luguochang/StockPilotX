@@ -25,9 +25,13 @@ from backend.app.agents.workflow import AgentWorkflow
 from backend.app.config import Settings
 from backend.app.datasources import (
     build_default_announcement_service,
+    build_default_fund_service,
     build_default_financial_service,
     build_default_history_service,
+    build_default_macro_service,
+    build_default_news_service,
     build_default_quote_service,
+    build_default_research_service,
 )
 from backend.app.data.ingestion import IngestionService, IngestionStore
 from backend.app.data.scheduler import JobConfig, LocalJobScheduler
@@ -110,6 +114,10 @@ class AShareAgentService:
             announcement_service=build_default_announcement_service(self.settings),
             history_service=build_default_history_service(self.settings),
             financial_service=build_default_financial_service(self.settings),
+            news_service=build_default_news_service(self.settings),
+            research_service=build_default_research_service(self.settings),
+            macro_service=build_default_macro_service(self.settings),
+            fund_service=build_default_fund_service(self.settings),
             store=self.ingestion_store,
         )
         self.doc_recommender = DocumentRecommender()
@@ -939,6 +947,9 @@ class AShareAgentService:
                     ann_refresh = [c for c in req.stock_codes if self._needs_announcement_refresh(c)]
                     hist_refresh = [c for c in req.stock_codes if self._needs_history_refresh(c)]
                     fin_refresh = [c for c in req.stock_codes if self._needs_financial_refresh(c)]
+                    news_refresh = [c for c in req.stock_codes if self._needs_news_refresh(c)]
+                    research_refresh = [c for c in req.stock_codes if self._needs_research_refresh(c)]
+                    fund_refresh = [c for c in req.stock_codes if self._needs_fund_refresh(c)]
                     if quote_refresh:
                         self.ingest_market_daily(quote_refresh)
                     if ann_refresh:
@@ -947,6 +958,14 @@ class AShareAgentService:
                         self.ingestion.ingest_history_daily(hist_refresh, limit=260)
                     if fin_refresh:
                         self.ingest_financials(fin_refresh)
+                    if news_refresh:
+                        self.ingest_news(news_refresh, limit=8)
+                    if research_refresh:
+                        self.ingest_research_reports(research_refresh, limit=6)
+                    if fund_refresh:
+                        self.ingest_fund_snapshots(fund_refresh)
+                    if self._needs_macro_refresh():
+                        self.ingest_macro_indicators(limit=8)
                 except Exception:
                     # Keep query available even when data refresh partially fails.
                     pass
@@ -1185,6 +1204,9 @@ class AShareAgentService:
                 ann_refresh = [c for c in req.stock_codes if self._needs_announcement_refresh(c)]
                 hist_refresh = [c for c in req.stock_codes if self._needs_history_refresh(c)]
                 fin_refresh = [c for c in req.stock_codes if self._needs_financial_refresh(c)]
+                news_refresh = [c for c in req.stock_codes if self._needs_news_refresh(c)]
+                research_refresh = [c for c in req.stock_codes if self._needs_research_refresh(c)]
+                fund_refresh = [c for c in req.stock_codes if self._needs_fund_refresh(c)]
                 if quote_refresh:
                     self.ingest_market_daily(quote_refresh)
                 if ann_refresh:
@@ -1193,6 +1215,14 @@ class AShareAgentService:
                     self.ingestion.ingest_history_daily(hist_refresh, limit=260)
                 if fin_refresh:
                     self.ingest_financials(fin_refresh)
+                if news_refresh:
+                    self.ingest_news(news_refresh, limit=8)
+                if research_refresh:
+                    self.ingest_research_reports(research_refresh, limit=6)
+                if fund_refresh:
+                    self.ingest_fund_snapshots(fund_refresh)
+                if self._needs_macro_refresh():
+                    self.ingest_macro_indicators(limit=8)
             except Exception:
                 # 刷新失败不阻断主流程，只向前端透出 warning 便于定位时延与降级行为。
                 yield {"event": "progress", "data": {"phase": "data_refresh", "status": "degraded"}}
@@ -1878,6 +1908,78 @@ class AShareAgentService:
             )
 
         # 已索引文档分块 -> 文本事实
+        # News events -> textual evidence.
+        for row in self.ingestion_store.news_items[-1200:]:
+            code = str(row.get("stock_code", ""))
+            if symbols and code not in symbols:
+                continue
+            text = f"{code} 新闻：{row.get('title', '')}。{row.get('content', '')}"
+            corpus.append(
+                RetrievalItem(
+                    text=text,
+                    source_id=str(row.get("source_id", "news")),
+                    source_url=str(row.get("source_url", "")),
+                    score=0.0,
+                    event_time=self._parse_time(str(row.get("event_time", ""))),
+                    reliability_score=float(row.get("reliability_score", 0.65)),
+                    metadata={"retrieval_track": "news_event"},
+                )
+            )
+
+        # Research reports -> textual evidence.
+        for row in self.ingestion_store.research_reports[-800:]:
+            code = str(row.get("stock_code", ""))
+            if symbols and code not in symbols:
+                continue
+            text = f"{code} 研报：{row.get('title', '')}。机构={row.get('org_name', '')}。作者={row.get('author', '')}。"
+            corpus.append(
+                RetrievalItem(
+                    text=text,
+                    source_id=str(row.get("source_id", "research")),
+                    source_url=str(row.get("source_url", "")),
+                    score=0.0,
+                    event_time=self._parse_time(str(row.get("published_at", ""))),
+                    reliability_score=float(row.get("reliability_score", 0.7)),
+                    metadata={"retrieval_track": "research_report"},
+                )
+            )
+
+        # Macro indicators -> global evidence.
+        for row in self.ingestion_store.macro_indicators[-400:]:
+            text = f"宏观指标 {row.get('metric_name', '')}={row.get('metric_value', '')}，日期={row.get('report_date', '')}"
+            corpus.append(
+                RetrievalItem(
+                    text=text,
+                    source_id=str(row.get("source_id", "macro")),
+                    source_url=str(row.get("source_url", "")),
+                    score=0.0,
+                    event_time=self._parse_time(str(row.get("event_time", ""))),
+                    reliability_score=float(row.get("reliability_score", 0.7)),
+                    metadata={"retrieval_track": "macro_indicator"},
+                )
+            )
+
+        # Fund flow snapshots -> textual evidence.
+        for row in self.ingestion_store.fund_snapshots[-600:]:
+            code = str(row.get("stock_code", ""))
+            if symbols and code not in symbols:
+                continue
+            text = (
+                f"{code} 资金流向：主力={row.get('main_inflow')}，小单={row.get('small_inflow')}，"
+                f"中单={row.get('middle_inflow')}，大单={row.get('large_inflow')}。"
+            )
+            corpus.append(
+                RetrievalItem(
+                    text=text,
+                    source_id=str(row.get("source_id", "fund")),
+                    source_url=str(row.get("source_url", "")),
+                    score=0.0,
+                    event_time=self._parse_time(str(row.get("ts", ""))),
+                    reliability_score=float(row.get("reliability_score", 0.65)),
+                    metadata={"retrieval_track": "fund_flow"},
+                )
+            )
+
         for doc in self.ingestion_store.docs.values():
             if not doc.get("indexed"):
                 continue
@@ -2005,6 +2107,43 @@ class AShareAgentService:
         code = stock_code.upper().replace(".", "")
         now = datetime.now(timezone.utc)
         for item in reversed(self.ingestion_store.financial_snapshots):
+            if str(item.get("stock_code", "")).upper() != code:
+                continue
+            ts = self._parse_time(str(item.get("ts", "")))
+            return (now - ts).total_seconds() > max_age_seconds
+        return True
+
+    def _needs_news_refresh(self, stock_code: str, max_age_seconds: int = 60 * 60) -> bool:
+        code = stock_code.upper().replace(".", "")
+        now = datetime.now(timezone.utc)
+        for item in reversed(self.ingestion_store.news_items):
+            if str(item.get("stock_code", "")).upper() != code:
+                continue
+            ts = self._parse_time(str(item.get("event_time", "")))
+            return (now - ts).total_seconds() > max_age_seconds
+        return True
+
+    def _needs_research_refresh(self, stock_code: str, max_age_seconds: int = 60 * 60 * 12) -> bool:
+        code = stock_code.upper().replace(".", "")
+        now = datetime.now(timezone.utc)
+        for item in reversed(self.ingestion_store.research_reports):
+            if str(item.get("stock_code", "")).upper() != code:
+                continue
+            ts = self._parse_time(str(item.get("published_at", "")))
+            return (now - ts).total_seconds() > max_age_seconds
+        return True
+
+    def _needs_macro_refresh(self, max_age_seconds: int = 60 * 60 * 12) -> bool:
+        now = datetime.now(timezone.utc)
+        if not self.ingestion_store.macro_indicators:
+            return True
+        ts = self._parse_time(str(self.ingestion_store.macro_indicators[-1].get("event_time", "")))
+        return (now - ts).total_seconds() > max_age_seconds
+
+    def _needs_fund_refresh(self, stock_code: str, max_age_seconds: int = 60 * 30) -> bool:
+        code = stock_code.upper().replace(".", "")
+        now = datetime.now(timezone.utc)
+        for item in reversed(self.ingestion_store.fund_snapshots):
             if str(item.get("stock_code", "")).upper() != code:
                 continue
             ts = self._parse_time(str(item.get("ts", "")))
@@ -2412,6 +2551,84 @@ class AShareAgentService:
         """触发财务快照数据摄取。"""
 
         return self.ingestion.ingest_financials(stock_codes)
+
+    def ingest_news(self, stock_codes: list[str], limit: int = 20) -> dict[str, Any]:
+        """触发新闻数据摄取，并将长文本同步进本地 RAG 索引。"""
+
+        result = self.ingestion.ingest_news(stock_codes, limit=limit)
+        # News text contributes to event-driven analysis, so we index it as lightweight docs.
+        self._index_text_rows_to_rag(
+            rows=self.ingestion.store.news_items[-400:],
+            namespace="news",
+            source_field="source_id",
+            time_field="event_time",
+            content_fields=("content", "title"),
+            filename_ext="txt",
+        )
+        return result
+
+    def ingest_research_reports(self, stock_codes: list[str], limit: int = 20) -> dict[str, Any]:
+        """触发研报数据摄取，并同步进入本地文档索引。"""
+
+        result = self.ingestion.ingest_research_reports(stock_codes, limit=limit)
+        self._index_text_rows_to_rag(
+            rows=self.ingestion.store.research_reports[-240:],
+            namespace="research",
+            source_field="source_id",
+            time_field="published_at",
+            content_fields=("content", "title"),
+            filename_ext="txt",
+        )
+        return result
+
+    def ingest_macro_indicators(self, limit: int = 20) -> dict[str, Any]:
+        """触发宏观指标摄取。"""
+
+        return self.ingestion.ingest_macro_indicators(limit=limit)
+
+    def ingest_fund_snapshots(self, stock_codes: list[str]) -> dict[str, Any]:
+        """触发资金流向快照摄取。"""
+
+        return self.ingestion.ingest_fund_snapshots(stock_codes)
+
+    def _index_text_rows_to_rag(
+        self,
+        *,
+        rows: list[dict[str, Any]],
+        namespace: str,
+        source_field: str,
+        time_field: str,
+        content_fields: tuple[str, ...],
+        filename_ext: str = "txt",
+    ) -> None:
+        """Best-effort helper: map structured rows to local RAG docs without blocking ingestion."""
+
+        for row in rows:
+            # Stable id dedups repeated ingest calls for the same upstream record.
+            signature = (
+                str(row.get("source_url", ""))
+                + "|"
+                + str(row.get("title", ""))
+                + "|"
+                + str(row.get(time_field, ""))
+            )
+            doc_id = f"{namespace}-{hashlib.md5(signature.encode('utf-8')).hexdigest()[:16]}"
+            if doc_id in self.ingestion.store.docs:
+                continue
+            content = ""
+            for field in content_fields:
+                value = str(row.get(field, "")).strip()
+                if value:
+                    content = value
+                    break
+            if not content:
+                continue
+            try:
+                self.docs_upload(doc_id, f"{doc_id}.{filename_ext}", content, source=str(row.get(source_field, namespace)))
+                self.docs_index(doc_id)
+            except Exception:
+                # Do not fail ingestion when one row cannot be indexed.
+                continue
 
     def docs_upload(self, doc_id: str, filename: str, content: str, source: str) -> dict[str, Any]:
         """上传文档原文。"""
@@ -3068,11 +3285,23 @@ class AShareAgentService:
             self.ingestion.ingest_history_daily([code], limit=260)
         if self._needs_financial_refresh(code):
             self.ingest_financials([code])
+        if self._needs_news_refresh(code):
+            self.ingest_news([code], limit=8)
+        if self._needs_research_refresh(code):
+            self.ingest_research_reports([code], limit=6)
+        if self._needs_fund_refresh(code):
+            self.ingest_fund_snapshots([code])
+        if self._needs_macro_refresh():
+            self.ingest_macro_indicators(limit=8)
 
         realtime = self._latest_quote(code)
         bars = self._history_bars(code, limit=120)
         financial = self._latest_financial_snapshot(code)
         events = [x for x in self.ingestion_store.announcements if str(x.get("stock_code", "")).upper() == code][-10:]
+        news = [x for x in self.ingestion_store.news_items if str(x.get("stock_code", "")).upper() == code][-10:]
+        research = [x for x in self.ingestion_store.research_reports if str(x.get("stock_code", "")).upper() == code][-6:]
+        fund = [x for x in self.ingestion_store.fund_snapshots if str(x.get("stock_code", "")).upper() == code][-1:]
+        macro = self.ingestion_store.macro_indicators[-8:]
         trend = self._trend_metrics(bars) if bars else {}
         return {
             "stock_code": code,
@@ -3080,6 +3309,10 @@ class AShareAgentService:
             "financial": financial or {},
             "history": bars,
             "events": events,
+            "news": news,
+            "research": research,
+            "fund": fund,
+            "macro": macro,
             "trend": trend,
         }
 
@@ -4133,6 +4366,14 @@ class AShareAgentService:
                     self.ingestion.ingest_history_daily([code], limit=260)
                 if self._needs_financial_refresh(code):
                     self.ingest_financials([code])
+                if self._needs_news_refresh(code):
+                    self.ingest_news([code], limit=8)
+                if self._needs_research_refresh(code):
+                    self.ingest_research_reports([code], limit=6)
+                if self._needs_fund_refresh(code):
+                    self.ingest_fund_snapshots([code])
+                if self._needs_macro_refresh():
+                    self.ingest_macro_indicators(limit=8)
 
                 quote = self._latest_quote(code) or {}
                 bars = self._history_bars(code, limit=180)
@@ -4972,6 +5213,14 @@ class AShareAgentService:
             self.ingestion.ingest_history_daily([code], limit=260)
         if self._needs_financial_refresh(code):
             self.ingest_financials([code])
+        if self._needs_news_refresh(code):
+            self.ingest_news([code], limit=8)
+        if self._needs_research_refresh(code):
+            self.ingest_research_reports([code], limit=6)
+        if self._needs_fund_refresh(code):
+            self.ingest_fund_snapshots([code])
+        if self._needs_macro_refresh():
+            self.ingest_macro_indicators(limit=8)
         quote = self._latest_quote(code) or {}
         bars = self._history_bars(code, limit=180)
         financial = self._latest_financial_snapshot(code) or {}
@@ -5461,6 +5710,14 @@ class AShareAgentService:
             self.ingestion.ingest_history_daily([code], limit=260)
         if self._needs_financial_refresh(code):
             self.ingest_financials([code])
+        if self._needs_news_refresh(code):
+            self.ingest_news([code], limit=8)
+        if self._needs_research_refresh(code):
+            self.ingest_research_reports([code], limit=6)
+        if self._needs_fund_refresh(code):
+            self.ingest_fund_snapshots([code])
+        if self._needs_macro_refresh():
+            self.ingest_macro_indicators(limit=8)
 
         quote = self._latest_quote(code) or {}
         bars = self._history_bars(code, limit=160)

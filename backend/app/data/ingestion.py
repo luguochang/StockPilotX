@@ -13,6 +13,26 @@ class FinancialServiceProtocol(Protocol):
         ...
 
 
+class NewsServiceProtocol(Protocol):
+    def fetch_news(self, stock_code: str, limit: int = 20) -> list[dict[str, Any]]:
+        ...
+
+
+class ResearchServiceProtocol(Protocol):
+    def fetch_reports(self, stock_code: str, limit: int = 20) -> list[dict[str, Any]]:
+        ...
+
+
+class MacroServiceProtocol(Protocol):
+    def fetch_macro_indicators(self, limit: int = 20) -> list[dict[str, Any]]:
+        ...
+
+
+class FundServiceProtocol(Protocol):
+    def fetch_fund_snapshot(self, stock_code: str) -> dict[str, Any]:
+        ...
+
+
 @dataclass(slots=True)
 class IngestionStore:
     """摄取数据的本地存储容器（MVP 内存版）。"""
@@ -21,6 +41,10 @@ class IngestionStore:
     history_bars: list[dict[str, Any]] = field(default_factory=list)
     announcements: list[dict[str, Any]] = field(default_factory=list)
     financial_snapshots: list[dict[str, Any]] = field(default_factory=list)
+    news_items: list[dict[str, Any]] = field(default_factory=list)
+    research_reports: list[dict[str, Any]] = field(default_factory=list)
+    macro_indicators: list[dict[str, Any]] = field(default_factory=list)
+    fund_snapshots: list[dict[str, Any]] = field(default_factory=list)
     docs: dict[str, dict[str, Any]] = field(default_factory=dict)
     review_queue: list[dict[str, Any]] = field(default_factory=list)
 
@@ -38,12 +62,20 @@ class IngestionService:
         store: IngestionStore,
         history_service: HistoryService | None = None,
         financial_service: FinancialServiceProtocol | None = None,
+        news_service: NewsServiceProtocol | None = None,
+        research_service: ResearchServiceProtocol | None = None,
+        macro_service: MacroServiceProtocol | None = None,
+        fund_service: FundServiceProtocol | None = None,
     ):
         """注入行情服务、公告服务和存储对象。"""
         self.quote_service = quote_service
         self.announcement_service = announcement_service
         self.history_service = history_service or HistoryService()
         self.financial_service = financial_service
+        self.news_service = news_service
+        self.research_service = research_service
+        self.macro_service = macro_service
+        self.fund_service = fund_service
         self.store = store
         self.doc_pipeline = DocumentPipeline()
 
@@ -158,6 +190,111 @@ class IngestionService:
                 failed += 1
                 details.append({"stock_code": normalized_code, "status": "failed", "error": str(ex)})
         return {"task_name": "financial-snapshot", "success_count": success, "failed_count": failed, "details": details}
+
+    def ingest_news(self, stock_codes: list[str], limit: int = 20) -> dict[str, Any]:
+        if not self.news_service:
+            return {
+                "task_name": "news-ingest",
+                "success_count": 0,
+                "failed_count": len(stock_codes),
+                "details": [{"stock_code": code, "status": "failed", "error": "news_service_not_configured"} for code in stock_codes],
+            }
+        success, failed, details = 0, 0, []
+        for code in stock_codes:
+            normalized_code = _normalize_stock_code(code)
+            try:
+                rows = self.news_service.fetch_news(normalized_code, limit=limit)
+                normalized_rows: list[dict[str, Any]] = []
+                for row in rows:
+                    item = _normalize_news_payload(row, normalized_code)
+                    item["quality_flags"] = _validate_news_payload(item)
+                    normalized_rows.append(item)
+                self.store.news_items.extend(normalized_rows)
+                success += 1
+                details.append({"stock_code": normalized_code, "status": "ok", "count": len(normalized_rows)})
+            except RuntimeError as ex:
+                failed += 1
+                details.append({"stock_code": normalized_code, "status": "failed", "error": str(ex)})
+        return {"task_name": "news-ingest", "success_count": success, "failed_count": failed, "details": details}
+
+    def ingest_research_reports(self, stock_codes: list[str], limit: int = 20) -> dict[str, Any]:
+        if not self.research_service:
+            return {
+                "task_name": "research-ingest",
+                "success_count": 0,
+                "failed_count": len(stock_codes),
+                "details": [
+                    {"stock_code": code, "status": "failed", "error": "research_service_not_configured"} for code in stock_codes
+                ],
+            }
+        success, failed, details = 0, 0, []
+        for code in stock_codes:
+            normalized_code = _normalize_stock_code(code)
+            try:
+                rows = self.research_service.fetch_reports(normalized_code, limit=limit)
+                normalized_rows: list[dict[str, Any]] = []
+                for row in rows:
+                    item = _normalize_research_payload(row, normalized_code)
+                    item["quality_flags"] = _validate_research_payload(item)
+                    normalized_rows.append(item)
+                self.store.research_reports.extend(normalized_rows)
+                success += 1
+                details.append({"stock_code": normalized_code, "status": "ok", "count": len(normalized_rows)})
+            except RuntimeError as ex:
+                failed += 1
+                details.append({"stock_code": normalized_code, "status": "failed", "error": str(ex)})
+        return {"task_name": "research-ingest", "success_count": success, "failed_count": failed, "details": details}
+
+    def ingest_macro_indicators(self, limit: int = 20) -> dict[str, Any]:
+        if not self.macro_service:
+            return {
+                "task_name": "macro-ingest",
+                "success_count": 0,
+                "failed_count": 1,
+                "details": [{"status": "failed", "error": "macro_service_not_configured"}],
+            }
+        try:
+            rows = self.macro_service.fetch_macro_indicators(limit=limit)
+            normalized_rows: list[dict[str, Any]] = []
+            for row in rows:
+                item = _normalize_macro_payload(row)
+                item["quality_flags"] = _validate_macro_payload(item)
+                normalized_rows.append(item)
+            self.store.macro_indicators.extend(normalized_rows)
+            return {"task_name": "macro-ingest", "success_count": 1, "failed_count": 0, "details": [{"count": len(normalized_rows), "status": "ok"}]}
+        except RuntimeError as ex:
+            return {"task_name": "macro-ingest", "success_count": 0, "failed_count": 1, "details": [{"status": "failed", "error": str(ex)}]}
+
+    def ingest_fund_snapshots(self, stock_codes: list[str]) -> dict[str, Any]:
+        if not self.fund_service:
+            return {
+                "task_name": "fund-ingest",
+                "success_count": 0,
+                "failed_count": len(stock_codes),
+                "details": [{"stock_code": code, "status": "failed", "error": "fund_service_not_configured"} for code in stock_codes],
+            }
+        success, failed, details = 0, 0, []
+        for code in stock_codes:
+            normalized_code = _normalize_stock_code(code)
+            try:
+                row = self.fund_service.fetch_fund_snapshot(normalized_code)
+                item = _normalize_fund_payload(row, normalized_code)
+                item["quality_flags"] = _validate_fund_payload(item)
+                self.store.fund_snapshots = [
+                    x
+                    for x in self.store.fund_snapshots
+                    if not (
+                        str(x.get("stock_code", "")).upper() == normalized_code
+                        and str(x.get("source_id", "")) == str(item.get("source_id", ""))
+                    )
+                ]
+                self.store.fund_snapshots.append(item)
+                success += 1
+                details.append({"stock_code": normalized_code, "status": "ok", "source": item.get("source_id", "")})
+            except RuntimeError as ex:
+                failed += 1
+                details.append({"stock_code": normalized_code, "status": "failed", "error": str(ex)})
+        return {"task_name": "fund-ingest", "success_count": success, "failed_count": failed, "details": details}
 
     def upload_doc(self, doc_id: str, filename: str, content: str, source: str) -> dict[str, Any]:
         """上传文档原文到文档存储。"""
@@ -277,6 +414,59 @@ def _normalize_financial_payload(payload: dict[str, Any], stock_code: str) -> di
     }
 
 
+def _normalize_news_payload(payload: dict[str, Any], stock_code: str) -> dict[str, Any]:
+    return {
+        "stock_code": stock_code,
+        "title": str(payload.get("title", "")),
+        "content": str(payload.get("content", "")),
+        "event_time": str(payload.get("event_time", "")),
+        "source_id": str(payload.get("source_id", "unknown")),
+        "source_url": str(payload.get("source_url", "")),
+        "reliability_score": float(payload.get("reliability_score", 0.0) or 0.0),
+    }
+
+
+def _normalize_research_payload(payload: dict[str, Any], stock_code: str) -> dict[str, Any]:
+    return {
+        "stock_code": stock_code,
+        "title": str(payload.get("title", "")),
+        "content": str(payload.get("content", "")),
+        "published_at": str(payload.get("published_at", "")),
+        "author": str(payload.get("author", "")),
+        "org_name": str(payload.get("org_name", "")),
+        "source_id": str(payload.get("source_id", "unknown")),
+        "source_url": str(payload.get("source_url", "")),
+        "reliability_score": float(payload.get("reliability_score", 0.0) or 0.0),
+    }
+
+
+def _normalize_macro_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "metric_name": str(payload.get("metric_name", "")),
+        "metric_value": str(payload.get("metric_value", "")),
+        "report_date": str(payload.get("report_date", "")),
+        "event_time": str(payload.get("event_time", "")),
+        "source_id": str(payload.get("source_id", "unknown")),
+        "source_url": str(payload.get("source_url", "")),
+        "reliability_score": float(payload.get("reliability_score", 0.0) or 0.0),
+    }
+
+
+def _normalize_fund_payload(payload: dict[str, Any], stock_code: str) -> dict[str, Any]:
+    return {
+        "stock_code": stock_code,
+        "trade_date": str(payload.get("trade_date", "")),
+        "main_inflow": float(payload.get("main_inflow", 0.0) or 0.0),
+        "small_inflow": float(payload.get("small_inflow", 0.0) or 0.0),
+        "middle_inflow": float(payload.get("middle_inflow", 0.0) or 0.0),
+        "large_inflow": float(payload.get("large_inflow", 0.0) or 0.0),
+        "ts": str(payload.get("ts", "")),
+        "source_id": str(payload.get("source_id", "unknown")),
+        "source_url": str(payload.get("source_url", "")),
+        "reliability_score": float(payload.get("reliability_score", 0.0) or 0.0),
+    }
+
+
 def _validate_quote_payload(payload: dict[str, Any]) -> list[str]:
     flags: list[str] = []
     required = ("stock_code", "ts", "source_id", "source_url")
@@ -312,6 +502,50 @@ def _validate_financial_payload(payload: dict[str, Any]) -> list[str]:
     # Soft validation only: the value can be negative for YoY metrics.
     if payload.get("pe_ttm", 0.0) == 0.0 and payload.get("pb_mrq", 0.0) == 0.0:
         flags.append("valuation_missing")
+    return flags
+
+
+def _validate_news_payload(payload: dict[str, Any]) -> list[str]:
+    flags: list[str] = []
+    required = ("stock_code", "title", "event_time", "source_id")
+    for key in required:
+        if not payload.get(key):
+            flags.append(f"missing_{key}")
+    if payload.get("reliability_score", 0.0) < 0.5:
+        flags.append("low_reliability")
+    return flags
+
+
+def _validate_research_payload(payload: dict[str, Any]) -> list[str]:
+    flags: list[str] = []
+    required = ("stock_code", "title", "published_at", "source_id")
+    for key in required:
+        if not payload.get(key):
+            flags.append(f"missing_{key}")
+    if payload.get("reliability_score", 0.0) < 0.5:
+        flags.append("low_reliability")
+    return flags
+
+
+def _validate_macro_payload(payload: dict[str, Any]) -> list[str]:
+    flags: list[str] = []
+    required = ("metric_name", "metric_value", "event_time", "source_id")
+    for key in required:
+        if not payload.get(key):
+            flags.append(f"missing_{key}")
+    if payload.get("reliability_score", 0.0) < 0.5:
+        flags.append("low_reliability")
+    return flags
+
+
+def _validate_fund_payload(payload: dict[str, Any]) -> list[str]:
+    flags: list[str] = []
+    required = ("stock_code", "trade_date", "ts", "source_id")
+    for key in required:
+        if not payload.get(key):
+            flags.append(f"missing_{key}")
+    if payload.get("reliability_score", 0.0) < 0.5:
+        flags.append("low_reliability")
     return flags
 
 

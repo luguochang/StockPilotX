@@ -273,6 +273,26 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(body["task_name"], "financial-snapshot")
 
+    def test_ingest_news(self) -> None:
+        code, body = self._post("/v1/ingest/news", {"stock_codes": ["SH600000"], "limit": 3})
+        self.assertEqual(code, 200)
+        self.assertEqual(body["task_name"], "news-ingest")
+
+    def test_ingest_research(self) -> None:
+        code, body = self._post("/v1/ingest/research", {"stock_codes": ["SH600000"], "limit": 3})
+        self.assertEqual(code, 200)
+        self.assertEqual(body["task_name"], "research-ingest")
+
+    def test_ingest_macro(self) -> None:
+        code, body = self._post("/v1/ingest/macro", {"limit": 3})
+        self.assertEqual(code, 200)
+        self.assertEqual(body["task_name"], "macro-ingest")
+
+    def test_ingest_fund(self) -> None:
+        code, body = self._post("/v1/ingest/fund", {"stock_codes": ["SH600000"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(body["task_name"], "fund-ingest")
+
     def test_docs_upload_and_index(self) -> None:
         upload_code, uploaded = self._post(
             "/v1/docs/upload",

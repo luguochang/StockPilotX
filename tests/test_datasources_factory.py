@@ -5,9 +5,13 @@ import unittest
 from backend.app.config import Settings
 from backend.app.datasources import (
     build_default_announcement_service,
+    build_default_fund_service,
     build_default_financial_service,
     build_default_history_service,
+    build_default_macro_service,
+    build_default_news_service,
     build_default_quote_service,
+    build_default_research_service,
 )
 
 
@@ -32,6 +36,24 @@ class DatasourceFactoryTestCase(unittest.TestCase):
     def test_financial_service_is_constructed(self) -> None:
         svc = build_default_financial_service(Settings())
         self.assertTrue(hasattr(svc, "get_financial_snapshot"))
+
+    def test_news_service_uses_tradingview_proxy(self) -> None:
+        svc = build_default_news_service(Settings(datasource_tradingview_proxy_url="http://127.0.0.1:18080"))
+        # TradingView adapter is the second adapter in the fallback chain.
+        adapter = svc.adapters[1]
+        self.assertEqual(getattr(getattr(adapter, "config", None), "proxy_url", ""), "http://127.0.0.1:18080")
+
+    def test_research_service_is_constructed(self) -> None:
+        svc = build_default_research_service(Settings())
+        self.assertTrue(hasattr(svc, "fetch_reports"))
+
+    def test_macro_service_is_constructed(self) -> None:
+        svc = build_default_macro_service(Settings())
+        self.assertTrue(hasattr(svc, "fetch_macro_indicators"))
+
+    def test_fund_service_is_constructed(self) -> None:
+        svc = build_default_fund_service(Settings())
+        self.assertTrue(hasattr(svc, "fetch_fund_snapshot"))
 
 
 if __name__ == "__main__":

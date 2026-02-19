@@ -368,6 +368,23 @@ def create_app() -> FastAPI:
     def ingest_financials(payload: dict):
         return svc.ingest_financials(payload.get("stock_codes", []))
 
+    @app.post("/v1/ingest/news")
+    def ingest_news(payload: dict):
+        # `limit` lets operators control cost/latency in batch backfill scenarios.
+        return svc.ingest_news(payload.get("stock_codes", []), limit=int(payload.get("limit", 20)))
+
+    @app.post("/v1/ingest/research")
+    def ingest_research(payload: dict):
+        return svc.ingest_research_reports(payload.get("stock_codes", []), limit=int(payload.get("limit", 20)))
+
+    @app.post("/v1/ingest/macro")
+    def ingest_macro(payload: dict):
+        return svc.ingest_macro_indicators(limit=int(payload.get("limit", 20)))
+
+    @app.post("/v1/ingest/fund")
+    def ingest_fund(payload: dict):
+        return svc.ingest_fund_snapshots(payload.get("stock_codes", []))
+
     @app.post("/v1/docs/upload")
     def docs_upload(payload: dict):
         return svc.docs_upload(
