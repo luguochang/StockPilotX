@@ -645,3 +645,30 @@
 - [x] Journal API 路由
 - [x] 服务层/API 层测试
 - [x] 回归测试通过
+
+## 第13批增量（计划治理 - 移除 Community）
+
+### 变更说明
+
+根据最新需求，Phase3 的执行计划从“Journal + Community”调整为“仅 Journal 主线”。
+
+### 影响范围
+
+- 执行队列：移除 Community MVP（帖子/评论/点赞/关注）开发任务。
+- 文档计划：同步修正 checklist / execution log / report / round 中的后续计划描述。
+
+### 第13批自检
+
+执行命令：
+```bash
+rg -n "Community MVP|Journal -> Community|社区内容推荐" docs/checklist/2026-02-19 docs/reports/2026-02-19 docs/rounds/2026-02-19
+```
+
+结果：
+- 不再命中“Community 作为后续执行项”的表述。
+
+### 第13批 Checklist
+
+- [x] Community 从执行计划移除
+- [x] 计划文档同步收敛
+- [x] 自检通过

@@ -11,6 +11,8 @@
   - 投资日志列表（支持类型/股票过滤）
   - 复盘记录创建
   - 复盘记录列表
+- 计划收敛：
+  - 根据最新需求，`Community` 已从执行计划中移除，不再作为后续批次目标。
 
 ## 2) Changed Files
 
@@ -43,5 +45,5 @@
 
 ## 4) Commit
 
-- Commit: `TBD`
-- Message: `TBD`
+- Commit: `8170568`
+- Message: `feat: add phase3 investment journal mvp endpoints`

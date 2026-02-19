@@ -3,6 +3,10 @@
 日期：2026-02-19  
 范围：`Investment Journal` 最小闭环（创建/列表/复盘）
 
+## Plan Policy
+
+- [x] 已按最新要求将 `Community` 从当前执行计划移除（不再进入后续开发队列）
+
 ## Implementation
 
 - [x] 新增 Journal 表结构与索引（`backend/app/web/store.py`）
