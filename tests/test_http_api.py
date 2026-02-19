@@ -465,6 +465,14 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertTrue(any(v.get("version") == "1.0.0" for v in versions))
         self.assertTrue(any(v.get("version") == "1.1.0" for v in versions))
 
+    def test_knowledge_graph_view(self) -> None:
+        c1, graph = self._get("/v1/knowledge/graph/SH600000?limit=20")
+        self.assertEqual(c1, 200)
+        self.assertEqual(str(graph.get("entity_id", "")), "SH600000")
+        self.assertGreaterEqual(int(graph.get("relation_count", 0)), 1)
+        self.assertTrue(isinstance(graph.get("nodes", []), list))
+        self.assertTrue(isinstance(graph.get("relations", []), list))
+
     def test_deep_think_and_a2a(self) -> None:
         c1, session = self._post(
             "/v1/deep-think/sessions",

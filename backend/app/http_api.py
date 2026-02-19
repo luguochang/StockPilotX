@@ -583,6 +583,13 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    @app.get("/v1/knowledge/graph/{entity_id}")
+    def knowledge_graph_view(entity_id: str, limit: int = 20):
+        try:
+            return svc.knowledge_graph_view(entity_id, limit=limit)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+
     @app.post("/v1/docs/{doc_id}/review/approve")
     def docs_review_approve(doc_id: str, payload: dict, authorization: str | None = Header(default=None)):
         token = _extract_bearer_token(authorization)

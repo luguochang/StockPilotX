@@ -2367,6 +2367,60 @@ class AShareAgentService:
     def docs_pipeline_runs(self, token: str, doc_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
         return self.web.doc_pipeline_runs(token, doc_id, limit=limit)
 
+    def knowledge_graph_view(self, entity_id: str, *, limit: int = 20) -> dict[str, Any]:
+        """Return one-hop graph neighborhood for a given entity."""
+        normalized = str(entity_id or "").strip().upper()
+        if not normalized:
+            raise ValueError("entity_id is required")
+        safe_limit = max(1, min(200, int(limit)))
+        raw_relations = self.workflow.graph_rag.store.find_relations([], limit=safe_limit * 3)
+
+        rows: list[dict[str, str]] = []
+        for row in raw_relations:
+            src = str(getattr(row, "src", "") or "")
+            dst = str(getattr(row, "dst", "") or "")
+            rel_type = str(getattr(row, "rel_type", "") or "")
+            source_id = str(getattr(row, "source_id", "") or "graph")
+            source_url = str(getattr(row, "source_url", "") or "")
+            if normalized not in (src.upper(), dst.upper()):
+                continue
+            rows.append(
+                {
+                    "source": src,
+                    "target": dst,
+                    "relation_type": rel_type,
+                    "source_id": source_id,
+                    "source_url": source_url,
+                }
+            )
+            if len(rows) >= safe_limit:
+                break
+
+        node_index: dict[str, dict[str, Any]] = {}
+        for relation in rows:
+            src = str(relation.get("source", ""))
+            dst = str(relation.get("target", ""))
+            if src and src not in node_index:
+                node_index[src] = {"entity_id": src, "entity_type": self._infer_graph_entity_type(src)}
+            if dst and dst not in node_index:
+                node_index[dst] = {"entity_id": dst, "entity_type": self._infer_graph_entity_type(dst)}
+
+        return {
+            "entity_id": normalized,
+            "entity_type": self._infer_graph_entity_type(normalized),
+            "node_count": len(node_index),
+            "relation_count": len(rows),
+            "nodes": list(node_index.values()),
+            "relations": rows,
+        }
+
+    @staticmethod
+    def _infer_graph_entity_type(entity_id: str) -> str:
+        token = str(entity_id or "").strip().upper()
+        if token.startswith(("SH", "SZ", "BJ")) and len(token) >= 8:
+            return "stock"
+        return "concept"
+
     def docs_quality_report(self, doc_id: str) -> dict[str, Any]:
         """Build a quality report for one indexed document.
 

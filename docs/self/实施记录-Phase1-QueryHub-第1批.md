@@ -235,3 +235,41 @@
 - [x] Upload/Index 流程接入可追溯日志
 - [x] API 路由接入
 - [x] 相关回归测试通过
+
+## 第5批增量（Knowledge Hub - 知识图谱基础查询）
+
+### 新增能力
+
+1. 知识图谱邻域查询服务
+- `backend/app/service.py`
+  - 新增 `knowledge_graph_view(entity_id, limit)`：
+    - 从现有 GraphRAG store 读取关系
+    - 输出一跳邻域 `nodes + relations`
+    - 返回 `entity_type/node_count/relation_count`
+  - 新增 `_infer_graph_entity_type()`，用于实体类型归一化（`stock/concept`）。
+
+2. 新增图谱查询 API
+- `backend/app/http_api.py`
+  - 新增：`GET /v1/knowledge/graph/{entity_id}?limit=20`
+  - 参数非法返回 `400`。
+
+### 第5批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python -m pytest -q tests/test_service.py -k "test_knowledge_graph_view"
+.\.venv\Scripts\python -m pytest -q tests/test_http_api.py -k "test_knowledge_graph_view"
+.\.venv\Scripts\python -m pytest -q tests -k "docs or query or web or api or knowledge_graph"
+```
+
+结果：
+- 1 passed, 28 deselected
+- 1 passed, 19 deselected
+- 30 passed, 55 deselected
+
+### 第5批 Checklist
+
+- [x] 知识图谱一跳邻域服务
+- [x] 知识图谱 API 路由
+- [x] 服务层/API 层测试
+- [x] 回归测试通过

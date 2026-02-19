@@ -61,6 +61,13 @@ class ServiceTestCase(unittest.TestCase):
         )
         self.assertEqual(result["mode"], "graph_rag")
 
+    def test_knowledge_graph_view(self) -> None:
+        graph = self.svc.knowledge_graph_view("SH600000", limit=20)
+        self.assertEqual(str(graph.get("entity_id", "")), "SH600000")
+        self.assertGreaterEqual(int(graph.get("relation_count", 0)), 1)
+        self.assertTrue(isinstance(graph.get("nodes", []), list))
+        self.assertTrue(isinstance(graph.get("relations", []), list))
+
     def test_report_generate_and_get(self) -> None:
         generated = self.svc.report_generate(
             {"user_id": "u3", "stock_code": "SH600000", "period": "1y", "report_type": "fact"}
