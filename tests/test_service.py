@@ -371,6 +371,59 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(int(loaded.get("journal_id", 0)), journal_id)
         self.assertTrue(str(loaded.get("summary", "")).strip())
 
+    def test_journal_insights(self) -> None:
+        created = self.svc.journal_create(
+            "",
+            {
+                "journal_type": "decision",
+                "title": "洞察样本A",
+                "content": "估值回落后分批建仓，重点观察现金流与量能。",
+                "stock_code": "SH600000",
+                "decision_type": "buy",
+                "tags": ["估值", "现金流", "量能"],
+            },
+        )
+        journal_id = int(created.get("journal_id", 0))
+        self.assertGreater(journal_id, 0)
+        _ = self.svc.journal_create(
+            "",
+            {
+                "journal_type": "learning",
+                "title": "洞察样本B",
+                "content": "行业景气度恢复偏慢，优先跟踪盈利兑现速度。",
+                "stock_code": "SZ000001",
+                "decision_type": "hold",
+                "tags": ["行业", "盈利", "景气度"],
+            },
+        )
+        _ = self.svc.journal_reflection_add(
+            "",
+            journal_id,
+            {
+                "reflection_content": "执行节奏偏慢，触发条件定义还不够量化。",
+            },
+        )
+        _ = self.svc.journal_ai_reflection_generate(
+            "",
+            journal_id,
+            {"focus": "检查触发条件是否可验证"},
+        )
+
+        result = self.svc.journal_insights("", window_days=365, limit=600, timeline_days=60)
+        self.assertEqual(str(result.get("status", "")), "ok")
+        self.assertGreaterEqual(int(result.get("total_journals", 0)), 2)
+        self.assertTrue(isinstance(result.get("type_distribution", []), list))
+        self.assertTrue(isinstance(result.get("decision_distribution", []), list))
+        self.assertTrue(isinstance(result.get("stock_activity", []), list))
+        self.assertTrue(isinstance(result.get("keyword_profile", []), list))
+        self.assertTrue(isinstance(result.get("timeline", []), list))
+
+        coverage = result.get("reflection_coverage", {})
+        self.assertTrue(isinstance(coverage, dict))
+        self.assertGreaterEqual(int(coverage.get("with_reflection", 0)), 1)
+        self.assertGreaterEqual(float(coverage.get("reflection_coverage_rate", 0.0)), 0.0)
+        self.assertLessEqual(float(coverage.get("reflection_coverage_rate", 0.0)), 1.0)
+
     def test_query_repeated_calls_do_not_hit_global_model_limit(self) -> None:
         # 回归：预算计数应按请求重置，连续请求不应在第9次后失败。
         for idx in range(12):

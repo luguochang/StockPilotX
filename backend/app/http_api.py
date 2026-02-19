@@ -608,6 +608,24 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    @app.get("/v1/journal/insights")
+    def journal_insights(
+        window_days: int = 90,
+        limit: int = 400,
+        timeline_days: int = 30,
+        authorization: str | None = Header(default=None),
+    ):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.journal_insights(
+                token,
+                window_days=window_days,
+                limit=limit,
+                timeline_days=timeline_days,
+            )
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     @app.post("/v1/journal/{journal_id}/reflections")
     def journal_reflection_add(journal_id: int, payload: dict, authorization: str | None = Header(default=None)):
         token = _extract_optional_bearer_token(authorization)

@@ -52,7 +52,45 @@
 
 ## Round-Y: Journal Insights (Backend)
 
-- 状态：pending
+### 变更摘要
+
+- 新增 Web Service 方法：
+  - `journal_insights_rows`
+  - `journal_insights_timeline`
+- 新增 App Service 方法：
+  - `journal_insights`
+  - `_journal_counter_breakdown`
+  - `_journal_extract_keywords`
+- 新增 API：
+  - `GET /v1/journal/insights`
+- 新增测试：
+  - `tests/test_service.py::test_journal_insights`
+  - `tests/test_http_api.py::test_journal_insights_endpoint`
+
+### 自测结果
+
+1. 命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "journal_lifecycle or journal_ai_reflection_generate_and_get or journal_insights"
+```
+结果：`3 passed, 34 deselected`
+
+2. 命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "journal_endpoints or journal_ai_reflection_endpoints or journal_insights_endpoint"
+```
+结果：`3 passed, 24 deselected`
+
+3. 命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests -k "journal or api or web"
+```
+结果：`31 passed, 69 deselected`
+
+### 提交
+
+- Commit: `feat: add journal insights aggregation API`
+- Message: `代码 + 测试 + 文档已在 Round-Y 同步提交（具体哈希见 git log）`
 
 ## Round-Z: DeepThink Auto Journal Link (Backend)
 

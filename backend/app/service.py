@@ -11,6 +11,7 @@ import re
 import threading
 import zipfile
 import xml.etree.ElementTree as ET
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import time
 import uuid
@@ -3386,6 +3387,134 @@ class AShareAgentService:
         # 输出生成耗时，方便后续排查“AI复盘慢/失败”的具体链路。
         result["latency_ms"] = int((time.perf_counter() - started_at) * 1000)
         return result
+
+    def _journal_counter_breakdown(self, counter: Counter[str], *, total: int, top_n: int) -> list[dict[str, Any]]:
+        """Convert Counter into deterministic [{key,count,ratio}] payload for UI/API."""
+        items = sorted(counter.items(), key=lambda x: (-int(x[1]), str(x[0])))
+        output: list[dict[str, Any]] = []
+        for key, count in items[: max(1, int(top_n))]:
+            ratio = float(count) / float(total) if total > 0 else 0.0
+            output.append({"key": str(key), "count": int(count), "ratio": round(ratio, 4)})
+        return output
+
+    def _journal_extract_keywords(self, rows: list[dict[str, Any]], *, top_n: int = 12) -> list[dict[str, Any]]:
+        """Extract coarse keywords from title/content/tags for quick journal topic profiling."""
+        stopwords = {
+            "以及",
+            "因为",
+            "所以",
+            "我们",
+            "他们",
+            "如果",
+            "但是",
+            "然后",
+            "这个",
+            "那个",
+            "进行",
+            "需要",
+            "已经",
+            "当前",
+            "本次",
+            "计划",
+            "复盘",
+            "日志",
+            "记录",
+            "分析",
+            "执行",
+            "策略",
+            "stock",
+            "journal",
+            "decision",
+            "reflection",
+            "learning",
+        }
+        pattern = re.compile(r"[A-Za-z][A-Za-z0-9_+-]{2,24}|[\u4e00-\u9fff]{2,8}")
+        counter: Counter[str] = Counter()
+        for row in rows:
+            tags = row.get("tags", [])
+            joined_tags = " ".join(str(x) for x in tags if str(x).strip()) if isinstance(tags, list) else ""
+            corpus = " ".join(
+                [
+                    str(row.get("title", "")),
+                    str(row.get("content", "")),
+                    joined_tags,
+                ]
+            )
+            for token in pattern.findall(corpus):
+                term = str(token).strip().lower()
+                if not term:
+                    continue
+                if term in stopwords:
+                    continue
+                if re.fullmatch(r"\d+", term):
+                    continue
+                counter[term] += 1
+        items = sorted(counter.items(), key=lambda x: (-int(x[1]), str(x[0])))
+        return [{"keyword": str(term), "count": int(count)} for term, count in items[: max(1, int(top_n))]]
+
+    def journal_insights(
+        self,
+        token: str,
+        *,
+        window_days: int = 90,
+        limit: int = 400,
+        timeline_days: int = 30,
+    ) -> dict[str, Any]:
+        # 聚合层统一输出业务洞察，前端无需再拼接多个接口。
+        safe_window_days = max(7, min(3650, int(window_days)))
+        safe_limit = max(20, min(2000, int(limit)))
+        safe_timeline_days = max(7, min(safe_window_days, int(timeline_days)))
+
+        rows = self.web.journal_insights_rows(token, days=safe_window_days, limit=safe_limit)
+        timeline_rows = self.web.journal_insights_timeline(token, days=safe_timeline_days)
+
+        total_journals = len(rows)
+        type_counter: Counter[str] = Counter()
+        decision_counter: Counter[str] = Counter()
+        stock_counter: Counter[str] = Counter()
+
+        reflection_covered = 0
+        ai_reflection_covered = 0
+        total_reflection_records = 0
+        for row in rows:
+            journal_type = str(row.get("journal_type", "")).strip() or "unknown"
+            decision_type = str(row.get("decision_type", "")).strip() or "none"
+            stock_code = str(row.get("stock_code", "")).strip().upper() or "UNASSIGNED"
+            reflection_count = max(0, int(row.get("reflection_count", 0) or 0))
+            has_ai_reflection = bool(row.get("has_ai_reflection", False))
+
+            type_counter[journal_type] += 1
+            decision_counter[decision_type] += 1
+            stock_counter[stock_code] += 1
+            total_reflection_records += reflection_count
+            if reflection_count > 0:
+                reflection_covered += 1
+            if has_ai_reflection:
+                ai_reflection_covered += 1
+
+        avg_reflections_per_journal = float(total_reflection_records) / float(total_journals) if total_journals else 0.0
+        reflection_coverage_rate = float(reflection_covered) / float(total_journals) if total_journals else 0.0
+        ai_reflection_coverage_rate = float(ai_reflection_covered) / float(total_journals) if total_journals else 0.0
+
+        return {
+            "status": "ok",
+            "window_days": safe_window_days,
+            "timeline_days": safe_timeline_days,
+            "total_journals": total_journals,
+            "type_distribution": self._journal_counter_breakdown(type_counter, total=total_journals, top_n=8),
+            "decision_distribution": self._journal_counter_breakdown(decision_counter, total=total_journals, top_n=8),
+            "stock_activity": self._journal_counter_breakdown(stock_counter, total=total_journals, top_n=10),
+            "reflection_coverage": {
+                "with_reflection": int(reflection_covered),
+                "with_ai_reflection": int(ai_reflection_covered),
+                "reflection_coverage_rate": round(reflection_coverage_rate, 4),
+                "ai_reflection_coverage_rate": round(ai_reflection_coverage_rate, 4),
+                "total_reflection_records": int(total_reflection_records),
+                "avg_reflections_per_journal": round(avg_reflections_per_journal, 4),
+            },
+            "keyword_profile": self._journal_extract_keywords(rows, top_n=12),
+            "timeline": timeline_rows,
+        }
 
     def reports_list(self, token: str) -> list[dict[str, Any]]:
         return self.web.report_list(token)

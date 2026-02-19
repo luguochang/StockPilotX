@@ -733,3 +733,59 @@ rg -n "Community MVP|Journal -> Community|社区内容推荐" docs/checklist/202
 - [x] Journal AI复盘 API
 - [x] 服务层/API 层测试
 - [x] 回归测试通过
+
+## 第15批增量（Phase3 - Round-Y Journal Insights）
+
+### 新增能力
+
+1. Journal 洞察聚合数据层
+- `backend/app/web/service.py`
+  - 新增：
+    - `journal_insights_rows`
+    - `journal_insights_timeline`
+  - 支持按窗口天数聚合 Journal/Reflection/AI Reflection 活动。
+
+2. Journal 洞察应用层
+- `backend/app/service.py`
+  - 新增：
+    - `journal_insights`
+    - `_journal_counter_breakdown`
+    - `_journal_extract_keywords`
+  - 输出：
+    - 类型分布
+    - 决策分布
+    - 标的活跃度
+    - 复盘覆盖率
+    - 关键词画像
+    - 日度时间线
+
+3. API 路由
+- `backend/app/http_api.py`
+  - 新增：`GET /v1/journal/insights`
+
+4. 测试补充
+- `tests/test_service.py`
+  - 新增 `test_journal_insights`
+- `tests/test_http_api.py`
+  - 新增 `test_journal_insights_endpoint`
+
+### 第15批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "journal_lifecycle or journal_ai_reflection_generate_and_get or journal_insights"
+.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "journal_endpoints or journal_ai_reflection_endpoints or journal_insights_endpoint"
+.\.venv\Scripts\python.exe -m pytest -q tests -k "journal or api or web"
+```
+
+结果：
+- 3 passed, 34 deselected
+- 3 passed, 24 deselected
+- 31 passed, 69 deselected
+
+### 第15批 Checklist
+
+- [x] Journal 洞察聚合服务
+- [x] Journal 洞察 API
+- [x] 服务层/API 层测试
+- [x] 回归测试通过

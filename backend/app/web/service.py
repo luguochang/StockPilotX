@@ -942,6 +942,113 @@ class WebAppService:
         )
         return self._journal_ai_reflection_serialize_row(row or {})
 
+    def journal_insights_rows(self, token: str, *, days: int = 90, limit: int = 400) -> list[dict[str, Any]]:
+        """Fetch journals with reflection coverage marks for higher-level insight aggregation."""
+        me = self.auth_me(token)
+        safe_days = max(7, min(3650, int(days)))
+        safe_limit = max(20, min(2000, int(limit)))
+        since_expr = f"-{safe_days} day"
+        rows = self.store.query_all(
+            """
+            SELECT
+                j.id,
+                j.journal_type,
+                j.title,
+                j.content,
+                j.stock_code,
+                j.decision_type,
+                j.related_research_id,
+                j.related_portfolio_id,
+                j.tags_json,
+                j.sentiment,
+                j.created_at,
+                j.updated_at,
+                (
+                    SELECT COUNT(1)
+                    FROM journal_reflection r
+                    WHERE r.journal_id = j.id
+                ) AS reflection_count,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM journal_ai_reflection ar
+                        WHERE ar.journal_id = j.id
+                    )
+                    THEN 1
+                    ELSE 0
+                END AS has_ai_reflection
+            FROM investment_journal j
+            WHERE j.user_id = ?
+              AND j.tenant_id = ?
+              AND j.created_at >= datetime('now', ?)
+            ORDER BY j.id DESC
+            LIMIT ?
+            """,
+            (me["user_id"], me["tenant_id"], since_expr, safe_limit),
+        )
+        payload: list[dict[str, Any]] = []
+        for row in rows:
+            item = self._journal_serialize_row(row)
+            item["reflection_count"] = int(row.get("reflection_count", 0) or 0)
+            item["has_ai_reflection"] = bool(int(row.get("has_ai_reflection", 0) or 0))
+            payload.append(item)
+        return payload
+
+    def journal_insights_timeline(self, token: str, *, days: int = 90) -> list[dict[str, Any]]:
+        """Build per-day activity counts for journal/reflection/ai-reflection events."""
+        me = self.auth_me(token)
+        safe_days = max(7, min(3650, int(days)))
+        since_expr = f"-{safe_days} day"
+        journal_rows = self.store.query_all(
+            """
+            SELECT DATE(created_at) AS day, COUNT(1) AS journal_count
+            FROM investment_journal
+            WHERE user_id = ? AND tenant_id = ? AND created_at >= datetime('now', ?)
+            GROUP BY DATE(created_at)
+            """,
+            (me["user_id"], me["tenant_id"], since_expr),
+        )
+        reflection_rows = self.store.query_all(
+            """
+            SELECT DATE(r.created_at) AS day, COUNT(1) AS reflection_count
+            FROM journal_reflection r
+            INNER JOIN investment_journal j ON j.id = r.journal_id
+            WHERE j.user_id = ? AND j.tenant_id = ? AND r.created_at >= datetime('now', ?)
+            GROUP BY DATE(r.created_at)
+            """,
+            (me["user_id"], me["tenant_id"], since_expr),
+        )
+        ai_rows = self.store.query_all(
+            """
+            SELECT DATE(ar.generated_at) AS day, COUNT(1) AS ai_reflection_count
+            FROM journal_ai_reflection ar
+            INNER JOIN investment_journal j ON j.id = ar.journal_id
+            WHERE j.user_id = ? AND j.tenant_id = ? AND ar.generated_at >= datetime('now', ?)
+            GROUP BY DATE(ar.generated_at)
+            """,
+            (me["user_id"], me["tenant_id"], since_expr),
+        )
+        timeline_map: dict[str, dict[str, Any]] = {}
+        for row in journal_rows:
+            day = str(row.get("day", "")).strip()
+            if not day:
+                continue
+            timeline_map.setdefault(day, {"day": day, "journal_count": 0, "reflection_count": 0, "ai_reflection_count": 0})
+            timeline_map[day]["journal_count"] = int(row.get("journal_count", 0) or 0)
+        for row in reflection_rows:
+            day = str(row.get("day", "")).strip()
+            if not day:
+                continue
+            timeline_map.setdefault(day, {"day": day, "journal_count": 0, "reflection_count": 0, "ai_reflection_count": 0})
+            timeline_map[day]["reflection_count"] = int(row.get("reflection_count", 0) or 0)
+        for row in ai_rows:
+            day = str(row.get("day", "")).strip()
+            if not day:
+                continue
+            timeline_map.setdefault(day, {"day": day, "journal_count": 0, "reflection_count": 0, "ai_reflection_count": 0})
+            timeline_map[day]["ai_reflection_count"] = int(row.get("ai_reflection_count", 0) or 0)
+        return [timeline_map[key] for key in sorted(timeline_map.keys())]
+
     # ----------------- Reports -----------------
     def save_report_index(
         self,

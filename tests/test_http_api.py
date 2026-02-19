@@ -593,6 +593,44 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(int(loaded.get("journal_id", 0)), journal_id)
         self.assertTrue(str(loaded.get("summary", "")).strip())
 
+    def test_journal_insights_endpoint(self) -> None:
+        c1, created = self._post(
+            "/v1/journal",
+            {
+                "journal_type": "decision",
+                "title": "API 洞察样本",
+                "content": "等待盈利预期修复，先小仓位试错并跟踪成交量。",
+                "stock_code": "SH600000",
+                "decision_type": "hold",
+                "tags": ["盈利", "成交量"],
+            },
+        )
+        self.assertEqual(c1, 200)
+        journal_id = int(created.get("journal_id", 0))
+        self.assertGreater(journal_id, 0)
+
+        c2, _ = self._post(
+            f"/v1/journal/{journal_id}/reflections",
+            {"reflection_content": "入场节奏控制较好，但风控阈值还需量化。"},
+        )
+        self.assertEqual(c2, 200)
+
+        c3, _ = self._post(
+            f"/v1/journal/{journal_id}/ai-reflection/generate",
+            {"focus": "关注可执行改进与风险边界"},
+        )
+        self.assertEqual(c3, 200)
+
+        c4, insights = self._get("/v1/journal/insights?window_days=365&timeline_days=90&limit=600")
+        self.assertEqual(c4, 200)
+        self.assertEqual(str(insights.get("status", "")), "ok")
+        self.assertGreaterEqual(int(insights.get("total_journals", 0)), 1)
+        self.assertTrue(isinstance(insights.get("type_distribution", []), list))
+        self.assertTrue(isinstance(insights.get("decision_distribution", []), list))
+        self.assertTrue(isinstance(insights.get("stock_activity", []), list))
+        self.assertTrue(isinstance(insights.get("keyword_profile", []), list))
+        self.assertTrue(isinstance(insights.get("timeline", []), list))
+
     def test_ops_capabilities(self) -> None:
         code, body = self._get("/v1/ops/capabilities")
         self.assertEqual(code, 200)

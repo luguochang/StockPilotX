@@ -14,10 +14,10 @@
 
 ## Round-Y Journal Insights (Backend)
 
-- [ ] 增加 Journal 聚合洞察服务（分布、活跃度、复盘覆盖率、关键词）
-- [ ] 增加 API：`GET /v1/journal/insights`
-- [ ] 增加 service/http_api 测试并通过
-- [ ] Round-Y 文档与提交回填
+- [x] 增加 Journal 聚合洞察服务（分布、活跃度、复盘覆盖率、关键词）
+- [x] 增加 API：`GET /v1/journal/insights`
+- [x] 增加 service/http_api 测试并通过
+- [x] Round-Y 文档与提交回填
 
 ## Round-Z DeepThink Auto Journal Link (Backend)
 
