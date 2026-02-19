@@ -100,8 +100,11 @@ class ServiceTestCase(unittest.TestCase):
     def test_ingest_endpoints(self) -> None:
         daily = self.svc.ingest_market_daily(["SH600000", "SZ000001"])
         ann = self.svc.ingest_announcements(["SH600000"])
+        fin = self.svc.ingest_financials(["SH600000"])
         self.assertEqual(daily["failed_count"], 0)
         self.assertEqual(ann["success_count"], 1)
+        self.assertEqual(fin["task_name"], "financial-snapshot")
+        self.assertEqual(fin["success_count"], 1)
 
     def test_doc_upload_and_index(self) -> None:
         up = self.svc.docs_upload("d1", "demo.pdf", "财报正文" * 600, "user")

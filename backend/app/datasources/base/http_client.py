@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +22,28 @@ class HttpClient:
     user_agent: str = "StockPilotX/1.0"
 
     def get_bytes(self, url: str, headers: dict[str, str] | None = None) -> bytes:
+        return self._request_bytes(method="GET", url=url, headers=headers, data=None)
+
+    def post_json_bytes(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> bytes:
+        req_headers = {"Content-Type": "application/json"}
+        if headers:
+            req_headers.update(headers)
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        return self._request_bytes(method="POST", url=url, headers=req_headers, data=data)
+
+    def _request_bytes(
+        self,
+        *,
+        method: str,
+        url: str,
+        headers: dict[str, str] | None,
+        data: bytes | None,
+    ) -> bytes:
         last_error: Exception | None = None
         attempts = max(1, int(self.retry_count) + 1)
         for attempt in range(1, attempts + 1):
@@ -28,7 +51,7 @@ class HttpClient:
                 req_headers = {"User-Agent": self.user_agent}
                 if headers:
                     req_headers.update(headers)
-                request = Request(url=url, headers=req_headers)
+                request = Request(url=url, headers=req_headers, data=data, method=method)
                 opener = self._build_opener()
                 with opener.open(request, timeout=self.timeout_seconds) as response:  # noqa: S310
                     return response.read()
@@ -37,7 +60,7 @@ class HttpClient:
                 if attempt >= attempts:
                     break
                 time.sleep(self.retry_backoff_seconds * attempt)
-        raise RuntimeError(f"http get failed: {url}; error={last_error}") from last_error
+        raise RuntimeError(f"http request failed: method={method}, url={url}; error={last_error}") from last_error
 
     def get_text(
         self,
@@ -55,4 +78,3 @@ class HttpClient:
             return build_opener(ProxyHandler({"http": self.proxy_url, "https": self.proxy_url}))
         # Explicitly disable system proxy to keep behavior deterministic.
         return build_opener(ProxyHandler({}))
-

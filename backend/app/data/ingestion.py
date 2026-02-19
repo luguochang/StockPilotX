@@ -2,10 +2,15 @@
 
 from dataclasses import asdict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from backend.app.docs.pipeline import DocumentPipeline
 from backend.app.data.sources import AnnouncementService, HistoryService, QuoteService
+
+
+class FinancialServiceProtocol(Protocol):
+    def get_financial_snapshot(self, stock_code: str) -> dict[str, Any]:
+        ...
 
 
 @dataclass(slots=True)
@@ -15,6 +20,7 @@ class IngestionStore:
     quotes: list[dict[str, Any]] = field(default_factory=list)
     history_bars: list[dict[str, Any]] = field(default_factory=list)
     announcements: list[dict[str, Any]] = field(default_factory=list)
+    financial_snapshots: list[dict[str, Any]] = field(default_factory=list)
     docs: dict[str, dict[str, Any]] = field(default_factory=dict)
     review_queue: list[dict[str, Any]] = field(default_factory=list)
 
@@ -31,11 +37,13 @@ class IngestionService:
         announcement_service: AnnouncementService,
         store: IngestionStore,
         history_service: HistoryService | None = None,
+        financial_service: FinancialServiceProtocol | None = None,
     ):
         """注入行情服务、公告服务和存储对象。"""
         self.quote_service = quote_service
         self.announcement_service = announcement_service
         self.history_service = history_service or HistoryService()
+        self.financial_service = financial_service
         self.store = store
         self.doc_pipeline = DocumentPipeline()
 
@@ -109,6 +117,47 @@ class IngestionService:
                 failed += 1
                 details.append({"stock_code": code, "status": "failed", "error": str(ex)})
         return {"task_name": "history-daily", "success_count": success, "failed_count": failed, "details": details}
+
+    def ingest_financials(self, stock_codes: list[str]) -> dict[str, Any]:
+        """Fetch financial snapshot and write to local store."""
+
+        if not self.financial_service:
+            return {
+                "task_name": "financial-snapshot",
+                "success_count": 0,
+                "failed_count": len(stock_codes),
+                "details": [{"stock_code": code, "status": "failed", "error": "financial_service_not_configured"} for code in stock_codes],
+            }
+        success, failed, details = 0, 0, []
+        for code in stock_codes:
+            normalized_code = _normalize_stock_code(code)
+            try:
+                raw = self.financial_service.get_financial_snapshot(normalized_code)
+                item = _normalize_financial_payload(raw, normalized_code)
+                item["quality_flags"] = _validate_financial_payload(item)
+                # Keep one latest snapshot per (stock_code, source_id).
+                self.store.financial_snapshots = [
+                    x
+                    for x in self.store.financial_snapshots
+                    if not (
+                        str(x.get("stock_code", "")).upper() == normalized_code
+                        and str(x.get("source_id", "")) == str(item.get("source_id", ""))
+                    )
+                ]
+                self.store.financial_snapshots.append(item)
+                success += 1
+                details.append(
+                    {
+                        "stock_code": normalized_code,
+                        "status": "ok",
+                        "source": item.get("source_id", ""),
+                        "quality_flags": item["quality_flags"],
+                    }
+                )
+            except RuntimeError as ex:
+                failed += 1
+                details.append({"stock_code": normalized_code, "status": "failed", "error": str(ex)})
+        return {"task_name": "financial-snapshot", "success_count": success, "failed_count": failed, "details": details}
 
     def upload_doc(self, doc_id: str, filename: str, content: str, source: str) -> dict[str, Any]:
         """上传文档原文到文档存储。"""
@@ -209,6 +258,25 @@ def _normalize_announcement_payload(payload: dict[str, Any], stock_code: str) ->
     }
 
 
+def _normalize_financial_payload(payload: dict[str, Any], stock_code: str) -> dict[str, Any]:
+    return {
+        "stock_code": stock_code,
+        "report_period": str(payload.get("report_period", "")),
+        "roe": float(payload.get("roe", 0.0) or 0.0),
+        "gross_margin": float(payload.get("gross_margin", 0.0) or 0.0),
+        "revenue_yoy": float(payload.get("revenue_yoy", 0.0) or 0.0),
+        "net_profit_yoy": float(payload.get("net_profit_yoy", 0.0) or 0.0),
+        "asset_liability_ratio": float(payload.get("asset_liability_ratio", 0.0) or 0.0),
+        "pe_ttm": float(payload.get("pe_ttm", 0.0) or 0.0),
+        "pb_mrq": float(payload.get("pb_mrq", 0.0) or 0.0),
+        "ts": str(payload.get("ts", "")),
+        "source_id": str(payload.get("source_id", "unknown")),
+        "source_url": str(payload.get("source_url", "")),
+        "reliability_score": float(payload.get("reliability_score", 0.0) or 0.0),
+        "source_note": str(payload.get("source_note", "")),
+    }
+
+
 def _validate_quote_payload(payload: dict[str, Any]) -> list[str]:
     flags: list[str] = []
     required = ("stock_code", "ts", "source_id", "source_url")
@@ -230,6 +298,20 @@ def _validate_announcement_payload(payload: dict[str, Any]) -> list[str]:
             flags.append(f"missing_{key}")
     if payload.get("reliability_score", 0.0) < 0.5:
         flags.append("low_reliability")
+    return flags
+
+
+def _validate_financial_payload(payload: dict[str, Any]) -> list[str]:
+    flags: list[str] = []
+    required = ("stock_code", "ts", "source_id", "source_url")
+    for key in required:
+        if not payload.get(key):
+            flags.append(f"missing_{key}")
+    if payload.get("reliability_score", 0.0) < 0.5:
+        flags.append("low_reliability")
+    # Soft validation only: the value can be negative for YoY metrics.
+    if payload.get("pe_ttm", 0.0) == 0.0 and payload.get("pb_mrq", 0.0) == 0.0:
+        flags.append("valuation_missing")
     return flags
 
 

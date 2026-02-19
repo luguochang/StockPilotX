@@ -60,24 +60,28 @@
   - `.\.venv\Scripts\python.exe -m pytest -q tests/test_data_sources_live.py tests/test_announcements.py tests/test_ingestion_quality.py tests/test_doc_pipeline.py`
 - 自测结果：`25 passed`（含 deselected 子集）
 - 技术文档路径：`docs/sources/2026-02-19/round-AD-quote-adapters-migration.md`
-- Commit Hash：`见本轮 round-AD commit`
+- Commit Hash：`7b5feb0`
 
 ## ROUND-AE：财务数据源迁移
 
-- [ ] 迁移并实现 `financial/tushare.py`
-- [ ] 迁移并实现 `financial/eastmoney.py`
-- [ ] 补齐财务数据规范化与落库逻辑
-- [ ] 接入 DeepThink/Query 可消费的财务证据路径
-- [ ] 添加财务相关单测（字段映射、异常数据、空响应）
-- [ ] 记录技术文档（round-AE）
-- [ ] 提交 commit（round-AE）
+- [x] 迁移并实现 `financial/tushare.py`
+- [x] 迁移并实现 `financial/eastmoney.py`
+- [x] 补齐财务数据规范化与落库逻辑
+- [x] 接入 DeepThink/Query 可消费的财务证据路径
+- [x] 添加财务相关单测（字段映射、异常数据、空响应）
+- [x] 记录技术文档（round-AE）
+- [x] 提交 commit（round-AE）
 
 证据记录：
 
 - 自测命令：
-- 自测结果：
-- 技术文档路径：
-- Commit Hash：
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_datasource_financial_adapters.py tests/test_ingestion_financial.py tests/test_datasources_factory.py`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "ingest_endpoints"`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "ingest_market_daily or ingest_announcements or ingest_financials"`
+  - `.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "query_basic"`
+- 自测结果：`14 passed`（含 deselected 子集）
+- 技术文档路径：`docs/sources/2026-02-19/round-AE-financial-adapters-and-ingestion.md`
+- Commit Hash：`见本轮 round-AE commit`
 
 ## ROUND-AF：新闻/研报/宏观/基金迁移
 
@@ -163,5 +167,6 @@ npx tsc --noEmit
 
 > 说明：每完成一轮，在这里追加一条记录（日期、轮次、摘要、hash、文档路径）。
 
-1. `2026-02-19 | ROUND-AC | 完成 datasources 骨架、factory、config 接入与基础回归测试 | hash: 见本轮 round-AC commit | doc: docs/sources/2026-02-19/round-AC-datasource-scaffold-and-config.md`
-2. `2026-02-19 | ROUND-AD | 完成 quote 四源迁移、新 QuoteService 回退链及回归验证 | hash: 见本轮 round-AD commit | doc: docs/sources/2026-02-19/round-AD-quote-adapters-migration.md`
+1. `2026-02-19 | ROUND-AC | 完成 datasources 骨架、factory、config 接入与基础回归测试 | hash: 89c8f01 | doc: docs/sources/2026-02-19/round-AC-datasource-scaffold-and-config.md`
+2. `2026-02-19 | ROUND-AD | 完成 quote 四源迁移、新 QuoteService 回退链及回归验证 | hash: 7b5feb0 | doc: docs/sources/2026-02-19/round-AD-quote-adapters-migration.md`
+3. `2026-02-19 | ROUND-AE | 完成 financial 双源迁移、摄取落库、Query/DeepThink 财务证据接入 | hash: 见本轮 round-AE commit | doc: docs/sources/2026-02-19/round-AE-financial-adapters-and-ingestion.md`

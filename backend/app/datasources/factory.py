@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from backend.app.config import Settings
 from backend.app.data.sources import AnnouncementService, HistoryService
+from backend.app.datasources.financial.service import FinancialService
 from backend.app.datasources.quote.service import QuoteService
 
 
@@ -42,3 +43,16 @@ def build_default_history_service(settings: Settings | None = None) -> HistorySe
 
     _ = settings
     return HistoryService()
+
+
+def build_default_financial_service(settings: Settings | None = None) -> FinancialService:
+    """Build financial service with multi-source fallback."""
+
+    cfg = settings or Settings.from_env()
+    return FinancialService.build_default(
+        tushare_token=str(cfg.datasource_tushare_token or ""),
+        timeout_seconds=float(cfg.datasource_request_timeout_seconds),
+        retry_count=int(cfg.datasource_retry_count),
+        retry_backoff_seconds=float(cfg.datasource_retry_backoff_seconds),
+        proxy_url=str(cfg.datasource_proxy_url or ""),
+    )

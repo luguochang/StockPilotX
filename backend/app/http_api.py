@@ -364,6 +364,10 @@ def create_app() -> FastAPI:
     def ingest_announcements(payload: dict):
         return svc.ingest_announcements(payload.get("stock_codes", []))
 
+    @app.post("/v1/ingest/financials")
+    def ingest_financials(payload: dict):
+        return svc.ingest_financials(payload.get("stock_codes", []))
+
     @app.post("/v1/docs/upload")
     def docs_upload(payload: dict):
         return svc.docs_upload(

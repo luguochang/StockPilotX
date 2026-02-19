@@ -25,6 +25,7 @@ from backend.app.agents.workflow import AgentWorkflow
 from backend.app.config import Settings
 from backend.app.datasources import (
     build_default_announcement_service,
+    build_default_financial_service,
     build_default_history_service,
     build_default_quote_service,
 )
@@ -108,6 +109,7 @@ class AShareAgentService:
             quote_service=build_default_quote_service(self.settings),
             announcement_service=build_default_announcement_service(self.settings),
             history_service=build_default_history_service(self.settings),
+            financial_service=build_default_financial_service(self.settings),
             store=self.ingestion_store,
         )
         self.doc_recommender = DocumentRecommender()
@@ -936,12 +938,15 @@ class AShareAgentService:
                     quote_refresh = [c for c in req.stock_codes if self._needs_quote_refresh(c)]
                     ann_refresh = [c for c in req.stock_codes if self._needs_announcement_refresh(c)]
                     hist_refresh = [c for c in req.stock_codes if self._needs_history_refresh(c)]
+                    fin_refresh = [c for c in req.stock_codes if self._needs_financial_refresh(c)]
                     if quote_refresh:
                         self.ingest_market_daily(quote_refresh)
                     if ann_refresh:
                         self.ingest_announcements(ann_refresh)
                     if hist_refresh:
                         self.ingestion.ingest_history_daily(hist_refresh, limit=260)
+                    if fin_refresh:
+                        self.ingest_financials(fin_refresh)
                 except Exception:
                     # Keep query available even when data refresh partially fails.
                     pass
@@ -1179,12 +1184,15 @@ class AShareAgentService:
                 quote_refresh = [c for c in req.stock_codes if self._needs_quote_refresh(c)]
                 ann_refresh = [c for c in req.stock_codes if self._needs_announcement_refresh(c)]
                 hist_refresh = [c for c in req.stock_codes if self._needs_history_refresh(c)]
+                fin_refresh = [c for c in req.stock_codes if self._needs_financial_refresh(c)]
                 if quote_refresh:
                     self.ingest_market_daily(quote_refresh)
                 if ann_refresh:
                     self.ingest_announcements(ann_refresh)
                 if hist_refresh:
                     self.ingestion.ingest_history_daily(hist_refresh, limit=260)
+                if fin_refresh:
+                    self.ingest_financials(fin_refresh)
             except Exception:
                 # 刷新失败不阻断主流程，只向前端透出 warning 便于定位时延与降级行为。
                 yield {"event": "progress", "data": {"phase": "data_refresh", "status": "degraded"}}
@@ -1847,6 +1855,28 @@ class AShareAgentService:
                 )
             )
 
+        # 财务快照 -> 文本事实（估值、盈利质量、杠杆水平）。
+        for fin in self.ingestion_store.financial_snapshots[-600:]:
+            code = str(fin.get("stock_code", ""))
+            if symbols and code not in symbols:
+                continue
+            text = (
+                f"{code} 财务快照：ROE {fin.get('roe')}，毛利率 {fin.get('gross_margin')}%，"
+                f"营收同比 {fin.get('revenue_yoy')}%，净利同比 {fin.get('net_profit_yoy')}%，"
+                f"PE(TTM) {fin.get('pe_ttm')}，PB(MRQ) {fin.get('pb_mrq')}。"
+            )
+            corpus.append(
+                RetrievalItem(
+                    text=text,
+                    source_id=str(fin.get("source_id", "financial_snapshot")),
+                    source_url=str(fin.get("source_url", "")),
+                    score=0.0,
+                    event_time=self._parse_time(str(fin.get("ts", ""))),
+                    reliability_score=float(fin.get("reliability_score", 0.75)),
+                    metadata={"retrieval_track": "financial_snapshot"},
+                )
+            )
+
         # 已索引文档分块 -> 文本事实
         for doc in self.ingestion_store.docs.values():
             if not doc.get("indexed"):
@@ -1971,11 +2001,28 @@ class AShareAgentService:
             return (now - ts).total_seconds() > max_age_seconds
         return True
 
+    def _needs_financial_refresh(self, stock_code: str, max_age_seconds: int = 60 * 60 * 24) -> bool:
+        code = stock_code.upper().replace(".", "")
+        now = datetime.now(timezone.utc)
+        for item in reversed(self.ingestion_store.financial_snapshots):
+            if str(item.get("stock_code", "")).upper() != code:
+                continue
+            ts = self._parse_time(str(item.get("ts", "")))
+            return (now - ts).total_seconds() > max_age_seconds
+        return True
+
     def _latest_quote(self, stock_code: str) -> dict[str, Any] | None:
         code = stock_code.upper().replace(".", "")
         for q in reversed(self.ingestion_store.quotes):
             if str(q.get("stock_code", "")).upper() == code:
                 return q
+        return None
+
+    def _latest_financial_snapshot(self, stock_code: str) -> dict[str, Any] | None:
+        code = stock_code.upper().replace(".", "")
+        for item in reversed(self.ingestion_store.financial_snapshots):
+            if str(item.get("stock_code", "")).upper() == code:
+                return item
         return None
 
     def _history_bars(self, stock_code: str, limit: int = 120) -> list[dict[str, Any]]:
@@ -2360,6 +2407,11 @@ class AShareAgentService:
     def ingest_announcements(self, stock_codes: list[str]) -> dict[str, Any]:
         """触发公告数据摄取。"""
         return self.ingestion.ingest_announcements(stock_codes)
+
+    def ingest_financials(self, stock_codes: list[str]) -> dict[str, Any]:
+        """触发财务快照数据摄取。"""
+
+        return self.ingestion.ingest_financials(stock_codes)
 
     def docs_upload(self, doc_id: str, filename: str, content: str, source: str) -> dict[str, Any]:
         """上传文档原文。"""
@@ -3014,14 +3066,18 @@ class AShareAgentService:
             self.ingest_announcements([code])
         if self._needs_history_refresh(code):
             self.ingestion.ingest_history_daily([code], limit=260)
+        if self._needs_financial_refresh(code):
+            self.ingest_financials([code])
 
         realtime = self._latest_quote(code)
         bars = self._history_bars(code, limit=120)
+        financial = self._latest_financial_snapshot(code)
         events = [x for x in self.ingestion_store.announcements if str(x.get("stock_code", "")).upper() == code][-10:]
         trend = self._trend_metrics(bars) if bars else {}
         return {
             "stock_code": code,
             "realtime": realtime or {},
+            "financial": financial or {},
             "history": bars,
             "events": events,
             "trend": trend,
@@ -4075,9 +4131,12 @@ class AShareAgentService:
                     self.ingest_market_daily([code])
                 if self._needs_history_refresh(code):
                     self.ingestion.ingest_history_daily([code], limit=260)
+                if self._needs_financial_refresh(code):
+                    self.ingest_financials([code])
 
                 quote = self._latest_quote(code) or {}
                 bars = self._history_bars(code, limit=180)
+                financial = self._latest_financial_snapshot(code) or {}
                 trend = self._trend_metrics(bars) if len(bars) >= 30 else {}
                 # Re-evaluate regime after refresh so later guard uses freshest 1-20d signals.
                 regime_context = self._build_a_share_regime_context([code])
@@ -4119,6 +4178,13 @@ class AShareAgentService:
                         "provider_names": list(intel_payload.get("provider_names", []))[:8],
                         "websearch_tool_requested": bool(intel_payload.get("websearch_tool_requested", False)),
                         "websearch_tool_applied": bool(intel_payload.get("websearch_tool_applied", False)),
+                        "financial_snapshot": {
+                            "source_id": str(financial.get("source_id", "")),
+                            "report_period": str(financial.get("report_period", "")),
+                            "roe": float(financial.get("roe", 0.0) or 0.0),
+                            "pe_ttm": float(financial.get("pe_ttm", 0.0) or 0.0),
+                            "pb_mrq": float(financial.get("pb_mrq", 0.0) or 0.0),
+                        },
                     },
                 )
                 # 单独下发状态事件，便于前端或测试脚本快速判断是否命中外部实时检索。
@@ -4904,8 +4970,11 @@ class AShareAgentService:
             self.ingest_market_daily([code])
         if self._needs_history_refresh(code):
             self.ingestion.ingest_history_daily([code], limit=260)
+        if self._needs_financial_refresh(code):
+            self.ingest_financials([code])
         quote = self._latest_quote(code) or {}
         bars = self._history_bars(code, limit=180)
+        financial = self._latest_financial_snapshot(code) or {}
         trend = self._trend_metrics(bars) if len(bars) >= 30 else {}
         pred = self.predict_run({"stock_codes": [code], "horizons": ["20d"]})
         horizon_map = {h["horizon"]: h for h in pred["results"][0]["horizons"]} if pred.get("results") else {}
@@ -4928,6 +4997,7 @@ class AShareAgentService:
             "external_enabled": bool(self.settings.llm_external_enabled),
             "provider_count": len([x for x in provider_rows if bool(x.get("enabled"))]),
             "providers": provider_rows,
+            "financial_snapshot": financial,
             "intel_status": str(intel.get("intel_status", "")),
             "confidence_note": str(intel.get("confidence_note", "")),
             "fallback_reason": str(intel.get("fallback_reason", "")),
@@ -5389,9 +5459,12 @@ class AShareAgentService:
             self.ingest_market_daily([code])
         if self._needs_history_refresh(code):
             self.ingestion.ingest_history_daily([code], limit=260)
+        if self._needs_financial_refresh(code):
+            self.ingest_financials([code])
 
         quote = self._latest_quote(code) or {}
         bars = self._history_bars(code, limit=160)
+        financial = self._latest_financial_snapshot(code) or {}
         trend = self._trend_metrics(bars) if len(bars) >= 30 else {}
         pred = self.predict_run({"stock_codes": [code], "horizons": ["5d", "20d"]})
         horizon_map = {h["horizon"]: h for h in pred["results"][0]["horizons"]} if pred.get("results") else {}
@@ -5418,6 +5491,7 @@ class AShareAgentService:
             "disagreement_score": disagreement_score,
             "debate_mode": model_debate_mode,
             "opinions": opinions,
+            "financial_snapshot": financial,
             "market_snapshot": {
                 "price": quote.get("price"),
                 "pct_change": quote.get("pct_change"),

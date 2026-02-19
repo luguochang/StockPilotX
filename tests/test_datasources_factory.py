@@ -5,6 +5,7 @@ import unittest
 from backend.app.config import Settings
 from backend.app.datasources import (
     build_default_announcement_service,
+    build_default_financial_service,
     build_default_history_service,
     build_default_quote_service,
 )
@@ -28,7 +29,10 @@ class DatasourceFactoryTestCase(unittest.TestCase):
         # Assert interface contract without making a real HTTP call.
         self.assertTrue(hasattr(svc, "fetch_daily_bars"))
 
+    def test_financial_service_is_constructed(self) -> None:
+        svc = build_default_financial_service(Settings())
+        self.assertTrue(hasattr(svc, "get_financial_snapshot"))
+
 
 if __name__ == "__main__":
     unittest.main()
-

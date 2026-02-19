@@ -268,6 +268,11 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(body["task_name"], "announcements")
 
+    def test_ingest_financials(self) -> None:
+        code, body = self._post("/v1/ingest/financials", {"stock_codes": ["SH600000"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(body["task_name"], "financial-snapshot")
+
     def test_docs_upload_and_index(self) -> None:
         upload_code, uploaded = self._post(
             "/v1/docs/upload",
