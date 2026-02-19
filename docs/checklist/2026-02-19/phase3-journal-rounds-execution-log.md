@@ -176,4 +176,57 @@ npx tsc --noEmit
 
 ## Round-AB: Journal Quality & Ops (Backend)
 
-- 状态：pending
+### 变更摘要
+
+- 新增表：
+  - `journal_ai_generation_log`（记录每次 AI 复盘生成质量数据）
+- 新增 Web Service 方法：
+  - `journal_ai_generation_log_add`
+  - `journal_ai_generation_log_list`
+  - `journal_ai_coverage_counts`
+- 新增 App Service 方法：
+  - `_percentile_from_sorted`
+  - `ops_journal_health`
+- 新增 API：
+  - `GET /v1/ops/journal/health`
+- 生成链路增强：
+  - `journal_ai_reflection_generate` 每次写入质量日志（状态、耗时、错误信息、provider/model）
+- 新增测试：
+  - `tests/test_service.py::test_ops_journal_health`
+  - `tests/test_http_api.py::test_ops_journal_health_endpoint`
+
+### 自测结果
+
+1. 命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "journal_ai_reflection_generate_and_get or ops_journal_health"
+```
+结果：`2 passed, 36 deselected`
+
+2. 命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "journal_ai_reflection_endpoints or ops_journal_health_endpoint or ops_capabilities"
+```
+结果：`3 passed, 25 deselected`
+
+3. 命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests -k "journal or ops or api or web"
+```
+结果：`34 passed, 68 deselected`
+
+### 提交
+
+- Commit: `feat: add journal ai generation health logging and ops endpoint`
+- Message: `代码 + 测试 + 文档已在 Round-AB 同步提交（具体哈希见 git log）`
+
+---
+
+## Final Regression
+
+命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests -k "journal or deep_think or ops or api or web"
+```
+
+结果：`42 passed, 60 deselected`

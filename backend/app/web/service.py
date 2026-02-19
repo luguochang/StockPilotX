@@ -1049,6 +1049,89 @@ class WebAppService:
             timeline_map[day]["ai_reflection_count"] = int(row.get("ai_reflection_count", 0) or 0)
         return [timeline_map[key] for key in sorted(timeline_map.keys())]
 
+    def journal_ai_generation_log_add(
+        self,
+        token: str,
+        *,
+        journal_id: int,
+        status: str,
+        provider: str = "",
+        model: str = "",
+        trace_id: str = "",
+        error_code: str = "",
+        error_message: str = "",
+        latency_ms: int = 0,
+    ) -> dict[str, Any]:
+        _ = self._journal_ensure_owned(token, journal_id)
+        safe_status = str(status or "").strip().lower()
+        if safe_status not in {"ready", "fallback", "failed"}:
+            raise ValueError("status must be one of ready/fallback/failed")
+        cur = self.store.execute(
+            """
+            INSERT INTO journal_ai_generation_log
+            (journal_id, status, provider, model, trace_id, error_code, error_message, latency_ms, generated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                int(journal_id),
+                safe_status,
+                str(provider or "").strip()[:80],
+                str(model or "").strip()[:120],
+                str(trace_id or "").strip()[:80],
+                str(error_code or "").strip()[:64],
+                str(error_message or "").strip()[:400],
+                max(0, int(latency_ms or 0)),
+            ),
+        )
+        row = self.store.query_one(
+            """
+            SELECT id AS log_id, journal_id, status, provider, model, trace_id, error_code, error_message,
+                   latency_ms, generated_at
+            FROM journal_ai_generation_log
+            WHERE id = ?
+            """,
+            (int(cur.lastrowid),),
+        )
+        return row or {}
+
+    def journal_ai_generation_log_list(self, token: str, *, window_hours: int = 168, limit: int = 400) -> list[dict[str, Any]]:
+        me = self.auth_me(token)
+        safe_window_hours = max(1, min(24 * 180, int(window_hours)))
+        safe_limit = max(1, min(2000, int(limit)))
+        since_expr = f"-{safe_window_hours} hour"
+        return self.store.query_all(
+            """
+            SELECT l.id AS log_id, l.journal_id, l.status, l.provider, l.model, l.trace_id, l.error_code, l.error_message,
+                   l.latency_ms, l.generated_at
+            FROM journal_ai_generation_log l
+            INNER JOIN investment_journal j ON j.id = l.journal_id
+            WHERE j.user_id = ? AND j.tenant_id = ? AND l.generated_at >= datetime('now', ?)
+            ORDER BY l.id DESC
+            LIMIT ?
+            """,
+            (me["user_id"], me["tenant_id"], since_expr, safe_limit),
+        )
+
+    def journal_ai_coverage_counts(self, token: str) -> dict[str, int]:
+        me = self.auth_me(token)
+        total_row = self.store.query_one(
+            "SELECT COUNT(1) AS total_journals FROM investment_journal WHERE user_id = ? AND tenant_id = ?",
+            (me["user_id"], me["tenant_id"]),
+        )
+        ai_row = self.store.query_one(
+            """
+            SELECT COUNT(1) AS journals_with_ai
+            FROM journal_ai_reflection ar
+            INNER JOIN investment_journal j ON j.id = ar.journal_id
+            WHERE j.user_id = ? AND j.tenant_id = ?
+            """,
+            (me["user_id"], me["tenant_id"]),
+        )
+        return {
+            "total_journals": int((total_row or {}).get("total_journals", 0) or 0),
+            "journals_with_ai": int((ai_row or {}).get("journals_with_ai", 0) or 0),
+        }
+
     # ----------------- Reports -----------------
     def save_report_index(
         self,

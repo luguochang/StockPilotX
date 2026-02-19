@@ -876,3 +876,52 @@ npx tsc --noEmit
 - [x] Journal 页面（创建/筛选/复盘/AI复盘/洞察）
 - [x] 导航入口接入
 - [x] 前端构建与类型检查通过
+
+## 第18批增量（Phase3 - Round-AB Journal 质量与运维）
+
+### 新增能力
+
+1. AI复盘质量日志
+- `backend/app/web/store.py`
+  - 新增表：`journal_ai_generation_log`
+  - 新增索引：按 `generated_at/status/journal_id` 检索
+- `backend/app/web/service.py`
+  - 新增：
+    - `journal_ai_generation_log_add`
+    - `journal_ai_generation_log_list`
+    - `journal_ai_coverage_counts`
+
+2. 健康快照接口
+- `backend/app/service.py`
+  - 新增 `ops_journal_health`
+  - 新增 `_percentile_from_sorted` 统计分位延迟
+  - 在 `journal_ai_reflection_generate` 中落库质量日志
+- `backend/app/http_api.py`
+  - 新增 `GET /v1/ops/journal/health`
+
+3. 测试补充
+- `tests/test_service.py`
+  - 新增 `test_ops_journal_health`
+- `tests/test_http_api.py`
+  - 新增 `test_ops_journal_health_endpoint`
+
+### 第18批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "journal_ai_reflection_generate_and_get or ops_journal_health"
+.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "journal_ai_reflection_endpoints or ops_journal_health_endpoint or ops_capabilities"
+.\.venv\Scripts\python.exe -m pytest -q tests -k "journal or ops or api or web"
+```
+
+结果：
+- 2 passed, 36 deselected
+- 3 passed, 25 deselected
+- 34 passed, 68 deselected
+
+### 第18批 Checklist
+
+- [x] Journal AI 质量日志
+- [x] Journal 健康快照 API
+- [x] 服务层/API 层测试
+- [x] 回归测试通过

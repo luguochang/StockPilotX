@@ -3385,7 +3385,23 @@ class AShareAgentService:
             error_message=error_message,
         )
         # 输出生成耗时，方便后续排查“AI复盘慢/失败”的具体链路。
-        result["latency_ms"] = int((time.perf_counter() - started_at) * 1000)
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        result["latency_ms"] = latency_ms
+        # 每次生成都记录质量日志，便于运维统计 fallback/failed 比例与延迟分布。
+        try:
+            _ = self.web.journal_ai_generation_log_add(
+                token,
+                journal_id=journal_id,
+                status=status,
+                provider=provider,
+                model=model,
+                trace_id=trace_id,
+                error_code=error_code,
+                error_message=error_message,
+                latency_ms=latency_ms,
+            )
+        except Exception:
+            pass
         return result
 
     def _journal_counter_breakdown(self, counter: Counter[str], *, total: int, top_n: int) -> list[dict[str, Any]]:
@@ -5236,6 +5252,86 @@ class AShareAgentService:
         if not task:
             return {"error": "not_found", "task_id": task_id}
         return task
+
+    @staticmethod
+    def _percentile_from_sorted(values: list[int], ratio: float) -> float:
+        if not values:
+            return 0.0
+        if len(values) == 1:
+            return float(values[0])
+        idx = int(round((len(values) - 1) * max(0.0, min(1.0, float(ratio)))))
+        idx = max(0, min(len(values) - 1, idx))
+        return float(values[idx])
+
+    def ops_journal_health(self, token: str, *, window_hours: int = 168, limit: int = 400) -> dict[str, Any]:
+        self.web.require_role(token, {"admin", "ops"})
+        safe_window_hours = max(1, min(24 * 180, int(window_hours)))
+        safe_limit = max(20, min(2000, int(limit)))
+        rows = self.web.journal_ai_generation_log_list(token, window_hours=safe_window_hours, limit=safe_limit)
+
+        ready_count = 0
+        fallback_count = 0
+        failed_count = 0
+        provider_counter: Counter[str] = Counter()
+        latencies: list[int] = []
+        recent_failures: list[dict[str, Any]] = []
+        for row in rows:
+            status = str(row.get("status", "")).strip().lower()
+            if status == "ready":
+                ready_count += 1
+            elif status == "fallback":
+                fallback_count += 1
+            elif status == "failed":
+                failed_count += 1
+            provider_name = str(row.get("provider", "")).strip() or "local_fallback"
+            provider_counter[provider_name] += 1
+            latency = max(0, int(row.get("latency_ms", 0) or 0))
+            latencies.append(latency)
+            if status in {"fallback", "failed"} and len(recent_failures) < 8:
+                recent_failures.append(
+                    {
+                        "journal_id": int(row.get("journal_id", 0) or 0),
+                        "status": status,
+                        "error_code": str(row.get("error_code", "")),
+                        "error_message": str(row.get("error_message", "")),
+                        "generated_at": str(row.get("generated_at", "")),
+                    }
+                )
+
+        total_attempts = len(rows)
+        latencies_sorted = sorted(latencies)
+        avg_latency = float(sum(latencies_sorted)) / float(total_attempts) if total_attempts else 0.0
+        coverage_counts = self.web.journal_ai_coverage_counts(token)
+        total_journals = int(coverage_counts.get("total_journals", 0) or 0)
+        journals_with_ai = int(coverage_counts.get("journals_with_ai", 0) or 0)
+        coverage_rate = float(journals_with_ai) / float(total_journals) if total_journals else 0.0
+
+        return {
+            "status": "ok",
+            "window_hours": safe_window_hours,
+            "sample_limit": safe_limit,
+            "attempts": {
+                "total": total_attempts,
+                "ready": ready_count,
+                "fallback": fallback_count,
+                "failed": failed_count,
+                "fallback_rate": round(float(fallback_count) / float(total_attempts), 4) if total_attempts else 0.0,
+                "failure_rate": round(float(failed_count) / float(total_attempts), 4) if total_attempts else 0.0,
+            },
+            "latency_ms": {
+                "avg": round(avg_latency, 2),
+                "p50": round(self._percentile_from_sorted(latencies_sorted, 0.50), 2),
+                "p95": round(self._percentile_from_sorted(latencies_sorted, 0.95), 2),
+                "max": int(max(latencies_sorted) if latencies_sorted else 0),
+            },
+            "provider_breakdown": self._journal_counter_breakdown(provider_counter, total=max(1, total_attempts), top_n=12),
+            "coverage": {
+                "total_journals": total_journals,
+                "journals_with_ai_reflection": journals_with_ai,
+                "ai_reflection_coverage_rate": round(coverage_rate, 4),
+            },
+            "recent_failures": recent_failures,
+        }
 
     def ops_deep_think_archive_metrics(self, token: str, *, window_hours: int = 24) -> dict[str, Any]:
         self.web.require_role(token, {"admin", "ops"})

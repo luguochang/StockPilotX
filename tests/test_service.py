@@ -424,6 +424,36 @@ class ServiceTestCase(unittest.TestCase):
         self.assertGreaterEqual(float(coverage.get("reflection_coverage_rate", 0.0)), 0.0)
         self.assertLessEqual(float(coverage.get("reflection_coverage_rate", 0.0)), 1.0)
 
+    def test_ops_journal_health(self) -> None:
+        created = self.svc.journal_create(
+            "",
+            {
+                "journal_type": "decision",
+                "title": "质量看板样本",
+                "content": "用于验证 AI 复盘质量日志和健康快照。",
+                "stock_code": "SH600000",
+                "decision_type": "hold",
+            },
+        )
+        journal_id = int(created.get("journal_id", 0))
+        self.assertGreater(journal_id, 0)
+        _ = self.svc.journal_ai_reflection_generate(
+            "",
+            journal_id,
+            {"focus": "验证质量日志落库"},
+        )
+
+        health = self.svc.ops_journal_health("", window_hours=24 * 30, limit=300)
+        self.assertEqual(str(health.get("status", "")), "ok")
+        attempts = health.get("attempts", {})
+        self.assertGreaterEqual(int(attempts.get("total", 0)), 1)
+        self.assertTrue(isinstance(health.get("provider_breakdown", []), list))
+        self.assertTrue(isinstance(health.get("recent_failures", []), list))
+        coverage = health.get("coverage", {})
+        self.assertGreaterEqual(int(coverage.get("total_journals", 0)), 1)
+        self.assertGreaterEqual(float(coverage.get("ai_reflection_coverage_rate", 0.0)), 0.0)
+        self.assertLessEqual(float(coverage.get("ai_reflection_coverage_rate", 0.0)), 1.0)
+
     def test_query_repeated_calls_do_not_hit_global_model_limit(self) -> None:
         # 回归：预算计数应按请求重置，连续请求不应在第9次后失败。
         for idx in range(12):

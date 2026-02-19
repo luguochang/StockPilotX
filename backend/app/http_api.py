@@ -897,6 +897,18 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    @app.get("/v1/ops/journal/health")
+    def ops_journal_health(
+        window_hours: int = 168,
+        limit: int = 400,
+        authorization: str | None = Header(default=None),
+    ):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.ops_journal_health(token, window_hours=window_hours, limit=limit)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     @app.get("/v1/ops/deep-think/archive-metrics")
     def ops_deep_think_archive_metrics(window_hours: int = 24, authorization: str | None = Header(default=None)):
         token = _extract_bearer_token(authorization)

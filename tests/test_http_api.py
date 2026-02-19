@@ -631,6 +631,35 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertTrue(isinstance(insights.get("keyword_profile", []), list))
         self.assertTrue(isinstance(insights.get("timeline", []), list))
 
+    def test_ops_journal_health_endpoint(self) -> None:
+        c1, created = self._post(
+            "/v1/journal",
+            {
+                "journal_type": "decision",
+                "title": "Ops 健康样本",
+                "content": "用于验证 journal 健康看板接口。",
+                "stock_code": "SH600000",
+                "decision_type": "hold",
+            },
+        )
+        self.assertEqual(c1, 200)
+        journal_id = int(created.get("journal_id", 0))
+        self.assertGreater(journal_id, 0)
+
+        c2, _ = self._post(
+            f"/v1/journal/{journal_id}/ai-reflection/generate",
+            {"focus": "验证健康看板统计"},
+        )
+        self.assertEqual(c2, 200)
+
+        c3, health = self._get("/v1/ops/journal/health?window_hours=720&limit=300")
+        self.assertEqual(c3, 200)
+        self.assertEqual(str(health.get("status", "")), "ok")
+        attempts = health.get("attempts", {})
+        self.assertGreaterEqual(int(attempts.get("total", 0)), 1)
+        self.assertTrue(isinstance(health.get("provider_breakdown", []), list))
+        self.assertTrue(isinstance(health.get("recent_failures", []), list))
+
     def test_ops_capabilities(self) -> None:
         code, body = self._get("/v1/ops/capabilities")
         self.assertEqual(code, 200)

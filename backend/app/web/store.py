@@ -208,6 +208,19 @@ class WebStore:
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS journal_ai_generation_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                journal_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT '',
+                provider TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                trace_id TEXT NOT NULL DEFAULT '',
+                error_code TEXT NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                generated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS doc_index (
                 doc_id TEXT PRIMARY KEY,
                 user_id INTEGER,
@@ -544,6 +557,9 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_investment_journal_stock ON investment_journal(stock_code, created_at);
             CREATE INDEX IF NOT EXISTS idx_journal_reflection_journal ON journal_reflection(journal_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_journal_ai_reflection_generated ON journal_ai_reflection(generated_at);
+            CREATE INDEX IF NOT EXISTS idx_journal_ai_gen_log_generated ON journal_ai_generation_log(generated_at);
+            CREATE INDEX IF NOT EXISTS idx_journal_ai_gen_log_status ON journal_ai_generation_log(status, generated_at);
+            CREATE INDEX IF NOT EXISTS idx_journal_ai_gen_log_journal ON journal_ai_generation_log(journal_id, generated_at);
             CREATE INDEX IF NOT EXISTS idx_alert_rule_user_active ON alert_rule(user_id, tenant_id, is_active, updated_at);
             CREATE INDEX IF NOT EXISTS idx_alert_trigger_rule_time ON alert_trigger_log(rule_id, triggered_at);
             CREATE INDEX IF NOT EXISTS idx_doc_pipeline_run_doc_created ON doc_pipeline_run(doc_id, created_at);

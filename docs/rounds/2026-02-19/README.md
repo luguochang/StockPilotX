@@ -5,3 +5,4 @@
 - `round-Y-journal-insights-backend.md`
 - `round-Z-deepthink-auto-journal-link-backend.md`
 - `round-AA-journal-workspace-frontend.md`
+- `round-AB-journal-quality-ops-backend.md`

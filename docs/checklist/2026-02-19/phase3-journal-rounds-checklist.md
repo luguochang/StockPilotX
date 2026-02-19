@@ -35,7 +35,7 @@
 
 ## Round-AB Journal Quality & Ops (Backend)
 
-- [ ] 增加 Journal AI 生成质量日志与健康快照
-- [ ] 增加 API：`GET /v1/ops/journal/health`
-- [ ] 增加 service/http_api 测试并通过
-- [ ] Round-AB 文档与提交回填
+- [x] 增加 Journal AI 生成质量日志与健康快照
+- [x] 增加 API：`GET /v1/ops/journal/health`
+- [x] 增加 service/http_api 测试并通过
+- [x] Round-AB 文档与提交回填
