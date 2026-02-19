@@ -40,10 +40,10 @@
   - [x] T+1/T+5/T+20 偏差统计
   - [x] 复盘指标落库与可视化
 
-- [ ] ROUND-7：回归与收口
-  - [ ] 全链路回归
-  - [ ] 风险清单更新
-  - [ ] 最终交付文档与运维说明
+- [x] ROUND-7：回归与收口
+  - [x] 全链路回归
+  - [x] 风险清单更新
+  - [x] 最终交付文档与运维说明
 
 ---
 
@@ -55,3 +55,4 @@
 4. `2026-02-19 | ROUND-4 | DeepThink 分析模式接入业务情报卡片（结论/证据/事件/情景），并完成前端交互与编译回归 | commit: 29745e7 | doc: docs/v1/2026-02-19-round-4-deepthink-business-view-restructure.md`
 5. `2026-02-19 | ROUND-5 | intel-card 增加执行节奏、风控阈值与降级状态，并在前端业务卡片中可视化展示 | commit: 29a171f | doc: docs/v1/2026-02-19-round-5-risk-and-execution-guardrails.md`
 6. `2026-02-19 | ROUND-6 | 新增 intel-card 反馈落库与 T+1/T+5/T+20 偏差复盘接口，并在前端业务卡片展示复盘统计 | commit: 148e20c | doc: docs/v1/2026-02-19-round-6-feedback-and-review-loop.md`
+7. `2026-02-19 | ROUND-7 | 完成全链路回归、自测收口与风险清单更新，产出最终交付说明文档 | commit: 待提交 | doc: docs/v1/2026-02-19-round-7-regression-and-closure.md`
