@@ -16,7 +16,15 @@ const HERO_VIDEO_URL =
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
-type Citation = { source_id: string; source_url: string; excerpt: string };
+type Citation = {
+  source_id: string;
+  source_url: string;
+  excerpt: string;
+  retrieval_track?: string;
+  rerank_score?: number;
+  reliability_score?: number;
+  event_time?: string;
+};
 type QueryResponse = { trace_id: string; answer: string; citations: Citation[] };
 type AnalysisBrief = {
   confidence_level: string;
@@ -149,6 +157,61 @@ type DeepThinkExportTaskSnapshot = {
   updated_at: string;
   completed_at?: string;
   download_ready: boolean;
+};
+
+type IntelCardEvent = {
+  date: string;
+  title: string;
+  event_type: string;
+  source_id: string;
+};
+
+type IntelCardEvidence = {
+  kind: string;
+  title: string;
+  summary: string;
+  source_id: string;
+  source_url: string;
+  event_time: string;
+  reliability_score: number;
+  retrieval_track: string;
+  rerank_score?: number | null;
+};
+
+type IntelCardScenario = {
+  scenario: string;
+  expected_return_pct: number;
+  probability: number;
+};
+
+type IntelCardSnapshot = {
+  stock_code: string;
+  time_horizon: "7d" | "30d" | "90d";
+  horizon_days: number;
+  risk_profile: "conservative" | "neutral" | "aggressive";
+  overall_signal: "buy" | "hold" | "reduce";
+  confidence: number;
+  risk_level: "low" | "medium" | "high";
+  position_hint: string;
+  market_snapshot: {
+    price: number;
+    pct_change: number;
+    ma20: number;
+    ma60: number;
+    momentum_20: number;
+    volatility_20: number;
+    max_drawdown_60: number;
+    main_inflow: number;
+  };
+  key_catalysts: Array<Record<string, any>>;
+  risk_watch: Array<Record<string, any>>;
+  event_calendar: IntelCardEvent[];
+  scenario_matrix: IntelCardScenario[];
+  evidence: IntelCardEvidence[];
+  trigger_conditions: string[];
+  invalidation_conditions: string[];
+  next_review_time: string;
+  data_freshness: Record<string, number | null>;
 };
 
 type DeepConsoleMode = "analysis" | "engineering";
@@ -286,6 +349,11 @@ export default function DeepThinkPage() {
   const [activeApiStyle, setActiveApiStyle] = useState("");
   const [queryProgressText, setQueryProgressText] = useState("");
   const [analysisBrief, setAnalysisBrief] = useState<AnalysisBrief | null>(null);
+  const [intelCard, setIntelCard] = useState<IntelCardSnapshot | null>(null);
+  const [intelCardLoading, setIntelCardLoading] = useState(false);
+  const [intelCardError, setIntelCardError] = useState("");
+  const [intelCardHorizon, setIntelCardHorizon] = useState<"7d" | "30d" | "90d">("30d");
+  const [intelCardRiskProfile, setIntelCardRiskProfile] = useState<"conservative" | "neutral" | "aggressive">("neutral");
   // query/stream 在后端落库后会发 knowledge_persisted，前端据此显示“已沉淀共享语料”反馈。
   const [knowledgePersistedTraceId, setKnowledgePersistedTraceId] = useState("");
   const [deepSession, setDeepSession] = useState<DeepThinkSession | null>(null);
@@ -436,6 +504,32 @@ export default function DeepThinkPage() {
     }
   }
 
+  async function loadIntelCard(options?: { code?: string; showLoading?: boolean; skipUniverseCheck?: boolean }) {
+    const code = String(options?.code ?? stockCode).trim().toUpperCase();
+    const showLoading = options?.showLoading !== false;
+    const skipUniverseCheck = Boolean(options?.skipUniverseCheck);
+    if (showLoading) setIntelCardLoading(true);
+    setIntelCardError("");
+    try {
+      if (!skipUniverseCheck) {
+        await ensureStockInUniverse([code]);
+      }
+      const params = new URLSearchParams({
+        stock_code: code,
+        horizon: intelCardHorizon,
+        risk_profile: intelCardRiskProfile,
+      });
+      const resp = await fetch(`${API_BASE}/v1/analysis/intel-card?${params.toString()}`);
+      const body = await resp.json();
+      if (!resp.ok) throw new Error(body?.detail ?? `intel-card HTTP ${resp.status}`);
+      setIntelCard(body as IntelCardSnapshot);
+    } catch (e) {
+      setIntelCardError(e instanceof Error ? e.message : "业务情报卡片加载失败");
+    } finally {
+      if (showLoading) setIntelCardLoading(false);
+    }
+  }
+
   async function runAnalysis() {
     setLoading(true);
     setStreaming(true);
@@ -446,10 +540,13 @@ export default function DeepThinkPage() {
     setActiveApiStyle("");
     setQueryProgressText("");
     setAnalysisBrief(null);
+    setIntelCardError("");
     setKnowledgePersistedTraceId("");
     setError("");
     try {
       await ensureStockInUniverse([stockCode]);
+      // 与 query stream 并行刷新业务卡片，缩短“等待后才看到业务结论”的感知延迟。
+      const intelCardPromise = loadIntelCard({ code: stockCode, showLoading: false, skipUniverseCheck: true });
       // 同步请求结构化行情总览，和流式问答并行执行。
       const overviewPromise = fetch(`${API_BASE}/v1/market/overview/${stockCode}`);
       const streamResp = await fetch(`${API_BASE}/v1/query/stream`, {
@@ -544,6 +641,7 @@ export default function DeepThinkPage() {
       const overviewBody = await overviewResp.json();
       if (!overviewResp.ok) throw new Error(overviewBody?.detail ?? `overview HTTP ${overviewResp.status}`);
       setOverview(overviewBody as MarketOverview);
+      await intelCardPromise;
       setQueryProgressText("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "请求失败");
@@ -590,6 +688,12 @@ export default function DeepThinkPage() {
       setCompareLoading(false);
     }
   }
+
+  useEffect(() => {
+    // 切换标的后先清空旧卡片，避免把前一只股票的结论误读为当前标的。
+    setIntelCard(null);
+    setIntelCardError("");
+  }, [stockCode]);
 
   async function createDeepThinkSessionRequest(): Promise<DeepThinkSession> {
     const resp = await fetch(`${API_BASE}/v1/deep-think/sessions`, {
@@ -1158,6 +1262,31 @@ export default function DeepThinkPage() {
     }
     return Array.from(dedup.values()).slice(0, 6);
   }, [result]);
+  const intelEvidenceRows = useMemo(
+    () =>
+      (intelCard?.evidence ?? []).map((row, idx) => ({
+        ...row,
+        key: `${row.source_id}-${row.event_time}-${idx}`,
+      })),
+    [intelCard]
+  );
+  const intelScenarioRows = useMemo(
+    () =>
+      (intelCard?.scenario_matrix ?? []).map((row, idx) => ({
+        ...row,
+        key: `${row.scenario}-${idx}`,
+      })),
+    [intelCard]
+  );
+  const intelFreshnessRows = useMemo(
+    () =>
+      Object.entries(intelCard?.data_freshness ?? {}).map(([k, v]) => ({
+        key: k,
+        item: k,
+        minutes: typeof v === "number" ? v : null,
+      })),
+    [intelCard]
+  );
   const bannerItems = [
     "实时行情聚合",
     "历史K线趋势",
@@ -1773,6 +1902,206 @@ export default function DeepThinkPage() {
                 </Space>
               </Card>
             ) : null}
+
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>个股情报卡片（业务版）</span>} style={{ marginTop: 12 }}>
+              <Space direction="vertical" style={{ width: "100%" }} size={10}>
+                <Text style={{ color: "#64748b" }}>
+                  作用：把多源数据转换成可执行结论，优先回答“该做什么、为什么、何时失效”。
+                </Text>
+                <Space wrap>
+                  <Select
+                    value={intelCardHorizon}
+                    style={{ width: 120 }}
+                    options={[
+                      { label: "7天", value: "7d" },
+                      { label: "30天", value: "30d" },
+                      { label: "90天", value: "90d" },
+                    ]}
+                    onChange={(value) => setIntelCardHorizon(value as "7d" | "30d" | "90d")}
+                  />
+                  <Select
+                    value={intelCardRiskProfile}
+                    style={{ width: 160 }}
+                    options={[
+                      { label: "保守风险偏好", value: "conservative" },
+                      { label: "中性风险偏好", value: "neutral" },
+                      { label: "积极风险偏好", value: "aggressive" },
+                    ]}
+                    onChange={(value) => setIntelCardRiskProfile(value as "conservative" | "neutral" | "aggressive")}
+                  />
+                  <Button loading={intelCardLoading} onClick={() => loadIntelCard({ showLoading: true })}>刷新业务卡片</Button>
+                </Space>
+
+                {intelCardError ? <Alert type="warning" showIcon message={intelCardError} /> : null}
+
+                {intelCard ? (
+                  <>
+                    <Space wrap>
+                      <Tag color={intelCard.overall_signal === "buy" ? "green" : intelCard.overall_signal === "reduce" ? "red" : "blue"}>
+                        建议动作：{getSignalLabel(intelCard.overall_signal)}
+                      </Tag>
+                      <Tag color={intelCard.confidence >= 0.7 ? "green" : intelCard.confidence >= 0.5 ? "gold" : "red"}>
+                        置信度：{Number(intelCard.confidence ?? 0).toFixed(3)}
+                      </Tag>
+                      <Tag color={intelCard.risk_level === "high" ? "red" : intelCard.risk_level === "medium" ? "gold" : "green"}>
+                        风险等级：{intelCard.risk_level}
+                      </Tag>
+                      <Tag>仓位建议：{intelCard.position_hint}</Tag>
+                      <Tag>复核时间：{String(intelCard.next_review_time ?? "-")}</Tag>
+                    </Space>
+
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={12}>
+                        <Card size="small" title={<span style={{ color: "#0f172a" }}>触发条件</span>}>
+                          <List
+                            size="small"
+                            dataSource={intelCard.trigger_conditions ?? []}
+                            renderItem={(item) => <List.Item><Text style={{ color: "#334155" }}>{String(item)}</Text></List.Item>}
+                          />
+                        </Card>
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Card size="small" title={<span style={{ color: "#0f172a" }}>失效条件</span>}>
+                          <List
+                            size="small"
+                            dataSource={intelCard.invalidation_conditions ?? []}
+                            renderItem={(item) => <List.Item><Text style={{ color: "#334155" }}>{String(item)}</Text></List.Item>}
+                          />
+                        </Card>
+                      </Col>
+                    </Row>
+
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={12}>
+                        <Card size="small" title={<span style={{ color: "#0f172a" }}>关键催化</span>}>
+                          <List
+                            size="small"
+                            dataSource={(intelCard.key_catalysts ?? []).slice(0, 6)}
+                            renderItem={(row: any) => (
+                              <List.Item>
+                                <Space direction="vertical" size={1} style={{ width: "100%" }}>
+                                  <Text style={{ color: "#0f172a" }}>{String(row?.title ?? "-")}</Text>
+                                  <Text style={{ color: "#64748b" }}>{String(row?.summary ?? "")}</Text>
+                                </Space>
+                              </List.Item>
+                            )}
+                          />
+                        </Card>
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Card size="small" title={<span style={{ color: "#0f172a" }}>风险观察</span>}>
+                          <List
+                            size="small"
+                            dataSource={(intelCard.risk_watch ?? []).slice(0, 6)}
+                            renderItem={(row: any) => (
+                              <List.Item>
+                                <Space direction="vertical" size={1} style={{ width: "100%" }}>
+                                  <Text style={{ color: "#0f172a" }}>{String(row?.title ?? "-")}</Text>
+                                  <Text style={{ color: "#64748b" }}>{String(row?.summary ?? "")}</Text>
+                                </Space>
+                              </List.Item>
+                            )}
+                          />
+                        </Card>
+                      </Col>
+                    </Row>
+
+                    <Card size="small" title={<span style={{ color: "#0f172a" }}>事件日历</span>}>
+                      <List
+                        size="small"
+                        dataSource={(intelCard.event_calendar ?? []).slice(0, 8)}
+                        renderItem={(item) => (
+                          <List.Item>
+                            <Space wrap>
+                              <Tag color={String(item.event_type) === "macro" ? "gold" : "blue"}>{String(item.event_type)}</Tag>
+                              <Text style={{ color: "#334155" }}>{String(item.date)}</Text>
+                              <Text style={{ color: "#0f172a" }}>{String(item.title)}</Text>
+                            </Space>
+                          </List.Item>
+                        )}
+                      />
+                    </Card>
+
+                    <Card size="small" title={<span style={{ color: "#0f172a" }}>情景矩阵</span>}>
+                      <Table
+                        rowKey="key"
+                        pagination={false}
+                        dataSource={intelScenarioRows}
+                        columns={[
+                          { title: "情景", dataIndex: "scenario", key: "scenario" },
+                          {
+                            title: "预期收益(%)",
+                            dataIndex: "expected_return_pct",
+                            key: "expected_return_pct",
+                            render: (v: number) => Number(v ?? 0).toFixed(2),
+                          },
+                          {
+                            title: "概率",
+                            dataIndex: "probability",
+                            key: "probability",
+                            render: (v: number) => Number(v ?? 0).toFixed(2),
+                          },
+                        ]}
+                      />
+                    </Card>
+
+                    <Card size="small" title={<span style={{ color: "#0f172a" }}>证据链路（粗排+精排归因）</span>}>
+                      <Table
+                        rowKey="key"
+                        pagination={false}
+                        dataSource={intelEvidenceRows}
+                        scroll={{ x: 960 }}
+                        columns={[
+                          { title: "来源", dataIndex: "source_id", key: "source_id" },
+                          { title: "轨道", dataIndex: "retrieval_track", key: "retrieval_track" },
+                          {
+                            title: "可信度",
+                            dataIndex: "reliability_score",
+                            key: "reliability_score",
+                            render: (v: number) => Number(v ?? 0).toFixed(2),
+                          },
+                          {
+                            title: "摘要",
+                            dataIndex: "summary",
+                            key: "summary",
+                            render: (v: string) => <Text style={{ color: "#334155" }}>{String(v ?? "").slice(0, 90)}</Text>,
+                          },
+                          {
+                            title: "链接",
+                            dataIndex: "source_url",
+                            key: "source_url",
+                            render: (v: string) => (
+                              <a href={v} target="_blank" rel="noreferrer" style={{ color: "#2563eb" }}>
+                                查看来源
+                              </a>
+                            ),
+                          },
+                        ]}
+                      />
+                    </Card>
+
+                    <Card size="small" title={<span style={{ color: "#0f172a" }}>数据新鲜度</span>}>
+                      <Table
+                        rowKey="key"
+                        pagination={false}
+                        dataSource={intelFreshnessRows}
+                        columns={[
+                          { title: "数据项", dataIndex: "item", key: "item" },
+                          {
+                            title: "距今分钟",
+                            dataIndex: "minutes",
+                            key: "minutes",
+                            render: (v: number | null) => (typeof v === "number" ? `${v} 分钟前` : "未知"),
+                          },
+                        ]}
+                      />
+                    </Card>
+                  </>
+                ) : (
+                  <Text style={{ color: "#64748b" }}>暂无业务卡片，请点击“刷新业务卡片”或执行高级分析后查看。</Text>
+                )}
+              </Space>
+            </Card>
           </Col>
         </Row>
       </motion.section>

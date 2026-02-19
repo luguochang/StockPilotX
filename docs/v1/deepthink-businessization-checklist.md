@@ -25,10 +25,10 @@
   - [x] 精排（rerank）
   - [x] 引用归因一致性校验
 
-- [ ] ROUND-4：DeepThink 业务视图重构
-  - [ ] 结论卡/证据卡/事件卡/情景矩阵
-  - [ ] 工程视图默认折叠
-  - [ ] 交互链路回归
+- [x] ROUND-4：DeepThink 业务视图重构
+  - [x] 结论卡/证据卡/事件卡/情景矩阵
+  - [x] 工程视图默认折叠
+  - [x] 交互链路回归
 
 - [ ] ROUND-5：风控与执行建议
   - [ ] 仓位区间与节奏建议
@@ -52,3 +52,4 @@
 1. `2026-02-19 | ROUND-1 | 完成 ops/health 新接口切换、可见性字段增强与覆盖矩阵文档 | commit: 63f672e | doc: docs/v1/2026-02-19-round-1-ops-health-and-visibility-matrix.md`
 2. `2026-02-19 | ROUND-2 | 新增 intel-card 聚合接口，输出业务结论/证据/事件日历/情景矩阵并补充回归测试 | commit: e857ed2 | doc: docs/v1/2026-02-19-round-2-intel-card-api.md`
 3. `2026-02-19 | ROUND-3 | 完成 RAG 两阶段检索（粗排+精排）与 citation 归因一致性校验，补充检索元数据与回归测试 | commit: b7fda8c | doc: docs/v1/2026-02-19-round-3-rag-two-stage-rerank-and-attribution.md`
+4. `2026-02-19 | ROUND-4 | DeepThink 分析模式接入业务情报卡片（结论/证据/事件/情景），并完成前端交互与编译回归 | commit: 待提交 | doc: docs/v1/2026-02-19-round-4-deepthink-business-view-restructure.md`
