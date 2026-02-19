@@ -3199,6 +3199,50 @@ class AShareAgentService:
     def portfolio_transactions(self, token: str, portfolio_id: int, *, limit: int = 200) -> list[dict[str, Any]]:
         return self.web.portfolio_transactions(token, portfolio_id=portfolio_id, limit=limit)
 
+    # Investment Journal: keep orchestration in service layer so API payload remains thin.
+    def journal_create(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.web.journal_create(
+            token,
+            journal_type=str(payload.get("journal_type", "")),
+            title=str(payload.get("title", "")),
+            content=str(payload.get("content", "")),
+            stock_code=str(payload.get("stock_code", "")),
+            decision_type=str(payload.get("decision_type", "")),
+            related_research_id=str(payload.get("related_research_id", "")),
+            related_portfolio_id=payload.get("related_portfolio_id"),
+            tags=payload.get("tags", []),
+            sentiment=str(payload.get("sentiment", "")),
+        )
+
+    def journal_list(
+        self,
+        token: str,
+        *,
+        journal_type: str = "",
+        stock_code: str = "",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        return self.web.journal_list(
+            token,
+            journal_type=journal_type,
+            stock_code=stock_code,
+            limit=limit,
+            offset=offset,
+        )
+
+    def journal_reflection_add(self, token: str, journal_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.web.journal_reflection_add(
+            token,
+            journal_id=journal_id,
+            reflection_content=str(payload.get("reflection_content", "")),
+            ai_insights=str(payload.get("ai_insights", "")),
+            lessons_learned=str(payload.get("lessons_learned", "")),
+        )
+
+    def journal_reflection_list(self, token: str, journal_id: int, *, limit: int = 50) -> list[dict[str, Any]]:
+        return self.web.journal_reflection_list(token, journal_id=journal_id, limit=limit)
+
     def reports_list(self, token: str) -> list[dict[str, Any]]:
         return self.web.report_list(token)
 

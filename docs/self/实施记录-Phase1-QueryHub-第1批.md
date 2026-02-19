@@ -575,3 +575,73 @@
 - [x] Backtest API
 - [x] 服务层/API 层测试
 - [x] 回归测试通过
+
+## 第12批增量（Phase3 - Investment Journal 第1批）
+
+### 新增能力
+
+1. Journal 表结构与索引
+- `backend/app/web/store.py`
+  - 新增：
+    - `investment_journal`
+    - `journal_reflection`
+  - 新增索引：
+    - `idx_investment_journal_user_created`
+    - `idx_investment_journal_stock`
+    - `idx_journal_reflection_journal`
+
+2. Journal 领域服务
+- `backend/app/web/service.py`
+  - 新增：
+    - `journal_create`
+    - `journal_list`
+    - `journal_reflection_add`
+    - `journal_reflection_list`
+  - 新增辅助逻辑：
+    - `_journal_ensure_owned`（租户和归属校验）
+    - `_journal_normalize_tags`（标签归一化）
+    - `_journal_normalize_type`（类型白名单校验）
+
+3. 应用层封装
+- `backend/app/service.py`
+  - 新增：
+    - `journal_create`
+    - `journal_list`
+    - `journal_reflection_add`
+    - `journal_reflection_list`
+
+4. API 路由
+- `backend/app/http_api.py`
+  - `POST /v1/journal`
+  - `GET /v1/journal`
+  - `POST /v1/journal/{journal_id}/reflections`
+  - `GET /v1/journal/{journal_id}/reflections`
+
+5. 测试补充
+- `tests/test_service.py`
+  - 新增 `test_journal_lifecycle`
+- `tests/test_http_api.py`
+  - 新增 `test_journal_endpoints`
+
+### 第12批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python.exe -m pytest -q tests/test_service.py -k "journal_lifecycle or portfolio_lifecycle or alert_rule_lifecycle_and_check or backtest_run_and_get"
+.\.venv\Scripts\python.exe -m pytest -q tests/test_http_api.py -k "journal_endpoints or portfolio_endpoints or alert_rule_endpoints or backtest_endpoints"
+.\.venv\Scripts\python.exe -m pytest -q tests -k "web or api or query or docs or portfolio or alert or backtest or journal"
+```
+
+结果：
+- 4 passed, 31 deselected
+- 4 passed, 21 deselected
+- 41 passed, 55 deselected
+
+### 第12批 Checklist
+
+- [x] Journal 表结构与索引
+- [x] Journal 创建/列表服务
+- [x] Reflection 创建/列表服务
+- [x] Journal API 路由
+- [x] 服务层/API 层测试
+- [x] 回归测试通过

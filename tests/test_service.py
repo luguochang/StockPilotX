@@ -284,6 +284,55 @@ class ServiceTestCase(unittest.TestCase):
         loaded = self.svc.backtest_get(run["run_id"])
         self.assertEqual(str(loaded.get("run_id", "")), str(run["run_id"]))
 
+    def test_journal_lifecycle(self) -> None:
+        created = self.svc.journal_create(
+            "",
+            {
+                "journal_type": "decision",
+                "title": "加仓决策记录",
+                "content": "基于现金流改善和估值回落，计划分批加仓。",
+                "stock_code": "SH600000",
+                "decision_type": "buy",
+                "tags": ["银行", "估值", "现金流"],
+                "sentiment": "neutral",
+            },
+        )
+        journal_id = int(created.get("journal_id", 0))
+        self.assertGreater(journal_id, 0)
+        self.assertEqual(str(created.get("stock_code", "")), "SH600000")
+        self.assertIn("银行", list(created.get("tags", [])))
+
+        rows = self.svc.journal_list("", limit=20)
+        self.assertTrue(any(int(x.get("journal_id", 0)) == journal_id for x in rows))
+
+        filtered = self.svc.journal_list("", journal_type="decision", stock_code="SH600000", limit=20)
+        self.assertTrue(any(int(x.get("journal_id", 0)) == journal_id for x in filtered))
+
+        reflection = self.svc.journal_reflection_add(
+            "",
+            journal_id,
+            {
+                "reflection_content": "复盘后发现择时偏早，需要增加成交量确认。",
+                "ai_insights": "触发条件主要受大盘波动影响。",
+                "lessons_learned": "后续加入趋势确认条件。",
+            },
+        )
+        self.assertGreater(int(reflection.get("reflection_id", 0)), 0)
+
+        reflections = self.svc.journal_reflection_list("", journal_id, limit=20)
+        self.assertGreaterEqual(len(reflections), 1)
+        self.assertTrue(any("择时偏早" in str(x.get("reflection_content", "")) for x in reflections))
+
+        with self.assertRaises(ValueError):
+            _ = self.svc.journal_create(
+                "",
+                {
+                    "journal_type": "unknown",
+                    "title": "bad",
+                    "content": "bad",
+                },
+            )
+
     def test_query_repeated_calls_do_not_hit_global_model_limit(self) -> None:
         # 回归：预算计数应按请求重置，连续请求不应在第9次后失败。
         for idx in range(12):

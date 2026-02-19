@@ -7,6 +7,10 @@ This directory tracks executable checklists and progress logs for large implemen
 - `docs/checklist/YYYY-MM-DD/*-checklist.md`: actionable checklist with completion marks.
 - `docs/checklist/YYYY-MM-DD/*-execution-log.md`: chronological execution notes, test evidence, and commit references.
 
+## Date Buckets
+- `docs/checklist/2026-02-15/`
+- `docs/checklist/2026-02-19/`
+
 ## Rules
 - Update checklist status immediately after each completed implementation step.
 - Record self-test command/results for each step.

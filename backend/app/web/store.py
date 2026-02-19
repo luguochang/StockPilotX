@@ -165,6 +165,32 @@ class WebStore:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS investment_journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                tenant_id INTEGER NOT NULL,
+                journal_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                stock_code TEXT NOT NULL DEFAULT '',
+                decision_type TEXT NOT NULL DEFAULT '',
+                related_research_id TEXT NOT NULL DEFAULT '',
+                related_portfolio_id INTEGER,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                sentiment TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS journal_reflection (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                journal_id INTEGER NOT NULL,
+                reflection_content TEXT NOT NULL,
+                ai_insights TEXT NOT NULL DEFAULT '',
+                lessons_learned TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS doc_index (
                 doc_id TEXT PRIMARY KEY,
                 user_id INTEGER,
@@ -497,6 +523,9 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_portfolio_user_created ON portfolio(user_id, tenant_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_portfolio_position_pid ON portfolio_position(portfolio_id, market_value);
             CREATE INDEX IF NOT EXISTS idx_portfolio_tx_pid_date ON portfolio_transaction(portfolio_id, transaction_date);
+            CREATE INDEX IF NOT EXISTS idx_investment_journal_user_created ON investment_journal(user_id, tenant_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_investment_journal_stock ON investment_journal(stock_code, created_at);
+            CREATE INDEX IF NOT EXISTS idx_journal_reflection_journal ON journal_reflection(journal_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_alert_rule_user_active ON alert_rule(user_id, tenant_id, is_active, updated_at);
             CREATE INDEX IF NOT EXISTS idx_alert_trigger_rule_time ON alert_trigger_log(rule_id, triggered_at);
             CREATE INDEX IF NOT EXISTS idx_doc_pipeline_run_doc_created ON doc_pipeline_run(doc_id, created_at);

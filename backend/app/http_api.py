@@ -579,6 +579,51 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    # ---------------- WEB-011 Investment Journal ----------------
+    @app.post("/v1/journal")
+    def journal_create(payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.journal_create(token, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/journal")
+    def journal_list(
+        journal_type: str = "",
+        stock_code: str = "",
+        limit: int = 20,
+        offset: int = 0,
+        authorization: str | None = Header(default=None),
+    ):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.journal_list(
+                token,
+                journal_type=journal_type,
+                stock_code=stock_code,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.post("/v1/journal/{journal_id}/reflections")
+    def journal_reflection_add(journal_id: int, payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.journal_reflection_add(token, journal_id, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/journal/{journal_id}/reflections")
+    def journal_reflection_list(journal_id: int, limit: int = 50, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.journal_reflection_list(token, journal_id, limit=limit)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     # ---------------- WEB-003 Report Center ----------------
     @app.get("/v1/reports")
     def reports_list(authorization: str | None = Header(default=None)):

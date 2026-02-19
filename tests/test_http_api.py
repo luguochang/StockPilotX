@@ -515,6 +515,54 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c2, 200)
         self.assertEqual(str(loaded.get("run_id", "")), run_id)
 
+    def test_journal_endpoints(self) -> None:
+        c1, created = self._post(
+            "/v1/journal",
+            {
+                "journal_type": "decision",
+                "title": "API 决策记录",
+                "content": "阶段性仓位控制，等待量价确认。",
+                "stock_code": "SH600000",
+                "decision_type": "hold",
+                "tags": ["仓位", "复盘"],
+            },
+        )
+        self.assertEqual(c1, 200)
+        journal_id = int(created.get("journal_id", 0))
+        self.assertGreater(journal_id, 0)
+
+        c2, rows = self._get("/v1/journal?limit=20")
+        self.assertEqual(c2, 200)
+        self.assertTrue(any(int(x.get("journal_id", 0)) == journal_id for x in rows))
+
+        c3, filtered = self._get("/v1/journal?journal_type=decision&stock_code=SH600000&limit=20")
+        self.assertEqual(c3, 200)
+        self.assertTrue(any(int(x.get("journal_id", 0)) == journal_id for x in filtered))
+
+        c4, reflection = self._post(
+            f"/v1/journal/{journal_id}/reflections",
+            {
+                "reflection_content": "复盘确认信号分歧较大，下一轮降低仓位。",
+                "ai_insights": "宏观扰动导致估值扩张受限。",
+            },
+        )
+        self.assertEqual(c4, 200)
+        self.assertGreater(int(reflection.get("reflection_id", 0)), 0)
+
+        c5, reflections = self._get(f"/v1/journal/{journal_id}/reflections?limit=20")
+        self.assertEqual(c5, 200)
+        self.assertTrue(any("降低仓位" in str(x.get("reflection_content", "")) for x in reflections))
+
+        bad_code, _ = self._post_error(
+            "/v1/journal",
+            {
+                "journal_type": "invalid_type",
+                "title": "bad",
+                "content": "bad",
+            },
+        )
+        self.assertEqual(bad_code, 400)
+
     def test_ops_capabilities(self) -> None:
         code, body = self._get("/v1/ops/capabilities")
         self.assertEqual(code, 200)

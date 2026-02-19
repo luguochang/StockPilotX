@@ -631,6 +631,193 @@ class WebAppService:
             "position_count": len(positions),
         }
 
+    # ----------------- Investment Journal -----------------
+    def _journal_ensure_owned(self, token: str, journal_id: int) -> dict[str, Any]:
+        """Verify journal ownership to prevent cross-tenant data leakage."""
+        me = self.auth_me(token)
+        row = self.store.query_one(
+            "SELECT * FROM investment_journal WHERE id = ? AND user_id = ? AND tenant_id = ?",
+            (int(journal_id), me["user_id"], me["tenant_id"]),
+        )
+        if not row:
+            raise ValueError("journal not found")
+        return row
+
+    def _journal_normalize_tags(self, tags: Any) -> list[str]:
+        """Normalize tags for consistent querying and avoid unbounded payload growth."""
+        if not isinstance(tags, list):
+            return []
+        normalized: list[str] = []
+        for raw in tags:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            text = text[:32]
+            if text in normalized:
+                continue
+            normalized.append(text)
+            if len(normalized) >= 12:
+                break
+        return normalized
+
+    def _journal_normalize_type(self, journal_type: str) -> str:
+        kind = str(journal_type or "").strip().lower()
+        if kind not in {"decision", "reflection", "learning"}:
+            raise ValueError("journal_type must be one of decision/reflection/learning")
+        return kind
+
+    def _journal_serialize_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        if not row:
+            return {}
+        payload = dict(row)
+        payload["journal_id"] = int(payload.pop("id"))
+        payload["related_portfolio_id"] = (
+            int(payload.get("related_portfolio_id"))
+            if payload.get("related_portfolio_id") is not None
+            else None
+        )
+        payload["tags"] = self._json_loads_or(payload.get("tags_json", "[]"), [])
+        payload.pop("tags_json", None)
+        return payload
+
+    def journal_create(
+        self,
+        token: str,
+        *,
+        journal_type: str,
+        title: str,
+        content: str,
+        stock_code: str = "",
+        decision_type: str = "",
+        related_research_id: str = "",
+        related_portfolio_id: int | None = None,
+        tags: Any = None,
+        sentiment: str = "",
+    ) -> dict[str, Any]:
+        me = self.auth_me(token)
+        kind = self._journal_normalize_type(journal_type)
+        title_text = str(title or "").strip()
+        content_text = str(content or "").strip()
+        if not title_text:
+            raise ValueError("title is required")
+        if not content_text:
+            raise ValueError("content is required")
+        code = str(stock_code or "").strip().upper()
+        normalized_tags = self._journal_normalize_tags(tags)
+        related_portfolio = None if related_portfolio_id in (None, "") else int(related_portfolio_id)
+
+        cur = self.store.execute(
+            """
+            INSERT INTO investment_journal
+            (user_id, tenant_id, journal_type, title, content, stock_code, decision_type,
+             related_research_id, related_portfolio_id, tags_json, sentiment, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                me["user_id"],
+                me["tenant_id"],
+                kind,
+                title_text[:200],
+                content_text[:8000],
+                code,
+                str(decision_type or "").strip()[:40],
+                str(related_research_id or "").strip()[:120],
+                related_portfolio,
+                json.dumps(normalized_tags, ensure_ascii=False),
+                str(sentiment or "").strip()[:24],
+            ),
+        )
+        row = self.store.query_one("SELECT * FROM investment_journal WHERE id = ?", (int(cur.lastrowid),))
+        return self._journal_serialize_row(row or {})
+
+    def journal_list(
+        self,
+        token: str,
+        *,
+        journal_type: str = "",
+        stock_code: str = "",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        me = self.auth_me(token)
+        safe_limit = max(1, min(200, int(limit)))
+        safe_offset = max(0, int(offset))
+        conditions = ["user_id = ?", "tenant_id = ?"]
+        params: list[Any] = [me["user_id"], me["tenant_id"]]
+
+        kind_filter = str(journal_type or "").strip().lower()
+        if kind_filter:
+            kind_filter = self._journal_normalize_type(kind_filter)
+            conditions.append("journal_type = ?")
+            params.append(kind_filter)
+        code_filter = str(stock_code or "").strip().upper()
+        if code_filter:
+            conditions.append("stock_code = ?")
+            params.append(code_filter)
+        params.extend([safe_limit, safe_offset])
+        rows = self.store.query_all(
+            f"""
+            SELECT id, journal_type, title, content, stock_code, decision_type, related_research_id,
+                   related_portfolio_id, tags_json, sentiment, created_at, updated_at
+            FROM investment_journal
+            WHERE {' AND '.join(conditions)}
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            tuple(params),
+        )
+        return [self._journal_serialize_row(row) for row in rows]
+
+    def journal_reflection_add(
+        self,
+        token: str,
+        *,
+        journal_id: int,
+        reflection_content: str,
+        ai_insights: str = "",
+        lessons_learned: str = "",
+    ) -> dict[str, Any]:
+        _ = self._journal_ensure_owned(token, journal_id)
+        reflection = str(reflection_content or "").strip()
+        if not reflection:
+            raise ValueError("reflection_content is required")
+        cur = self.store.execute(
+            """
+            INSERT INTO journal_reflection
+            (journal_id, reflection_content, ai_insights, lessons_learned)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                int(journal_id),
+                reflection[:6000],
+                str(ai_insights or "").strip()[:4000],
+                str(lessons_learned or "").strip()[:2000],
+            ),
+        )
+        row = self.store.query_one(
+            """
+            SELECT id AS reflection_id, journal_id, reflection_content, ai_insights, lessons_learned, created_at
+            FROM journal_reflection
+            WHERE id = ?
+            """,
+            (int(cur.lastrowid),),
+        )
+        return row or {}
+
+    def journal_reflection_list(self, token: str, *, journal_id: int, limit: int = 50) -> list[dict[str, Any]]:
+        _ = self._journal_ensure_owned(token, journal_id)
+        safe_limit = max(1, min(200, int(limit)))
+        return self.store.query_all(
+            """
+            SELECT id AS reflection_id, journal_id, reflection_content, ai_insights, lessons_learned, created_at
+            FROM journal_reflection
+            WHERE journal_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(journal_id), safe_limit),
+        )
+
     # ----------------- Reports -----------------
     def save_report_index(
         self,
