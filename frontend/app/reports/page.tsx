@@ -44,6 +44,10 @@ type ReportTask = {
   result_level: "none" | "partial" | "full" | string;
   error_code?: string;
   error_message?: string;
+  // Backend quality snapshot for task-level transparency while polling.
+  data_pack_status?: "ready" | "partial" | "failed" | string;
+  data_pack_missing?: string[];
+  quality_gate_detail?: Record<string, unknown>;
 };
 
 type TaskResult = {
@@ -96,6 +100,11 @@ export default function ReportsPage() {
   const qualityScore = Number(qualityGatePreview.score ?? 0);
   const qualityReasons = Array.isArray(qualityGatePreview.reasons) ? qualityGatePreview.reasons.map((item) => String(item)) : [];
   const reportsHealth = (businessHealth?.module_health ?? []).find((row) => String(row.module) === "reports");
+  const taskDataPackMissing = Array.isArray(task?.data_pack_missing) ? task.data_pack_missing.map((item) => String(item)) : [];
+  const taskQualityGate = parseObject(task?.quality_gate_detail);
+  const taskQualityStatus = String(taskQualityGate.status ?? "unknown");
+  const taskQualityScore = Number(taskQualityGate.score ?? 0);
+  const taskQualityReasons = Array.isArray(taskQualityGate.reasons) ? taskQualityGate.reasons.map((item) => String(item)) : [];
 
   const heroSlides = [
     { src: "/assets/images/nyse-floor-1963.jpg", alt: "Archive report", caption: "档案回溯" },
@@ -332,7 +341,17 @@ export default function ReportsPage() {
             <Text>状态: <Tag color={statusColor(task.status)}>{task.status}</Tag></Text>
             <Text>阶段: {task.current_stage || "-"}</Text>
             <Text type="secondary">{task.stage_message || "等待中"}</Text>
+            <Text>
+              数据包状态: <Tag color={statusColor(String(task.data_pack_status ?? "unknown"))}>{String(task.data_pack_status ?? "unknown")}</Tag>
+            </Text>
+            <Text>
+              任务质量: <Tag color={statusColor(taskQualityStatus)}>{taskQualityStatus}</Tag>
+            </Text>
+            {taskQualityScore > 0 ? <Text type="secondary">任务质量得分: {taskQualityScore.toFixed(2)}</Text> : null}
+            {taskQualityReasons.length ? <Text type="secondary">任务质量原因: {taskQualityReasons.join("；")}</Text> : null}
             <Progress percent={Math.max(0, Math.min(100, Number((Number(task.progress || 0) * 100).toFixed(1))))} strokeColor="#2563eb" />
+            {taskDataPackMissing.length ? <Alert type="warning" showIcon message={`数据缺口: ${taskDataPackMissing.join("；")}`} /> : null}
+            {task.error_message ? <Alert type="error" showIcon message={task.error_message} /> : null}
             {task.result_level === "partial" ? <Alert type="warning" showIcon message="已返回最小可用结果，系统仍在补全完整报告。" /> : null}
           </Space>
         </Card>

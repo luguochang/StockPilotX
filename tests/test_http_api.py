@@ -106,6 +106,8 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("market_regime", body["analysis_brief"])
         self.assertIn("regime_confidence", body["analysis_brief"])
         self.assertIn("signal_guard_applied", body["analysis_brief"])
+        self.assertIn("data_packs", body)
+        self.assertTrue(isinstance(body.get("data_packs", []), list))
         self.assertTrue(all(str(x.get("retrieval_track", "")).strip() for x in body.get("citations", [])))
         self.assertIn(body["workflow_runtime"], ("langgraph", "direct"))
 
@@ -262,6 +264,7 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("report_data_pack_summary", report)
         self.assertIn("generation_mode", report)
         self.assertIn("confidence_attribution", report)
+        self.assertIn("llm_input_pack", report)
 
     def test_report_task_endpoints(self) -> None:
         code, created = self._post(
@@ -750,6 +753,20 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c3, 200)
         self.assertEqual(int(loaded.get("journal_id", 0)), journal_id)
         self.assertTrue(str(loaded.get("summary", "")).strip())
+
+    def test_journal_create_minimal_payload_auto_fill(self) -> None:
+        c1, created = self._post(
+            "/v1/journal",
+            {
+                "journal_type": "decision",
+                "stock_code": "SH600000",
+                "decision_type": "hold",
+            },
+        )
+        self.assertEqual(c1, 200)
+        self.assertGreater(int(created.get("journal_id", 0)), 0)
+        self.assertTrue(str(created.get("title", "")).strip())
+        self.assertTrue(str(created.get("content", "")).strip())
 
     def test_journal_insights_endpoint(self) -> None:
         c1, created = self._post(

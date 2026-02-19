@@ -247,21 +247,25 @@ export default function JournalPage() {
   async function handleCreate(values: CreateForm) {
     setCreateLoading(true);
     try {
-      const tpl = TEMPLATES[values.template_id];
-      const stockCode = values.stock_code.trim().toUpperCase();
-      const thesis = values.thesis.trim();
+      // Guard every free-form field to avoid `trim` on undefined when optional fields are unmounted.
+      const templateId = (String(values?.template_id ?? "decision") as TemplateId);
+      const tpl = TEMPLATES[templateId];
+      const stockCode = String(values?.stock_code ?? "").trim().toUpperCase();
+      const thesisRaw = String(values?.thesis ?? "").trim();
+      const thesis = thesisRaw || `${stockCode} 当前按模板创建记录，后续补充更完整观点。`;
       if (!stockCode) throw new Error("请先选择股票代码。");
-      if (thesis.length < 8) throw new Error("核心观点至少 8 个字。");
 
       const tags = Array.from(new Set([...tpl.tags, ...parseCommaItems(values.custom_tags || "")])).slice(0, 12);
-      // Two-step wizard only asks for template/stock/thesis by default.
+      // Two-step wizard default flow only needs template + stock; thesis is optional.
       const payload = {
         journal_type: values.journal_type || tpl.journal_type,
-        title: values.custom_title.trim() || `${tpl.title_prefix} ${stockCode}`,
+        title: String(values?.custom_title ?? "").trim() || `${tpl.title_prefix} ${stockCode}`,
         stock_code: stockCode,
         decision_type: values.decision_type || tpl.decision_type,
         tags,
         sentiment: values.sentiment || tpl.sentiment,
+        auto_thesis: thesisRaw.length === 0,
+        thesis_hint: thesis,
         content: [
           `模板: ${tpl.label}`,
           `核心观点: ${thesis}`,
@@ -393,7 +397,7 @@ export default function JournalPage() {
                 current={wizardStep}
                 items={[
                   { title: "选择模板与股票" },
-                  { title: "填写核心观点" },
+                  { title: "补充核心观点（可选）" },
                 ]}
                 style={{ marginBottom: 12 }}
               />
@@ -412,15 +416,22 @@ export default function JournalPage() {
                   </Col>
                 </Row>
               ) : (
-                <Form.Item name="thesis" label="核心观点" rules={[{ required: true, message: "请输入核心观点" }, { min: 8, message: "至少输入 8 个字" }]}>
-                  <Input.TextArea rows={5} placeholder={selectedTemplate.hint} />
+                <Form.Item name="thesis" label="核心观点（可选）">
+                  <Input.TextArea rows={5} placeholder="可选：输入一句观点；留空将由系统自动生成草稿。" />
                 </Form.Item>
               )}
 
               <Flex align="center" justify="space-between" style={{ marginBottom: 10 }}>
                 <Flex gap={8}>
                   {wizardStep > 0 ? <Button onClick={() => setWizardStep(0)}>上一步</Button> : null}
-                  {wizardStep === 0 ? <Button type="primary" onClick={() => setWizardStep(1)}>下一步</Button> : <Button type="primary" htmlType="submit" loading={createLoading}>创建日志</Button>}
+                  {wizardStep === 0 ? (
+                    <>
+                      <Button type="primary" htmlType="submit" loading={createLoading}>直接创建</Button>
+                      <Button onClick={() => setWizardStep(1)}>下一步完善观点</Button>
+                    </>
+                  ) : (
+                    <Button type="primary" htmlType="submit" loading={createLoading}>创建日志</Button>
+                  )}
                 </Flex>
                 <Flex gap={8} align="center">
                   <Text type="secondary">专家模式</Text>

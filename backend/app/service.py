@@ -940,38 +940,24 @@ class AShareAgentService:
             return cached
 
         def _run_pipeline() -> dict[str, Any]:
-            # Real data first: refresh quote/announcement/history before retrieval.
-            if req.stock_codes:
+            # Build per-stock input packs so single-turn requests get sufficient coverage.
+            data_packs: list[dict[str, Any]] = []
+            for code in req.stock_codes:
                 try:
-                    quote_refresh = [c for c in req.stock_codes if self._needs_quote_refresh(c)]
-                    ann_refresh = [c for c in req.stock_codes if self._needs_announcement_refresh(c)]
-                    hist_refresh = [c for c in req.stock_codes if self._needs_history_refresh(c)]
-                    fin_refresh = [c for c in req.stock_codes if self._needs_financial_refresh(c)]
-                    news_refresh = [c for c in req.stock_codes if self._needs_news_refresh(c)]
-                    research_refresh = [c for c in req.stock_codes if self._needs_research_refresh(c)]
-                    fund_refresh = [c for c in req.stock_codes if self._needs_fund_refresh(c)]
-                    if quote_refresh:
-                        self.ingest_market_daily(quote_refresh)
-                    if ann_refresh:
-                        self.ingest_announcements(ann_refresh)
-                    if hist_refresh:
-                        self.ingestion.ingest_history_daily(hist_refresh, limit=260)
-                    if fin_refresh:
-                        self.ingest_financials(fin_refresh)
-                    if news_refresh:
-                        self.ingest_news(news_refresh, limit=8)
-                    if research_refresh:
-                        self.ingest_research_reports(research_refresh, limit=6)
-                    if fund_refresh:
-                        self.ingest_fund_snapshots(fund_refresh)
-                    if self._needs_macro_refresh():
-                        self.ingest_macro_indicators(limit=8)
-                except Exception:
-                    # Keep query available even when data refresh partially fails.
-                    pass
+                    data_packs.append(
+                        self._build_llm_input_pack(
+                            code,
+                            question=req.question,
+                            scenario="query",
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    # Keep query available even when one symbol fails to refresh.
+                    continue
 
             self.workflow.retriever = self._build_runtime_retriever(req.stock_codes)
             enriched_question = self._augment_question_with_history_context(req.question, req.stock_codes)
+            enriched_question = self._augment_question_with_dataset_context(enriched_question, data_packs)
             regime_context = self._build_a_share_regime_context(req.stock_codes)
             trace_id = self.traces.new_trace()
             state = AgentState(
@@ -1033,6 +1019,12 @@ class AShareAgentService:
             )
             body = resp.model_dump(mode="json")
             body["cache_hit"] = False
+            body["data_packs"] = data_packs
+            all_missing = [str(m) for p in data_packs for m in list((p.get("missing_data") or []))]
+            if all_missing:
+                body["analysis_brief"]["data_pack_missing"] = list(dict.fromkeys(all_missing))
+                body["analysis_brief"]["degraded"] = True
+                body["analysis_brief"]["degrade_reason"] = "dataset_gap"
 
             latency_ms = int((time.perf_counter() - started_at) * 1000)
             self._record_rag_retrieval_trace(
@@ -1201,41 +1193,39 @@ class AShareAgentService:
         selected_runtime = self._select_runtime(str(payload.get("workflow_runtime", "")))
         # 鍏堝彂閫?start锛岀‘淇濆墠绔湪浠讳綍鑰楁椂姝ラ鍓嶅氨鑳芥劅鐭モ€滀换鍔″凡鍚姩鈥濄€?
         yield {"event": "start", "data": {"status": "started", "phase": "init"}}
-        # 涓庡悓姝?query 淇濇寔涓€鑷达細鍏堝仛鏁版嵁鍒锋柊涓庡姩鎬佽鏂欒杞姐€?
+        # Keep stream behavior aligned with /v1/query: refresh and package per-stock inputs first.
+        data_packs: list[dict[str, Any]] = []
         if req.stock_codes:
-            yield {"event": "progress", "data": {"phase": "data_refresh", "message": "姝ｅ湪鍒锋柊琛屾儏/鍏憡/鍘嗗彶鏁版嵁"}}
-            try:
-                quote_refresh = [c for c in req.stock_codes if self._needs_quote_refresh(c)]
-                ann_refresh = [c for c in req.stock_codes if self._needs_announcement_refresh(c)]
-                hist_refresh = [c for c in req.stock_codes if self._needs_history_refresh(c)]
-                fin_refresh = [c for c in req.stock_codes if self._needs_financial_refresh(c)]
-                news_refresh = [c for c in req.stock_codes if self._needs_news_refresh(c)]
-                research_refresh = [c for c in req.stock_codes if self._needs_research_refresh(c)]
-                fund_refresh = [c for c in req.stock_codes if self._needs_fund_refresh(c)]
-                if quote_refresh:
-                    self.ingest_market_daily(quote_refresh)
-                if ann_refresh:
-                    self.ingest_announcements(ann_refresh)
-                if hist_refresh:
-                    self.ingestion.ingest_history_daily(hist_refresh, limit=260)
-                if fin_refresh:
-                    self.ingest_financials(fin_refresh)
-                if news_refresh:
-                    self.ingest_news(news_refresh, limit=8)
-                if research_refresh:
-                    self.ingest_research_reports(research_refresh, limit=6)
-                if fund_refresh:
-                    self.ingest_fund_snapshots(fund_refresh)
-                if self._needs_macro_refresh():
-                    self.ingest_macro_indicators(limit=8)
-            except Exception:
-                # 鍒锋柊澶辫触涓嶉樆鏂富娴佺▼锛屽彧鍚戝墠绔€忓嚭 warning 渚夸簬瀹氫綅鏃跺欢涓庨檷绾ц涓恒€?
-                yield {"event": "progress", "data": {"phase": "data_refresh", "status": "degraded"}}
-                pass
+            yield {"event": "progress", "data": {"phase": "data_refresh", "message": "正在刷新行情/公告/历史/财务/新闻/研报数据"}}
+            for code in req.stock_codes:
+                try:
+                    data_packs.append(
+                        self._build_llm_input_pack(
+                            code,
+                            question=req.question,
+                            scenario="query_stream",
+                        )
+                    )
+                except Exception as ex:  # noqa: BLE001
+                    yield {"event": "progress", "data": {"phase": "data_refresh", "status": "degraded", "error": str(ex)[:160]}}
+            yield {
+                "event": "data_pack",
+                "data": {
+                    "items": [
+                        {
+                            "stock_code": str(pack.get("stock_code", "")),
+                            "coverage": dict((pack.get("dataset", {}) or {}).get("coverage", {}) or {}),
+                            "missing_data": list(pack.get("missing_data", []) or []),
+                        }
+                        for pack in data_packs
+                    ],
+                },
+            }
             yield {"event": "progress", "data": {"phase": "data_refresh", "status": "done"}}
         yield {"event": "progress", "data": {"phase": "retriever", "message": "Preparing retrieval corpus"}}
         self.workflow.retriever = self._build_runtime_retriever(req.stock_codes)
         enriched_question = self._augment_question_with_history_context(req.question, req.stock_codes)
+        enriched_question = self._augment_question_with_dataset_context(enriched_question, data_packs)
         regime_context = self._build_a_share_regime_context(req.stock_codes)
         trace_id = self.traces.new_trace()
         state = AgentState(
@@ -1325,7 +1315,19 @@ class AShareAgentService:
         yield {"event": "knowledge_persisted", "data": {"trace_id": trace_id}}
         yield {
             "event": "analysis_brief",
-            "data": self._build_analysis_brief(req.stock_codes, citations, regime_context=regime_context),
+            "data": {
+                **self._build_analysis_brief(req.stock_codes, citations, regime_context=regime_context),
+                "data_pack_missing": list(
+                    dict.fromkeys(
+                        [
+                            str(item)
+                            for pack in data_packs
+                            for item in list((pack.get("missing_data") or []))
+                            if str(item).strip()
+                        ]
+                    )
+                ),
+            },
         }
 
     def _build_evidence_rich_answer(
@@ -2265,6 +2267,292 @@ class AShareAgentService:
             return (now - ts).total_seconds() > max_age_seconds
         return True
 
+    @staticmethod
+    def _scenario_dataset_requirements(scenario: str) -> dict[str, int]:
+        """Return per-scenario minimum data requirements for LLM input preparation.
+
+        The thresholds are intentionally conservative so single-turn requests can still
+        produce stable conclusions without asking users to add more context manually.
+        """
+        normalized = str(scenario or "").strip().lower()
+        base = {
+            "quote_min": 1,
+            "history_min": 90,
+            "history_fetch_limit": 260,
+            "financial_min": 1,
+            "announcement_min": 1,
+            "news_min": 8,
+            "news_fetch_limit": 10,
+            "research_min": 6,
+            "research_fetch_limit": 8,
+            "macro_min": 4,
+            "macro_fetch_limit": 8,
+            "fund_min": 1,
+        }
+        # Different modules value different coverage guarantees.
+        profiles: dict[str, dict[str, int]] = {
+            "query": {"history_min": 90, "news_min": 8, "research_min": 6},
+            "query_stream": {"history_min": 90, "news_min": 8, "research_min": 6},
+            "analysis_studio": {"history_min": 90, "news_min": 8, "research_min": 6},
+            "deepthink": {"history_min": 120, "news_min": 10, "research_min": 8, "macro_min": 6},
+            "report": {"history_min": 120, "news_min": 10, "research_min": 8, "macro_min": 6},
+            "predict": {"history_min": 260, "history_fetch_limit": 520, "news_min": 4, "research_min": 4},
+            "overview": {"history_min": 120, "news_min": 8, "research_min": 6},
+            "intel": {"history_min": 120, "news_min": 10, "research_min": 8, "macro_min": 6},
+        }
+        override = profiles.get(normalized, {})
+        merged = dict(base)
+        merged.update(override)
+        return merged
+
+    def _count_stock_dataset(self, stock_code: str, *, history_limit: int = 520, macro_limit: int = 20) -> dict[str, int]:
+        """Count current in-memory dataset coverage for one stock."""
+        code = str(stock_code or "").strip().upper().replace(".", "")
+        history_rows = self._history_bars(code, limit=max(30, int(history_limit)))
+        return {
+            "quote_count": 1 if self._latest_quote(code) else 0,
+            "history_count": len(history_rows),
+            "history_30d_count": len(history_rows[-30:]),
+            "history_90d_count": len(history_rows[-90:]),
+            "financial_count": 1 if self._latest_financial_snapshot(code) else 0,
+            "announcement_count": len([x for x in self.ingestion_store.announcements if str(x.get("stock_code", "")).upper() == code][-20:]),
+            "news_count": len([x for x in self.ingestion_store.news_items if str(x.get("stock_code", "")).upper() == code][-40:]),
+            "research_count": len([x for x in self.ingestion_store.research_reports if str(x.get("stock_code", "")).upper() == code][-40:]),
+            "fund_count": len([x for x in self.ingestion_store.fund_snapshots if str(x.get("stock_code", "")).upper() == code][-4:]),
+            "macro_count": len(self.ingestion_store.macro_indicators[-max(1, int(macro_limit)):]),
+        }
+
+    def _primary_source_for_category(self, category: str) -> str:
+        """Resolve one representative source_id for datasource observability logs."""
+        target = str(category or "").strip().lower()
+        for row in self._build_datasource_catalog():
+            if str(row.get("category", "")).strip().lower() != target:
+                continue
+            if bool(row.get("enabled", True)):
+                sid = str(row.get("source_id", "")).strip()
+                if sid:
+                    return sid
+        fallback = {
+            "quote": "quote_service",
+            "history": "eastmoney_history",
+            "financial": "financial_service",
+            "announcement": "announcement_service",
+            "news": "news_service",
+            "research": "research_service",
+            "macro": "macro_service",
+            "fund": "fund_service",
+        }
+        return fallback.get(target, f"{target}_service")
+
+    def _refresh_category_for_stock(
+        self,
+        *,
+        stock_code: str,
+        category: str,
+        scenario: str,
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        """Refresh one datasource category and persist structured observability logs."""
+        code = str(stock_code or "").strip().upper().replace(".", "")
+        category_norm = str(category or "").strip().lower()
+        started = time.perf_counter()
+        status = "ok"
+        error = ""
+        result: dict[str, Any] | None = None
+
+        try:
+            if category_norm == "quote":
+                result = self.ingest_market_daily([code])
+            elif category_norm == "history":
+                history_limit = max(120, int(limit) or 260)
+                result = self.ingestion.ingest_history_daily([code], limit=history_limit)
+            elif category_norm == "financial":
+                result = self.ingest_financials([code])
+            elif category_norm == "announcement":
+                result = self.ingest_announcements([code])
+            elif category_norm == "news":
+                fetch_limit = max(4, int(limit) or 8)
+                result = self.ingest_news([code], limit=fetch_limit)
+            elif category_norm == "research":
+                fetch_limit = max(4, int(limit) or 6)
+                result = self.ingest_research_reports([code], limit=fetch_limit)
+            elif category_norm == "macro":
+                fetch_limit = max(4, int(limit) or 8)
+                result = self.ingest_macro_indicators(limit=fetch_limit)
+            elif category_norm == "fund":
+                result = self.ingest_fund_snapshots([code])
+            else:
+                status = "failed"
+                error = f"unsupported category: {category_norm}"
+        except Exception as ex:  # noqa: BLE001
+            status = "failed"
+            error = str(ex)[:260]
+            result = {"status": "failed", "error": error}
+
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        source_id = self._primary_source_for_category(category_norm)
+        self._append_datasource_log(
+            source_id=source_id,
+            category=category_norm,
+            action=f"auto_refresh:{scenario}",
+            status=status,
+            latency_ms=latency_ms,
+            detail={
+                "stock_code": code,
+                "scenario": scenario,
+                "limit": int(limit or 0),
+            },
+            error=error,
+        )
+        return {
+            "category": category_norm,
+            "source_id": source_id,
+            "status": status,
+            "error": error,
+            "latency_ms": latency_ms,
+            "result": result or {},
+        }
+
+    def _ensure_analysis_dataset(self, stock_code: str, *, scenario: str) -> dict[str, Any]:
+        """Ensure minimum datasource coverage before LLM/model reasoning starts."""
+        code = str(stock_code or "").strip().upper().replace(".", "")
+        requirements = self._scenario_dataset_requirements(scenario)
+        refresh_actions: list[dict[str, Any]] = []
+
+        before = self._count_stock_dataset(
+            code,
+            history_limit=max(520, int(requirements["history_fetch_limit"])),
+            macro_limit=max(20, int(requirements["macro_fetch_limit"])),
+        )
+        if before["quote_count"] < int(requirements["quote_min"]) or self._needs_quote_refresh(code):
+            refresh_actions.append(self._refresh_category_for_stock(stock_code=code, category="quote", scenario=scenario))
+        if before["history_count"] < int(requirements["history_min"]) or self._needs_history_refresh(
+            code,
+            min_samples=int(requirements["history_min"]),
+        ):
+            refresh_actions.append(
+                self._refresh_category_for_stock(
+                    stock_code=code,
+                    category="history",
+                    scenario=scenario,
+                    limit=int(requirements["history_fetch_limit"]),
+                )
+            )
+        if before["financial_count"] < int(requirements["financial_min"]) or self._needs_financial_refresh(code):
+            refresh_actions.append(self._refresh_category_for_stock(stock_code=code, category="financial", scenario=scenario))
+        if before["announcement_count"] < int(requirements["announcement_min"]) or self._needs_announcement_refresh(code):
+            refresh_actions.append(self._refresh_category_for_stock(stock_code=code, category="announcement", scenario=scenario))
+        if before["news_count"] < int(requirements["news_min"]) or self._needs_news_refresh(code):
+            refresh_actions.append(
+                self._refresh_category_for_stock(
+                    stock_code=code,
+                    category="news",
+                    scenario=scenario,
+                    limit=int(requirements["news_fetch_limit"]),
+                )
+            )
+        if before["research_count"] < int(requirements["research_min"]) or self._needs_research_refresh(code):
+            refresh_actions.append(
+                self._refresh_category_for_stock(
+                    stock_code=code,
+                    category="research",
+                    scenario=scenario,
+                    limit=int(requirements["research_fetch_limit"]),
+                )
+            )
+        if before["fund_count"] < int(requirements["fund_min"]) or self._needs_fund_refresh(code):
+            refresh_actions.append(self._refresh_category_for_stock(stock_code=code, category="fund", scenario=scenario))
+        if before["macro_count"] < int(requirements["macro_min"]) or self._needs_macro_refresh():
+            refresh_actions.append(
+                self._refresh_category_for_stock(
+                    stock_code=code,
+                    category="macro",
+                    scenario=scenario,
+                    limit=int(requirements["macro_fetch_limit"]),
+                )
+            )
+
+        coverage = self._count_stock_dataset(
+            code,
+            history_limit=max(520, int(requirements["history_fetch_limit"])),
+            macro_limit=max(20, int(requirements["macro_fetch_limit"])),
+        )
+
+        missing_data: list[str] = []
+        if coverage["quote_count"] < int(requirements["quote_min"]):
+            missing_data.append("quote_missing")
+        if coverage["history_count"] < int(requirements["history_min"]):
+            missing_data.append("history_insufficient")
+        if coverage["history_30d_count"] < 30:
+            missing_data.append("history_30d_insufficient")
+        if coverage["financial_count"] < int(requirements["financial_min"]):
+            missing_data.append("financial_missing")
+        if coverage["announcement_count"] < int(requirements["announcement_min"]):
+            missing_data.append("announcement_missing")
+        if coverage["news_count"] < int(requirements["news_min"]):
+            missing_data.append("news_insufficient")
+        if coverage["research_count"] < int(requirements["research_min"]):
+            missing_data.append("research_insufficient")
+        if coverage["fund_count"] < int(requirements["fund_min"]):
+            missing_data.append("fund_missing")
+        if coverage["macro_count"] < int(requirements["macro_min"]):
+            missing_data.append("macro_insufficient")
+
+        return {
+            "stock_code": code,
+            "scenario": str(scenario or "").strip().lower(),
+            "requirements": requirements,
+            "coverage": coverage,
+            "missing_data": list(dict.fromkeys(missing_data)),
+            "refresh_actions": refresh_actions,
+            "degraded": bool(missing_data),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _build_llm_input_pack(self, stock_code: str, *, question: str, scenario: str) -> dict[str, Any]:
+        """Build one deterministic input pack consumed by query/report/deepthink/predict prompts."""
+        code = str(stock_code or "").strip().upper().replace(".", "")
+        dataset = self._ensure_analysis_dataset(code, scenario=scenario)
+        requirements = dict(dataset.get("requirements", {}) or {})
+        history_limit = max(120, int(requirements.get("history_fetch_limit", 260) or 260))
+        bars = self._history_bars(code, limit=history_limit)
+        news = [x for x in self.ingestion_store.news_items if str(x.get("stock_code", "")).upper() == code][-max(10, int(requirements.get("news_fetch_limit", 10) or 10)) :]
+        research = [
+            x for x in self.ingestion_store.research_reports if str(x.get("stock_code", "")).upper() == code
+        ][-max(8, int(requirements.get("research_fetch_limit", 8) or 8)) :]
+        announcements = [x for x in self.ingestion_store.announcements if str(x.get("stock_code", "")).upper() == code][-20:]
+        fund = [x for x in self.ingestion_store.fund_snapshots if str(x.get("stock_code", "")).upper() == code][-2:]
+        macro = self.ingestion_store.macro_indicators[-max(8, int(requirements.get("macro_fetch_limit", 8) or 8)) :]
+        trend = self._trend_metrics(bars) if len(bars) >= 30 else {}
+        daily_30 = [
+            {
+                "trade_date": str(x.get("trade_date", "")),
+                "close": float(x.get("close", 0.0) or 0.0),
+                "pct_change": float(x.get("pct_change", 0.0) or 0.0),
+                "volume": float(x.get("volume", 0.0) or 0.0),
+            }
+            for x in bars[-30:]
+        ]
+        return {
+            "stock_code": code,
+            "scenario": str(scenario or "").strip().lower(),
+            "question": str(question or "")[:500],
+            "dataset": dataset,
+            "realtime": self._latest_quote(code) or {},
+            "financial": self._latest_financial_snapshot(code) or {},
+            "history": bars,
+            "history_daily_30": daily_30,
+            "trend": trend,
+            "announcements": announcements,
+            "news": news,
+            "research": research,
+            "fund": fund,
+            "macro": macro,
+            "missing_data": list(dataset.get("missing_data", []) or []),
+            "data_quality": "degraded" if bool(dataset.get("missing_data")) else "ready",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
     def _latest_quote(self, stock_code: str) -> dict[str, Any] | None:
         code = stock_code.upper().replace(".", "")
         for q in reversed(self.ingestion_store.quotes):
@@ -2326,6 +2614,37 @@ class AShareAgentService:
             "以下为连续历史样本摘要，请优先基于窗口判断，避免稀疏点误判：\n"
             + "\n".join(f"- {line}" for line in extras)
         )
+
+    def _augment_question_with_dataset_context(self, question: str, data_packs: list[dict[str, Any]]) -> str:
+        """Append datasource coverage/missing metadata to avoid blind overconfidence."""
+        if not data_packs:
+            return question
+        coverage_lines: list[str] = []
+        missing_lines: list[str] = []
+        for pack in data_packs:
+            code = str(pack.get("stock_code", "")).strip().upper()
+            dataset = dict(pack.get("dataset", {}) or {})
+            coverage = dict(dataset.get("coverage", {}) or {})
+            missing = [str(x) for x in list(dataset.get("missing_data", []) or []) if str(x).strip()]
+            coverage_lines.append(
+                f"{code}: history={int(coverage.get('history_count', 0) or 0)}, "
+                f"news={int(coverage.get('news_count', 0) or 0)}, "
+                f"research={int(coverage.get('research_count', 0) or 0)}, "
+                f"macro={int(coverage.get('macro_count', 0) or 0)}, "
+                f"fund={int(coverage.get('fund_count', 0) or 0)}"
+            )
+            if missing:
+                missing_lines.append(f"{code}: {', '.join(missing)}")
+        if not coverage_lines:
+            return question
+        text = (
+            f"{question}\n"
+            "【系统补充：本轮数据覆盖】\n"
+            + "\n".join(f"- {line}" for line in coverage_lines)
+        )
+        if missing_lines:
+            text += "\n【系统补充：缺口与降级提醒】\n" + "\n".join(f"- {line}" for line in missing_lines)
+        return text
 
     def _trend_metrics(self, bars: list[dict[str, Any]]) -> dict[str, float]:
         closes = [float(x.get("close", 0.0)) for x in bars if float(x.get("close", 0.0)) > 0]
@@ -2567,6 +2886,12 @@ class AShareAgentService:
         run_id = str(payload.get("run_id", "")).strip()
         pool_snapshot_id = str(payload.get("pool_snapshot_id", "")).strip()
         template_id = str(payload.get("template_id", "default")).strip() or "default"
+        code = str(req.stock_code or "").strip().upper()
+        report_input_pack = self._build_llm_input_pack(
+            code,
+            question=f"report:{code}:{req.report_type}",
+            scenario="report",
+        )
         query_result = self.query(
             {
                 "user_id": req.user_id,
@@ -2574,7 +2899,6 @@ class AShareAgentService:
                 "stock_codes": [req.stock_code],
             }
         )
-        code = str(req.stock_code or "").strip().upper()
         overview = self.market_overview(code)
         predict_snapshot = self.predict_run({"stock_codes": [code], "horizons": ["5d", "20d"]})
         try:
@@ -2589,6 +2913,8 @@ class AShareAgentService:
             quality_reasons.append("history_sample_insufficient")
         if str(predict_snapshot.get("data_quality", "")).strip() != "real":
             quality_reasons.append("predict_degraded")
+        quality_reasons.extend([str(x) for x in list(report_input_pack.get("missing_data", []) or []) if str(x).strip()])
+        quality_reasons = list(dict.fromkeys(quality_reasons))
         quality_gate = {
             "status": "pass" if not quality_reasons else "degraded",
             "score": round(max(0.0, 1.0 - 0.18 * float(len(quality_reasons))), 4),
@@ -2597,6 +2923,8 @@ class AShareAgentService:
         report_data_pack_summary = {
             "as_of": datetime.now(timezone.utc).isoformat(),
             "history_sample_size": history_sample_size,
+            "history_30d_count": int(((report_input_pack.get("dataset", {}) or {}).get("coverage", {}) or {}).get("history_30d_count", 0) or 0),
+            "history_90d_count": int(((report_input_pack.get("dataset", {}) or {}).get("coverage", {}) or {}).get("history_90d_count", 0) or 0),
             "predict_quality": str(predict_snapshot.get("data_quality", "unknown")),
             "predict_degrade_reasons": list(predict_snapshot.get("degrade_reasons", []) or []),
             "intel_signal": str(intel.get("overall_signal", "")),
@@ -2604,6 +2932,8 @@ class AShareAgentService:
             "news_count": len(list(overview.get("news", []) or [])),
             "research_count": len(list(overview.get("research", []) or [])),
             "macro_count": len(list(overview.get("macro", []) or [])),
+            "missing_data": list(report_input_pack.get("missing_data", []) or []),
+            "data_quality": str(report_input_pack.get("data_quality", "ready")),
         }
         generation_mode = "fallback"
         generation_error = ""
@@ -2650,7 +2980,7 @@ class AShareAgentService:
             [
                 {
                     "section_id": "data_quality_gate",
-                    "title": "閺佺増宓佺拹銊╁櫤闂傘劎",
+                    "title": "数据质量门控",
                     "content": f"status={quality_gate['status']}; score={quality_gate['score']}; reasons={','.join(quality_reasons) or 'none'}",
                 },
                 {
@@ -2668,17 +2998,36 @@ class AShareAgentService:
                 },
                 {
                     "section_id": "scenario_matrix",
-                    "title": "閹懏娅欓幒銊︾川",
+                    "title": "情景分析矩阵",
                     "content": json.dumps(list(intel.get("scenario_matrix", []) or [])[:6], ensure_ascii=False),
+                },
+                {
+                    "section_id": "llm_input_pack",
+                    "title": "模型输入数据包摘要",
+                    "content": json.dumps(
+                        {
+                            "coverage": dict((report_input_pack.get("dataset", {}) or {}).get("coverage", {}) or {}),
+                            "missing_data": list(report_input_pack.get("missing_data", []) or []),
+                            "data_quality": str(report_input_pack.get("data_quality", "")),
+                        },
+                        ensure_ascii=False,
+                    ),
                 },
             ]
         )
 
         if self.settings.llm_external_enabled and self.llm_gateway.providers:
             llm_prompt = (
-                "娴ｇ姵妲哥挧鍕箒閼诧紕銈ㄩ惍鏃傗敀閸涙ǜ鈧倽顕潏鎾冲毉娑撱儲鐗?JSON閿涘苯瀵橀崥顐㈢摟濞?executive_summary/core_logic/"
-                "valuation_and_financial/catalysts_and_calendar/risk_matrix/scenario_analysis/execution_plan/"
-                "quality_disclaimer閵?context="
+                "你是A股研究报告助手。请基于给定context输出严格JSON，不要输出markdown。"
+                "JSON字段必须包含：executive_summary, core_logic, valuation_and_financial, "
+                "catalysts_and_calendar, risk_matrix, scenario_analysis, execution_plan, quality_disclaimer。"
+                "其中 core_logic/valuation_and_financial/catalysts_and_calendar/execution_plan 为字符串数组，"
+                "risk_matrix/scenario_analysis 为对象数组。"
+                "要求："
+                "1) 明确引用数据覆盖缺口，不得忽略 missing_data。"
+                "2) 若数据不足，降低结论确信度并给出下一步补数建议。"
+                "3) 内容聚焦交易可执行性与风险触发条件。"
+                "context="
                 + json.dumps(
                     {
                         "stock_code": code,
@@ -2697,6 +3046,12 @@ class AShareAgentService:
                             "catalysts": intel.get("key_catalysts", []),
                         },
                         "quality_gate": quality_gate,
+                        "input_pack": {
+                            "coverage": dict((report_input_pack.get("dataset", {}) or {}).get("coverage", {}) or {}),
+                            "missing_data": list(report_input_pack.get("missing_data", []) or []),
+                            "data_quality": str(report_input_pack.get("data_quality", "")),
+                            "history_daily_30": list(report_input_pack.get("history_daily_30", []) or []),
+                        },
                     },
                     ensure_ascii=False,
                 )
@@ -2715,13 +3070,13 @@ class AShareAgentService:
                     llm_sections: list[dict[str, Any]] = []
                     summary_text = str(parsed.get("executive_summary", "")).strip()
                     if summary_text:
-                        llm_sections.append({"section_id": "executive_summary_v2", "title": "閹笛嗩攽閹芥顩?LLM)", "content": summary_text[:1400]})
+                        llm_sections.append({"section_id": "executive_summary_v2", "title": "执行摘要(LLM)", "content": summary_text[:1400]})
                     core_logic = list(parsed.get("core_logic", []) or [])
                     if core_logic:
                         llm_sections.append(
                             {
                                 "section_id": "core_logic_v2",
-                                "title": "閺嶇绺鹃柅鏄忕帆(LLM)",
+                                "title": "核心逻辑(LLM)",
                                 "content": "\n".join(f"- {str(x)}" for x in core_logic[:8]),
                             }
                         )
@@ -2730,7 +3085,7 @@ class AShareAgentService:
                         llm_sections.append(
                             {
                                 "section_id": "risk_matrix_v2",
-                                "title": "妞嬪酣娅撻惌鈺呮█(LLM)",
+                                "title": "风险矩阵(LLM)",
                                 "content": json.dumps(risk_matrix[:8], ensure_ascii=False),
                             }
                         )
@@ -2739,7 +3094,7 @@ class AShareAgentService:
                         llm_sections.append(
                             {
                                 "section_id": "scenario_v2",
-                                "title": "閹懏娅欓幒銊︾川(LLM)",
+                                "title": "情景分析(LLM)",
                                 "content": json.dumps(scenario[:6], ensure_ascii=False),
                             }
                         )
@@ -2782,6 +3137,7 @@ class AShareAgentService:
                 "predict_quality": str(predict_snapshot.get("data_quality", "unknown")),
                 "quality_score": float(quality_gate.get("score", 0.0) or 0.0),
             },
+            "llm_input_pack": report_input_pack,
             "generation_mode": generation_mode,
             "generation_error": generation_error,
         }
@@ -2825,6 +3181,7 @@ class AShareAgentService:
             "predict_quality": str(predict_snapshot.get("data_quality", "unknown")),
             "quality_score": float(quality_gate.get("score", 0.0) or 0.0),
         }
+        resp["llm_input_pack"] = report_input_pack
         resp["generation_mode"] = generation_mode
         resp["generation_error"] = generation_error
         resp["stock_code"] = str(req.stock_code)
@@ -2920,11 +3277,13 @@ class AShareAgentService:
     def _build_report_task_partial_result(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Build a minimal usable report result for async task partial_ready state."""
         req = ReportRequest(**payload)
+        code = str(req.stock_code).strip().upper()
+        partial_pack = self._build_llm_input_pack(code, question=f"report_partial:{code}", scenario="report")
         query_result = self.query(
             {
                 "user_id": req.user_id,
-                "question": f"璇峰厛缁欏嚭 {req.stock_code} {req.period} 鐨勬牳蹇冪粨璁轰笌璇佹嵁鎽樿",
-                "stock_codes": [str(req.stock_code).strip().upper()],
+                "question": f"请先给出 {req.stock_code} {req.period} 的核心结论与证据摘要",
+                "stock_codes": [code],
             }
         )
         citations = list(query_result.get("citations", []) or [])
@@ -2942,7 +3301,7 @@ class AShareAgentService:
         result = {
             "report_id": f"partial-{uuid.uuid4().hex[:10]}",
             "trace_id": str(query_result.get("trace_id", "")),
-            "stock_code": str(req.stock_code).strip().upper(),
+            "stock_code": code,
             "report_type": str(req.report_type),
             "markdown": markdown,
             "citations": citations,
@@ -2961,6 +3320,7 @@ class AShareAgentService:
                 "news_count": 0,
                 "research_count": 0,
                 "macro_count": 0,
+                "missing_data": list(partial_pack.get("missing_data", []) or []),
             },
             "generation_mode": "partial",
             "generation_error": "",
@@ -2982,6 +3342,15 @@ class AShareAgentService:
         has_full = bool(task.get("result_full"))
         has_partial = bool(task.get("result_partial"))
         level = "full" if has_full else "partial" if has_partial else "none"
+        best_result = task.get("result_full") if has_full else task.get("result_partial") if has_partial else {}
+        best_result = best_result if isinstance(best_result, dict) else {}
+        pack_summary = dict(best_result.get("report_data_pack_summary", {}) or {})
+        missing_data = [str(x) for x in list(pack_summary.get("missing_data", []) or []) if str(x).strip()]
+        data_pack_status = "ready"
+        if not best_result:
+            data_pack_status = "failed" if str(task.get("status", "")) == "failed" else "partial"
+        elif missing_data:
+            data_pack_status = "partial"
         return {
             "task_id": str(task.get("task_id", "")),
             "status": str(task.get("status", "queued")),
@@ -2997,6 +3366,9 @@ class AShareAgentService:
             "has_full_result": has_full,
             "error_code": str(task.get("error_code", "")),
             "error_message": str(task.get("error_message", "")),
+            "data_pack_status": data_pack_status,
+            "data_pack_missing": missing_data,
+            "quality_gate_detail": dict(best_result.get("quality_gate", {}) or {}),
         }
 
     def _run_report_task(self, task_id: str) -> None:
@@ -4090,13 +4462,57 @@ class AShareAgentService:
         token = str(payload.get("token", "")).strip()
         if pool_id:
             stock_codes = self.web.watchlist_pool_codes(token, pool_id)
+        normalized_codes = [str(code).strip().upper().replace(".", "") for code in list(stock_codes or []) if str(code).strip()]
+        data_packs: list[dict[str, Any]] = []
+        # Predict may run on large pools, so cap auto-refresh scope to keep latency controllable.
+        refresh_cap = min(40, len(normalized_codes))
+        for code in normalized_codes[:refresh_cap]:
+            try:
+                data_packs.append(
+                    self._build_llm_input_pack(
+                        code,
+                        question=f"predict:{code}",
+                        scenario="predict",
+                    )
+                )
+            except Exception:
+                continue
+
         horizons = payload.get("horizons") or ["5d", "20d"]
         as_of_date = payload.get("as_of_date")
-        result = self.prediction.run_prediction(stock_codes=stock_codes, horizons=horizons, as_of_date=as_of_date)
+        result = self.prediction.run_prediction(stock_codes=normalized_codes, horizons=horizons, as_of_date=as_of_date)
         if pool_id:
             result["pool_id"] = pool_id
         result["segment_metrics"] = self._predict_segment_metrics(result.get("results", []))
         quality = self._predict_attach_quality(result)
+        input_pack_missing = [
+            str(item)
+            for pack in data_packs
+            for item in list((pack.get("missing_data") or []))
+            if str(item).strip()
+        ]
+        if input_pack_missing:
+            merged_reasons = list(
+                dict.fromkeys(
+                    list(result.get("degrade_reasons", []) or [])
+                    + [f"input_pack:{name}" for name in input_pack_missing]
+                )
+            )
+            result["degrade_reasons"] = merged_reasons
+            # When upstream data pack has hard gaps, mark predict output degraded explicitly.
+            result["data_quality"] = "degraded"
+            quality["data_quality"] = "degraded"
+            quality["degrade_reasons"] = merged_reasons
+        result["input_data_packs"] = [
+            {
+                "stock_code": str(pack.get("stock_code", "")),
+                "coverage": dict((pack.get("dataset", {}) or {}).get("coverage", {}) or {}),
+                "missing_data": list(pack.get("missing_data", []) or []),
+                "data_quality": str(pack.get("data_quality", "")),
+            }
+            for pack in data_packs
+        ]
+        result["input_data_pack_truncated"] = len(normalized_codes) > refresh_cap
         # Expose metric provenance explicitly to avoid mixing simulated metrics into live confidence.
         latest_eval = self.prediction.eval_latest()
         metric_mode = str(latest_eval.get("metric_mode", "simulated")).strip() or "simulated"
@@ -4232,32 +4648,18 @@ class AShareAgentService:
     def market_overview(self, stock_code: str) -> dict[str, Any]:
         """Return structured market overview: realtime, history, announcements, and trends."""
         code = stock_code.upper().replace(".", "")
-        if self._needs_quote_refresh(code):
-            self.ingest_market_daily([code])
-        if self._needs_announcement_refresh(code):
-            self.ingest_announcements([code])
-        if self._needs_history_refresh(code):
-            self.ingestion.ingest_history_daily([code], limit=260)
-        if self._needs_financial_refresh(code):
-            self.ingest_financials([code])
-        if self._needs_news_refresh(code):
-            self.ingest_news([code], limit=8)
-        if self._needs_research_refresh(code):
-            self.ingest_research_reports([code], limit=6)
-        if self._needs_fund_refresh(code):
-            self.ingest_fund_snapshots([code])
-        if self._needs_macro_refresh():
-            self.ingest_macro_indicators(limit=8)
-
-        realtime = self._latest_quote(code)
-        bars = self._history_bars(code, limit=120)
-        financial = self._latest_financial_snapshot(code)
-        events = [x for x in self.ingestion_store.announcements if str(x.get("stock_code", "")).upper() == code][-10:]
-        news = [x for x in self.ingestion_store.news_items if str(x.get("stock_code", "")).upper() == code][-10:]
-        research = [x for x in self.ingestion_store.research_reports if str(x.get("stock_code", "")).upper() == code][-6:]
-        fund = [x for x in self.ingestion_store.fund_snapshots if str(x.get("stock_code", "")).upper() == code][-1:]
-        macro = self.ingestion_store.macro_indicators[-8:]
-        trend = self._trend_metrics(bars) if bars else {}
+        pack = self._build_llm_input_pack(code, question=f"overview:{code}", scenario="overview")
+        realtime = dict(pack.get("realtime", {}) or {})
+        bars = list(pack.get("history", []) or [])[-120:]
+        financial = dict(pack.get("financial", {}) or {})
+        events = list(pack.get("announcements", []) or [])[-10:]
+        news = list(pack.get("news", []) or [])[-10:]
+        research = list(pack.get("research", []) or [])[-6:]
+        fund = list(pack.get("fund", []) or [])[-1:]
+        macro = list(pack.get("macro", []) or [])[-8:]
+        trend = dict(pack.get("trend", {}) or {})
+        if not trend and bars:
+            trend = self._trend_metrics(bars)
         return {
             "stock_code": code,
             "realtime": realtime or {},
@@ -4269,6 +4671,8 @@ class AShareAgentService:
             "fund": fund,
             "macro": macro,
             "trend": trend,
+            "dataset": dict(pack.get("dataset", {}) or {}),
+            "missing_data": list(pack.get("missing_data", []) or []),
         }
 
     def analysis_intel_card(self, stock_code: str, *, horizon: str = "30d", risk_profile: str = "neutral") -> dict[str, Any]:
@@ -4970,24 +5374,24 @@ class AShareAgentService:
         for item in reflections[:5]:
             reflection_brief.append(str(item.get("reflection_content", ""))[:120])
         return (
-            "浣犳槸A鑲℃姇璧勫鐩樺姪鎵嬨€傝鍙緭鍑轰竴涓狫SON瀵硅薄锛屼笉瑕佽緭鍑篗arkdown銆俓n"
+            "你是A股投资复盘助手。仅输出 JSON，不要输出 markdown。\n"
             "JSON schema:\n"
             "{\n"
-            '  "summary": "涓€鍙ヨ瘽鎬荤粨锛?=120瀛?,\n'
-            '  "insights": ["娲炲療1", "娲炲療2"],\n'
-            '  "lessons": ["鏁欒1", "鏁欒2"],\n'
+            '  "summary": "一句话总结，<=120字",\n'
+            '  "insights": ["洞察1", "洞察2"],\n'
+            '  "lessons": ["改进行动1", "改进行动2"],\n'
             '  "confidence": 0.0\n'
             "}\n\n"
-            f"鏃ュ織绫诲瀷: {journal.get('journal_type', '')}\n"
-            f"鑲＄エ: {journal.get('stock_code', '')}\n"
-            f"鍐崇瓥绫诲瀷: {journal.get('decision_type', '')}\n"
-            f"鏃ュ織鏍囬: {journal.get('title', '')}\n"
-            f"鏃ュ織姝ｆ枃: {journal.get('content', '')}\n"
-            f"鍘嗗彶澶嶇洏鎽樿: {json.dumps(reflection_brief, ensure_ascii=False)}\n"
-            f"鍏虫敞閲嶇偣: {focus}\n"
-            "瑕佹眰:\n"
-            "1) 娲炲療鑱氱劍鍙墽琛屾敼杩涳紝涓嶇粰涔板崠鎸囦护銆俓n"
-            "2) 姣忔潯娲炲療/鏁欒鎺у埗鍦?0瀛楀唴銆俓n"
+            f"日志类型: {journal.get('journal_type', '')}\n"
+            f"股票: {journal.get('stock_code', '')}\n"
+            f"决策方向: {journal.get('decision_type', '')}\n"
+            f"日志标题: {journal.get('title', '')}\n"
+            f"日志正文: {journal.get('content', '')}\n"
+            f"历史复盘摘要: {json.dumps(reflection_brief, ensure_ascii=False)}\n"
+            f"关注重点: {focus}\n"
+            "要求:\n"
+            "1) 聚焦执行偏差、证据缺口、下次可操作动作，不给买卖指令。\n"
+            "2) 每条洞察/改进动作控制在 60 字内。\n"
             "3) confidence range must be within [0,1]."
         )
 
@@ -5027,19 +5431,69 @@ class AShareAgentService:
             "confidence": 0.46,
         }
 
+    @staticmethod
+    def _journal_default_title(journal_type: str, stock_code: str) -> str:
+        """Create a readable title when frontend only sends minimal fields."""
+        label_map = {
+            "decision": "交易决策",
+            "reflection": "交易复盘",
+            "learning": "学习记录",
+        }
+        jt = str(journal_type or "decision").strip().lower()
+        label = label_map.get(jt, "投资日志")
+        code = str(stock_code or "").strip().upper() or "UNKNOWN"
+        return f"{label} {code}"
+
+    def _journal_default_content(self, payload: dict[str, Any]) -> str:
+        """Generate fallback content so users can submit quickly without verbose input."""
+        stock_code = str(payload.get("stock_code", "")).strip().upper() or "UNKNOWN"
+        journal_type = str(payload.get("journal_type", "decision")).strip().lower() or "decision"
+        decision_type = str(payload.get("decision_type", "hold")).strip().lower() or "hold"
+        thesis = str(payload.get("thesis", "")).strip()
+        if not thesis:
+            thesis = (
+                f"{stock_code} 当前采用 {journal_type}/{decision_type} 模板记录。"
+                "后续将结合数据覆盖提升观点完整性。"
+            )
+        return "\n".join(
+            [
+                f"模板类型: {journal_type}",
+                f"核心观点: {thesis}",
+                "触发条件: （系统默认）价格与成交量共振，且关键风险未恶化。",
+                "失效条件: （系统默认）关键风险事件落地偏负面或趋势结构被破坏。",
+                "执行计划: （系统默认）分批验证，不单次重仓。",
+            ]
+        )
+
     # Investment Journal: keep orchestration in service layer so API payload remains thin.
     def journal_create(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        body = dict(payload or {})
+        journal_type = str(body.get("journal_type", "decision")).strip().lower() or "decision"
+        stock_code = str(body.get("stock_code", "")).strip().upper()
+        title = str(body.get("title", "")).strip()
+        content = str(body.get("content", "")).strip()
+        if not title:
+            title = self._journal_default_title(journal_type, stock_code)
+        if not content:
+            # Support fast-create mode where frontend only sends template + code.
+            content = self._journal_default_content(body)
+        tags = body.get("tags", [])
+        if not isinstance(tags, list):
+            tags = []
+        if not tags:
+            tags = [journal_type, "auto_generated"]
+
         return self.web.journal_create(
             token,
-            journal_type=str(payload.get("journal_type", "")),
-            title=str(payload.get("title", "")),
-            content=str(payload.get("content", "")),
-            stock_code=str(payload.get("stock_code", "")),
-            decision_type=str(payload.get("decision_type", "")),
-            related_research_id=str(payload.get("related_research_id", "")),
-            related_portfolio_id=payload.get("related_portfolio_id"),
-            tags=payload.get("tags", []),
-            sentiment=str(payload.get("sentiment", "")),
+            journal_type=journal_type,
+            title=title,
+            content=content,
+            stock_code=stock_code,
+            decision_type=str(body.get("decision_type", "")),
+            related_research_id=str(body.get("related_research_id", "")),
+            related_portfolio_id=body.get("related_portfolio_id"),
+            tags=tags,
+            sentiment=str(body.get("sentiment", "")),
         )
 
     def journal_list(
@@ -5752,6 +6206,7 @@ class AShareAgentService:
 
             evidence_ids: list[str] = []
             opinions: list[dict[str, Any]] = []
+            deep_pack: dict[str, Any] = {}
             intel_payload: dict[str, Any] = {
                 "as_of": datetime.now(timezone.utc).isoformat(),
                 "macro_signals": [],
@@ -5824,25 +6279,22 @@ class AShareAgentService:
                 arbitration = self._arbitrate_opinions(opinions)
             else:
                 yield emit("progress", {"stage": "data_refresh", "message": "Refreshing market and history samples"})
-                if self._needs_quote_refresh(code):
-                    self.ingest_market_daily([code])
-                if self._needs_history_refresh(code):
-                    self.ingestion.ingest_history_daily([code], limit=260)
-                if self._needs_financial_refresh(code):
-                    self.ingest_financials([code])
-                if self._needs_news_refresh(code):
-                    self.ingest_news([code], limit=8)
-                if self._needs_research_refresh(code):
-                    self.ingest_research_reports([code], limit=6)
-                if self._needs_fund_refresh(code):
-                    self.ingest_fund_snapshots([code])
-                if self._needs_macro_refresh():
-                    self.ingest_macro_indicators(limit=8)
-
-                quote = self._latest_quote(code) or {}
-                bars = self._history_bars(code, limit=180)
-                financial = self._latest_financial_snapshot(code) or {}
-                trend = self._trend_metrics(bars) if len(bars) >= 30 else {}
+                deep_pack = self._build_llm_input_pack(code, question=question, scenario="deepthink")
+                yield emit(
+                    "data_pack",
+                    {
+                        "stock_code": code,
+                        "coverage": dict((deep_pack.get("dataset", {}) or {}).get("coverage", {}) or {}),
+                        "missing_data": list(deep_pack.get("missing_data", []) or []),
+                        "data_quality": str(deep_pack.get("data_quality", "")),
+                    },
+                )
+                quote = dict(deep_pack.get("realtime", {}) or {})
+                bars = list(deep_pack.get("history", []) or [])[-180:]
+                financial = dict(deep_pack.get("financial", {}) or {})
+                trend = dict(deep_pack.get("trend", {}) or {})
+                if not trend and len(bars) >= 30:
+                    trend = self._trend_metrics(bars)
                 # Re-evaluate regime after refresh so later guard uses freshest 1-20d signals.
                 regime_context = self._build_a_share_regime_context([code])
                 yield emit(
@@ -5985,6 +6437,9 @@ class AShareAgentService:
                         )
 
                 pre_arb = self._arbitrate_opinions(opinions)
+                data_pack_missing = [str(x) for x in list(deep_pack.get("missing_data", []) or []) if str(x).strip()]
+                if data_pack_missing:
+                    pre_arb["conflict_sources"] = list(dict.fromkeys(list(pre_arb.get("conflict_sources", [])) + ["data_gap"]))
                 if float(pre_arb["disagreement_score"]) >= 0.45 and round_no < max_rounds:
                     replan_triggered = True
                     task_graph.append(

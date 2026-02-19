@@ -33,6 +33,8 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("regime_confidence", result["analysis_brief"])
         self.assertIn("signal_guard_applied", result["analysis_brief"])
         self.assertIn("signal_guard_detail", result["analysis_brief"])
+        self.assertIn("data_packs", result)
+        self.assertTrue(isinstance(result.get("data_packs", []), list))
         self.assertTrue(all(str(x.get("retrieval_track", "")).strip() for x in result.get("citations", [])))
         self.assertIn("仅供研究参考", result["answer"])
 
@@ -103,6 +105,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("report_data_pack_summary", generated)
         self.assertIn("generation_mode", generated)
         self.assertIn("confidence_attribution", generated)
+        self.assertIn("llm_input_pack", generated)
         self.assertIn("quality_gate", loaded)
         self.assertIn("report_data_pack_summary", loaded)
 
@@ -519,6 +522,20 @@ class ServiceTestCase(unittest.TestCase):
         loaded = self.svc.journal_ai_reflection_get("", journal_id)
         self.assertEqual(int(loaded.get("journal_id", 0)), journal_id)
         self.assertTrue(str(loaded.get("summary", "")).strip())
+
+    def test_journal_create_with_minimal_payload_auto_fills_title_and_content(self) -> None:
+        created = self.svc.journal_create(
+            "",
+            {
+                "journal_type": "decision",
+                "stock_code": "SH600000",
+                "decision_type": "hold",
+            },
+        )
+        self.assertGreater(int(created.get("journal_id", 0)), 0)
+        self.assertTrue(str(created.get("title", "")).strip())
+        self.assertTrue(str(created.get("content", "")).strip())
+        self.assertIn("核心观点", str(created.get("content", "")))
 
     def test_journal_insights(self) -> None:
         created = self.svc.journal_create(
