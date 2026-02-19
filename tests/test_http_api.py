@@ -503,6 +503,9 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("evidence", body)
         self.assertIn("event_calendar", body)
         self.assertIn("data_freshness", body)
+        self.assertIn("execution_plan", body)
+        self.assertIn("risk_thresholds", body)
+        self.assertIn("degrade_status", body)
 
         with self.assertRaises(urllib.error.HTTPError) as bad_horizon:
             urllib.request.urlopen(  # noqa: S310 - local endpoint

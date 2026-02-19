@@ -30,10 +30,10 @@
   - [x] 工程视图默认折叠
   - [x] 交互链路回归
 
-- [ ] ROUND-5：风控与执行建议
-  - [ ] 仓位区间与节奏建议
-  - [ ] 失效条件模板与触发阈值
-  - [ ] 降级策略可视化
+- [x] ROUND-5：风控与执行建议
+  - [x] 仓位区间与节奏建议
+  - [x] 失效条件模板与触发阈值
+  - [x] 降级策略可视化
 
 - [ ] ROUND-6：复盘闭环
   - [ ] 用户采纳记录
@@ -53,3 +53,4 @@
 2. `2026-02-19 | ROUND-2 | 新增 intel-card 聚合接口，输出业务结论/证据/事件日历/情景矩阵并补充回归测试 | commit: e857ed2 | doc: docs/v1/2026-02-19-round-2-intel-card-api.md`
 3. `2026-02-19 | ROUND-3 | 完成 RAG 两阶段检索（粗排+精排）与 citation 归因一致性校验，补充检索元数据与回归测试 | commit: b7fda8c | doc: docs/v1/2026-02-19-round-3-rag-two-stage-rerank-and-attribution.md`
 4. `2026-02-19 | ROUND-4 | DeepThink 分析模式接入业务情报卡片（结论/证据/事件/情景），并完成前端交互与编译回归 | commit: 29745e7 | doc: docs/v1/2026-02-19-round-4-deepthink-business-view-restructure.md`
+5. `2026-02-19 | ROUND-5 | intel-card 增加执行节奏、风控阈值与降级状态，并在前端业务卡片中可视化展示 | commit: 待提交 | doc: docs/v1/2026-02-19-round-5-risk-and-execution-guardrails.md`

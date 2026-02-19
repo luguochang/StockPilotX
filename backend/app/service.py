@@ -3708,6 +3708,54 @@ class AShareAgentService:
             "fund_minutes": minutes_since(str(fund_row.get("ts", ""))) if fund_row else None,
         }
 
+        risk_thresholds = {
+            "volatility_20_max": 0.03 if profile != "aggressive" else 0.035,
+            "max_drawdown_60_max": 0.20 if profile != "aggressive" else 0.24,
+            "min_evidence_count": 4,
+            "max_data_staleness_minutes": 360,
+        }
+
+        degrade_reasons: list[str] = []
+        for key in ("quote_minutes", "news_minutes", "macro_minutes"):
+            val = freshness.get(key)
+            if val is not None and isinstance(val, (int, float)) and float(val) > risk_thresholds["max_data_staleness_minutes"]:
+                degrade_reasons.append(f"{key}_stale")
+        if len(evidence_rows) < int(risk_thresholds["min_evidence_count"]):
+            degrade_reasons.append("insufficient_evidence")
+        if volatility_20 > float(risk_thresholds["volatility_20_max"]):
+            degrade_reasons.append("volatility_exceeds_threshold")
+        if drawdown_60 > float(risk_thresholds["max_drawdown_60_max"]):
+            degrade_reasons.append("drawdown_exceeds_threshold")
+
+        degrade_level = "normal"
+        if len(degrade_reasons) >= 3:
+            degrade_level = "degraded"
+        elif degrade_reasons:
+            degrade_level = "watch"
+        # 降级时下调置信度，避免“证据弱但动作过激”。
+        if degrade_level == "degraded":
+            confidence = max(0.30, confidence - 0.18)
+        elif degrade_level == "watch":
+            confidence = max(0.33, confidence - 0.08)
+
+        cadence = "一次性观察"
+        if signal == "buy":
+            cadence = "分3笔建仓（40%/30%/30%）"
+        elif signal == "hold":
+            cadence = "维持仓位，T+1复核后再调整"
+        elif signal == "reduce":
+            cadence = "分2笔降仓（60%/40%）"
+        review_hours = 6 if risk_level == "high" else 24 if risk_level == "medium" else 48
+
+        execution_plan = {
+            "entry_mode": "staggered" if signal in {"buy", "reduce"} else "observe",
+            "cadence_hint": cadence,
+            "max_single_step_pct": 0.35 if profile == "aggressive" else 0.25 if profile == "neutral" else 0.2,
+            "max_position_cap": position_hint,
+            "stop_loss_hint_pct": 4.0 if risk_level == "high" else 5.5 if risk_level == "medium" else 7.0,
+            "recheck_interval_hours": review_hours,
+        }
+
         trigger_conditions = [
             "趋势维持（MA20>=MA60 且 20日动量不转负）",
             "资金流向不显著恶化（主力净流入不连续转负）",
@@ -3720,8 +3768,6 @@ class AShareAgentService:
         ]
         if risk_level == "high":
             trigger_conditions.append("仅在风险收敛后考虑恢复仓位节奏")
-
-        review_hours = 6 if risk_level == "high" else 24 if risk_level == "medium" else 48
         return {
             "stock_code": code,
             "time_horizon": horizon,
@@ -3748,6 +3794,12 @@ class AShareAgentService:
             "evidence": evidence_rows,
             "trigger_conditions": trigger_conditions,
             "invalidation_conditions": invalidation_conditions,
+            "execution_plan": execution_plan,
+            "risk_thresholds": risk_thresholds,
+            "degrade_status": {
+                "level": degrade_level,
+                "reasons": degrade_reasons,
+            },
             "next_review_time": (datetime.now(timezone.utc) + timedelta(hours=review_hours)).isoformat(),
             "data_freshness": freshness,
         }

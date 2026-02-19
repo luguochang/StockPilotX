@@ -210,6 +210,24 @@ type IntelCardSnapshot = {
   evidence: IntelCardEvidence[];
   trigger_conditions: string[];
   invalidation_conditions: string[];
+  execution_plan: {
+    entry_mode: string;
+    cadence_hint: string;
+    max_single_step_pct: number;
+    max_position_cap: string;
+    stop_loss_hint_pct: number;
+    recheck_interval_hours: number;
+  };
+  risk_thresholds: {
+    volatility_20_max: number;
+    max_drawdown_60_max: number;
+    min_evidence_count: number;
+    max_data_staleness_minutes: number;
+  };
+  degrade_status: {
+    level: "normal" | "watch" | "degraded";
+    reasons: string[];
+  };
   next_review_time: string;
   data_freshness: Record<string, number | null>;
 };
@@ -1948,6 +1966,12 @@ export default function DeepThinkPage() {
                       </Tag>
                       <Tag>仓位建议：{intelCard.position_hint}</Tag>
                       <Tag>复核时间：{String(intelCard.next_review_time ?? "-")}</Tag>
+                      <Tag color={intelCard.degrade_status?.level === "degraded" ? "red" : intelCard.degrade_status?.level === "watch" ? "gold" : "green"}>
+                        降级状态：{String(intelCard.degrade_status?.level ?? "normal")}
+                      </Tag>
+                      {(intelCard.degrade_status?.reasons ?? []).slice(0, 3).map((reason) => (
+                        <Tag key={`degrade-${reason}`} color="orange">{String(reason)}</Tag>
+                      ))}
                     </Space>
 
                     <Row gutter={[12, 12]}>
@@ -1967,6 +1991,45 @@ export default function DeepThinkPage() {
                             dataSource={intelCard.invalidation_conditions ?? []}
                             renderItem={(item) => <List.Item><Text style={{ color: "#334155" }}>{String(item)}</Text></List.Item>}
                           />
+                        </Card>
+                      </Col>
+                    </Row>
+
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={12}>
+                        <Card size="small" title={<span style={{ color: "#0f172a" }}>执行节奏建议</span>}>
+                          <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                            <Text style={{ color: "#334155" }}>模式：{String(intelCard.execution_plan?.entry_mode ?? "-")}</Text>
+                            <Text style={{ color: "#334155" }}>节奏：{String(intelCard.execution_plan?.cadence_hint ?? "-")}</Text>
+                            <Text style={{ color: "#334155" }}>
+                              单步上限：{Number(intelCard.execution_plan?.max_single_step_pct ?? 0).toFixed(2)}
+                            </Text>
+                            <Text style={{ color: "#334155" }}>仓位上限：{String(intelCard.execution_plan?.max_position_cap ?? "-")}</Text>
+                            <Text style={{ color: "#334155" }}>
+                              风险止损提示：{Number(intelCard.execution_plan?.stop_loss_hint_pct ?? 0).toFixed(2)}%
+                            </Text>
+                            <Text style={{ color: "#334155" }}>
+                              复核间隔：{Number(intelCard.execution_plan?.recheck_interval_hours ?? 0)} 小时
+                            </Text>
+                          </Space>
+                        </Card>
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Card size="small" title={<span style={{ color: "#0f172a" }}>风险阈值</span>}>
+                          <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                            <Text style={{ color: "#334155" }}>
+                              波动阈值：{Number(intelCard.risk_thresholds?.volatility_20_max ?? 0).toFixed(4)}
+                            </Text>
+                            <Text style={{ color: "#334155" }}>
+                              回撤阈值：{Number(intelCard.risk_thresholds?.max_drawdown_60_max ?? 0).toFixed(4)}
+                            </Text>
+                            <Text style={{ color: "#334155" }}>
+                              最小证据数：{Number(intelCard.risk_thresholds?.min_evidence_count ?? 0)}
+                            </Text>
+                            <Text style={{ color: "#334155" }}>
+                              数据时效阈值：{Number(intelCard.risk_thresholds?.max_data_staleness_minutes ?? 0)} 分钟
+                            </Text>
+                          </Space>
                         </Card>
                       </Col>
                     </Row>
