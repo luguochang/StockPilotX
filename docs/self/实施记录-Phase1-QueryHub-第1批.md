@@ -532,3 +532,46 @@
 - [x] Alert 规则 API
 - [x] 服务层/API 层测试
 - [x] 回归测试通过
+
+## 第11批增量（Phase2 - Backtest Lab 第1批）
+
+### 新增能力
+
+1. 可复现 MA 回测引擎（无外部依赖）
+- `backend/app/service.py`
+  - 新增：
+    - `backtest_run(payload)`
+    - `backtest_get(run_id)`
+  - 策略：`close > MA` 买入，`close < MA` 卖出
+  - 输出：
+    - `final_value`
+    - `total_return_pct`
+    - `max_drawdown`
+    - `trade_count`
+
+2. API 路由
+- `backend/app/http_api.py`
+  - `POST /v1/backtest/run`
+  - `GET /v1/backtest/{run_id}`
+
+### 第11批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python -m pytest -q tests/test_service.py -k "test_backtest_run_and_get"
+.\.venv\Scripts\python -m pytest -q tests/test_http_api.py -k "test_backtest_endpoints"
+.\.venv\Scripts\python -m pytest -q tests -k "web or api or query or docs or portfolio or alert or backtest"
+```
+
+结果：
+- 1 passed, 33 deselected
+- 1 passed, 23 deselected
+- 39 passed, 55 deselected
+
+### 第11批 Checklist
+
+- [x] MA 回测引擎
+- [x] 回测结果持久（进程内 run_id）
+- [x] Backtest API
+- [x] 服务层/API 层测试
+- [x] 回归测试通过

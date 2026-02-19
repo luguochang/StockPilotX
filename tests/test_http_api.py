@@ -497,6 +497,24 @@ class HttpApiTestCase(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=8) as resp:
             self.assertEqual(resp.status, 200)
 
+    def test_backtest_endpoints(self) -> None:
+        c1, run = self._post(
+            "/v1/backtest/run",
+            {
+                "stock_code": "SH600000",
+                "start_date": "2024-01-01",
+                "end_date": "2026-02-15",
+                "initial_capital": 100000,
+                "ma_window": 20,
+            },
+        )
+        self.assertEqual(c1, 200)
+        self.assertIn("run_id", run)
+        run_id = str(run["run_id"])
+        c2, loaded = self._get(f"/v1/backtest/{run_id}")
+        self.assertEqual(c2, 200)
+        self.assertEqual(str(loaded.get("run_id", "")), run_id)
+
     def test_ops_capabilities(self) -> None:
         code, body = self._get("/v1/ops/capabilities")
         self.assertEqual(code, 200)

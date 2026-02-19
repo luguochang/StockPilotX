@@ -138,6 +138,7 @@ class AShareAgentService:
 
         # 报告存储：MVP 先使用内存字典
         self._reports: dict[str, dict[str, Any]] = {}
+        self._backtest_runs: dict[str, dict[str, Any]] = {}
         self._deep_archive_ts_format = "%Y-%m-%d %H:%M:%S"
         self._deep_archive_export_executor = ThreadPoolExecutor(max_workers=2)
         self._deep_round_mutex = threading.Lock()
@@ -3019,6 +3020,81 @@ class AShareAgentService:
             "events": events,
             "trend": trend,
         }
+
+    def backtest_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run a reproducible MA strategy backtest using local history bars."""
+        stock_code = str(payload.get("stock_code", "")).strip().upper()
+        if not stock_code:
+            raise ValueError("stock_code is required")
+        start_date = str(payload.get("start_date", "2024-01-01")).strip()
+        end_date = str(payload.get("end_date", datetime.now().strftime("%Y-%m-%d"))).strip()
+        initial_capital = float(payload.get("initial_capital", 100000.0) or 100000.0)
+        ma_window = max(5, min(120, int(payload.get("ma_window", 20) or 20)))
+
+        if self._needs_history_refresh(stock_code):
+            try:
+                self.ingestion.ingest_history_daily([stock_code], limit=520)
+            except Exception:
+                pass
+        bars = [x for x in self._history_bars(stock_code, limit=520) if start_date <= str(x.get("trade_date", "")) <= end_date]
+        if len(bars) < ma_window + 5:
+            raise ValueError("insufficient history bars for backtest window")
+
+        closes = [float(x.get("close", 0.0) or 0.0) for x in bars]
+        dates = [str(x.get("trade_date", "")) for x in bars]
+
+        cash = initial_capital
+        shares = 0.0
+        equity_curve: list[float] = []
+        trades: list[dict[str, Any]] = []
+        for idx in range(len(closes)):
+            px = closes[idx]
+            if px <= 0:
+                continue
+            if idx >= ma_window - 1:
+                ma = sum(closes[idx - ma_window + 1 : idx + 1]) / ma_window
+                if shares <= 0 and px > ma:
+                    buy_shares = int(cash // px)
+                    if buy_shares > 0:
+                        shares = float(buy_shares)
+                        cash -= shares * px
+                        trades.append({"date": dates[idx], "side": "buy", "price": round(px, 4), "shares": int(shares)})
+                elif shares > 0 and px < ma:
+                    cash += shares * px
+                    trades.append({"date": dates[idx], "side": "sell", "price": round(px, 4), "shares": int(shares)})
+                    shares = 0.0
+            equity_curve.append(cash + shares * px)
+
+        final_value = equity_curve[-1] if equity_curve else initial_capital
+        total_return = final_value - initial_capital
+        total_return_pct = (total_return / initial_capital * 100.0) if initial_capital > 0 else 0.0
+        max_drawdown = self._max_drawdown(equity_curve) if equity_curve else 0.0
+        run_id = f"bkt-{uuid.uuid4().hex[:12]}"
+        result = {
+            "run_id": run_id,
+            "stock_code": stock_code,
+            "start_date": start_date,
+            "end_date": end_date,
+            "initial_capital": initial_capital,
+            "final_value": round(final_value, 4),
+            "metrics": {
+                "total_return": round(total_return, 4),
+                "total_return_pct": round(total_return_pct, 4),
+                "max_drawdown": round(max_drawdown, 6),
+                "trade_count": len(trades),
+                "ma_window": ma_window,
+            },
+            "trades": trades[-100:],
+            "status": "ok",
+        }
+        self._backtest_runs[run_id] = result
+        return result
+
+    def backtest_get(self, run_id: str) -> dict[str, Any]:
+        row = self._backtest_runs.get(str(run_id))
+        if not row:
+            return {"error": "not_found", "run_id": run_id}
+        return row
 
     def scheduler_pause(self, job_name: str) -> dict[str, Any]:
         return self.scheduler.pause(job_name)

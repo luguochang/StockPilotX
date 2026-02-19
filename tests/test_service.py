@@ -269,6 +269,21 @@ class ServiceTestCase(unittest.TestCase):
         self.assertGreaterEqual(len(logs), 1)
         _ = self.svc.alert_rule_delete("", rid)
 
+    def test_backtest_run_and_get(self) -> None:
+        run = self.svc.backtest_run(
+            {
+                "stock_code": "SH600000",
+                "start_date": "2024-01-01",
+                "end_date": "2026-02-15",
+                "initial_capital": 100000,
+                "ma_window": 20,
+            }
+        )
+        self.assertIn("run_id", run)
+        self.assertIn("metrics", run)
+        loaded = self.svc.backtest_get(run["run_id"])
+        self.assertEqual(str(loaded.get("run_id", "")), str(run["run_id"]))
+
     def test_query_repeated_calls_do_not_hit_global_model_limit(self) -> None:
         # 回归：预算计数应按请求重置，连续请求不应在第9次后失败。
         for idx in range(12):

@@ -421,6 +421,20 @@ def create_app() -> FastAPI:
     def market_overview(stock_code: str):
         return svc.market_overview(stock_code)
 
+    @app.post("/v1/backtest/run")
+    def backtest_run(payload: dict):
+        try:
+            return svc.backtest_run(payload)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+
+    @app.get("/v1/backtest/{run_id}")
+    def backtest_get(run_id: str):
+        result = svc.backtest_get(run_id)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result)
+        return result
+
     # ---------------- WEB-001 Auth ----------------
     @app.post("/v1/auth/register")
     def auth_register(payload: dict):
