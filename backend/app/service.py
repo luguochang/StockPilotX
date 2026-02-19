@@ -958,9 +958,88 @@ class AShareAgentService:
                 pass
             return body
 
-        result = self.query_optimizer.run_with_timeout(_run_pipeline)
-        self.query_optimizer.set_cached(req.question, req.stock_codes, result, cache_ctx)
-        return result
+        try:
+            result = self.query_optimizer.run_with_timeout(_run_pipeline)
+            self.query_optimizer.set_cached(req.question, req.stock_codes, result, cache_ctx)
+            return result
+        except TimeoutError:
+            return self._build_query_degraded_response(
+                req=req,
+                started_at=started_at,
+                workflow_runtime=selected_runtime.runtime_name,
+                error_code="query_timeout",
+                error_message=f"query timeout after {self.query_optimizer.timeout_seconds}s",
+            )
+        except Exception as ex:  # noqa: BLE001
+            return self._build_query_degraded_response(
+                req=req,
+                started_at=started_at,
+                workflow_runtime=selected_runtime.runtime_name,
+                error_code="query_runtime_error",
+                error_message=str(ex),
+            )
+
+    def _build_query_degraded_response(
+        self,
+        *,
+        req: QueryRequest,
+        started_at: float,
+        workflow_runtime: str,
+        error_code: str,
+        error_message: str,
+    ) -> dict[str, Any]:
+        """Return structured degraded response when query pipeline fails."""
+        trace_id = self.traces.new_trace()
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        safe_error = str(error_message or "").strip()[:260] or "unknown error"
+        answer = (
+            "本次查询触发系统降级，已返回最小可用结果。"
+            "请稍后重试，或缩小问题范围（减少股票数量/问题长度）。"
+            f" 错误码：{error_code}。"
+        )
+        response = {
+            "trace_id": trace_id,
+            "intent": "fact",
+            "answer": answer,
+            "citations": [],
+            "risk_flags": [error_code],
+            "mode": "agentic_rag",
+            "workflow_runtime": workflow_runtime or "unknown",
+            "analysis_brief": {
+                "market_regime": "",
+                "regime_confidence": 0.0,
+                "risk_bias": "unknown",
+                "signal_guard_applied": False,
+                "signal_guard_detail": {},
+                "confidence_adjustment_detail": {},
+                "degraded": True,
+                "degrade_reason": error_code,
+            },
+            "cache_hit": False,
+            "degraded": True,
+            "error_code": error_code,
+            "error_message": safe_error,
+        }
+        self.traces.emit(
+            trace_id,
+            "query_degraded",
+            {"error_code": error_code, "error_message": safe_error, "latency_ms": latency_ms},
+        )
+        try:
+            self.web.query_history_add(
+                "",
+                question=req.question,
+                stock_codes=req.stock_codes,
+                trace_id=trace_id,
+                intent="fact",
+                cache_hit=False,
+                latency_ms=latency_ms,
+                summary=answer[:160],
+                error=f"{error_code}:{safe_error}",
+            )
+        except Exception:
+            pass
+        return response
 
     def query_compare(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Run same question against multiple stocks and return comparison payload."""
@@ -994,8 +1073,22 @@ class AShareAgentService:
 
         return QueryComparator.build(question=question, rows=per_stock)
 
-    def query_history_list(self, token: str, *, limit: int = 50) -> list[dict[str, Any]]:
-        return self.web.query_history_list(token, limit=limit)
+    def query_history_list(
+        self,
+        token: str,
+        *,
+        limit: int = 50,
+        stock_code: str = "",
+        created_from: str = "",
+        created_to: str = "",
+    ) -> list[dict[str, Any]]:
+        return self.web.query_history_list(
+            token,
+            limit=limit,
+            stock_code=stock_code,
+            created_from=created_from,
+            created_to=created_to,
+        )
 
     def query_history_clear(self, token: str) -> dict[str, Any]:
         return self.web.query_history_clear(token)

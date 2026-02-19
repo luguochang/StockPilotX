@@ -71,6 +71,20 @@ class HttpApiTestCase(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=8) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8"))
 
+    def _post_error(self, path: str, payload: dict) -> tuple[int, dict]:
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            self.base_url + path,
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as ex:
+            return ex.code, json.loads(ex.read().decode("utf-8"))
+
     def _get(self, path: str) -> tuple[int, dict]:
         with urllib.request.urlopen(self.base_url + path, timeout=8) as resp:  # noqa: S310 - local smoke url
             return resp.status, json.loads(resp.read().decode("utf-8"))
@@ -142,6 +156,25 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c4, 200)
         self.assertTrue(isinstance(history_rows, list))
         self.assertGreaterEqual(len(history_rows), 1)
+        created_at = urllib.parse.quote(str(history_rows[0].get("created_at", "")))
+
+        c4b, history_by_stock = self._get("/v1/query/history?limit=20&stock_code=SH600000")
+        self.assertEqual(c4b, 200)
+        self.assertGreaterEqual(len(history_by_stock), 1)
+        self.assertTrue(all("SH600000" in list(map(str, x.get("stock_codes", []))) for x in history_by_stock))
+
+        c4c, history_by_time = self._get(
+            f"/v1/query/history?limit=20&created_from={created_at}&created_to={created_at}"
+        )
+        self.assertEqual(c4c, 200)
+        self.assertGreaterEqual(len(history_by_time), 1)
+
+        with self.assertRaises(urllib.error.HTTPError) as bad_history_time:
+            urllib.request.urlopen(  # noqa: S310 - local endpoint
+                self.base_url + "/v1/query/history?created_from=2026-02-20%2000:00:00&created_to=2026-02-19%2000:00:00",
+                timeout=8,
+            )
+        self.assertEqual(bad_history_time.exception.code, 400)
 
         clear_req = urllib.request.Request(self.base_url + "/v1/query/history", method="DELETE")
         with urllib.request.urlopen(clear_req, timeout=8) as resp:
@@ -150,6 +183,18 @@ class HttpApiTestCase(unittest.TestCase):
         c5, history_after = self._get("/v1/query/history?limit=20")
         self.assertEqual(c5, 200)
         self.assertEqual(len(history_after), 0)
+
+    def test_query_validation_returns_400(self) -> None:
+        code, body = self._post_error(
+            "/v1/query",
+            {
+                "user_id": "api-u-invalid",
+                "question": "x",
+                "stock_codes": ["SH600000"],
+            },
+        )
+        self.assertEqual(code, 400)
+        self.assertIn("detail", body)
 
     def test_query_stream(self) -> None:
         body = json.dumps(

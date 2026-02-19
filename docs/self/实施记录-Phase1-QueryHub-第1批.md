@@ -118,3 +118,63 @@
 - [x] 质量建议规则
 - [x] API 路由接入
 - [x] 回归测试通过
+
+## 第3批增量（Query Hub 稳定性与历史筛选）
+
+### 新增能力
+
+1. 查询异常降级响应（避免原始 500）
+- `backend/app/service.py`
+  - `query()` 增加 `TimeoutError/Exception` 捕获
+  - 新增 `_build_query_degraded_response()`，统一返回结构化降级结果：
+    - `degraded: true`
+    - `error_code`（`query_timeout` / `query_runtime_error`）
+    - `error_message`
+    - 兼容原响应关键字段（`trace_id/answer/citations/risk_flags/analysis_brief`）
+- 降级结果写入 `query_history.error`，便于后续追溯错误分布。
+
+2. 查询历史筛选能力（按股票 + 时间范围）
+- `backend/app/web/service.py`
+  - `query_history_list()` 新增参数：
+    - `stock_code`
+    - `created_from`
+    - `created_to`
+  - 新增时间标准化方法，支持：
+    - `YYYY-MM-DD`
+    - `YYYY-MM-DD HH:MM:SS`
+  - 增加时间区间校验（`created_from <= created_to`）。
+- `backend/app/service.py`
+  - `query_history_list()` 同步透传筛选参数。
+- `backend/app/http_api.py`
+  - `GET /v1/query/history` 新增查询参数：
+    - `stock_code`
+    - `created_from`
+    - `created_to`
+  - 参数非法时返回 `400`。
+
+3. Query 接口参数校验错误映射
+- `backend/app/http_api.py`
+  - `POST /v1/query` 新增 `ValueError` 捕获（含 Pydantic 校验异常）并返回 `400`。
+
+### 第3批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python -m pytest -q tests/test_service.py -k "query_timeout_returns_degraded_payload or query_history_filter_by_stock_and_time"
+.\.venv\Scripts\python -m pytest -q tests/test_http_api.py -k "query_cache_compare_and_history or query_validation_returns_400"
+.\.venv\Scripts\python -m pytest -q tests -k "query or web or api"
+```
+
+结果：
+- 2 passed, 26 deselected
+- 2 passed, 17 deselected
+- 27 passed, 56 deselected
+
+### 第3批 Checklist
+
+- [x] Query 超时/异常结构化降级
+- [x] 降级错误写入 query_history
+- [x] Query history 支持股票筛选
+- [x] Query history 支持时间范围筛选
+- [x] `/v1/query` 校验异常返回 400
+- [x] 回归测试通过并记录结果

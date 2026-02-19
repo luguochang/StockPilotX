@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
 from typing import Any
 
 from backend.app.stock.universe_sync import AShareUniverseSyncService
@@ -312,19 +313,60 @@ class WebAppService:
         )
         return {"status": "ok"}
 
-    def query_history_list(self, token: str, *, limit: int = 50) -> list[dict[str, Any]]:
-        """List latest query records for current user."""
+    def _normalize_query_history_time(self, value: str, *, end_of_day: bool) -> str:
+        """Normalize query-history time filter to SQLite comparable timestamp text."""
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        # Support YYYY-MM-DD for quick filtering in frontend.
+        if len(raw) == 10:
+            suffix = "23:59:59" if end_of_day else "00:00:00"
+            raw = f"{raw} {suffix}"
+        try:
+            datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+        except ValueError as ex:
+            raise ValueError("created_from/created_to must be YYYY-MM-DD or YYYY-MM-DD HH:MM:SS") from ex
+        return raw
+
+    def query_history_list(
+        self,
+        token: str,
+        *,
+        limit: int = 50,
+        stock_code: str = "",
+        created_from: str = "",
+        created_to: str = "",
+    ) -> list[dict[str, Any]]:
+        """List latest query records for current user with optional stock/time filters."""
         me = self.auth_me(token)
         safe_limit = max(1, min(200, int(limit)))
+        code_filter = str(stock_code or "").strip().upper()
+        from_ts = self._normalize_query_history_time(created_from, end_of_day=False)
+        to_ts = self._normalize_query_history_time(created_to, end_of_day=True)
+        if from_ts and to_ts and from_ts > to_ts:
+            raise ValueError("created_from must be earlier than or equal to created_to")
+
+        conditions = ["user_id = ?", "tenant_id = ?"]
+        params: list[Any] = [me["user_id"], me["tenant_id"]]
+        if code_filter:
+            conditions.append("INSTR(UPPER(stock_codes_json), ?) > 0")
+            params.append(f"\"{code_filter}\"")
+        if from_ts:
+            conditions.append("created_at >= ?")
+            params.append(from_ts)
+        if to_ts:
+            conditions.append("created_at <= ?")
+            params.append(to_ts)
+        params.append(safe_limit)
         rows = self.store.query_all(
-            """
+            f"""
             SELECT id, question, stock_codes_json, trace_id, intent, cache_hit, latency_ms, summary, error, created_at
             FROM query_history
-            WHERE user_id = ? AND tenant_id = ?
+            WHERE {' AND '.join(conditions)}
             ORDER BY id DESC
             LIMIT ?
             """,
-            (me["user_id"], me["tenant_id"], safe_limit),
+            tuple(params),
         )
         for row in rows:
             row["stock_codes"] = self._json_loads_or(row.get("stock_codes_json"), [])

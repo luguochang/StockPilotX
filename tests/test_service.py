@@ -204,6 +204,65 @@ class ServiceTestCase(unittest.TestCase):
             )
             self.assertIn("answer", result)
 
+    def test_query_timeout_returns_degraded_payload(self) -> None:
+        original = self.svc.query_optimizer.run_with_timeout
+        self.svc.query_optimizer.run_with_timeout = (  # type: ignore[assignment]
+            lambda fn: (_ for _ in ()).throw(TimeoutError("forced timeout"))
+        )
+        try:
+            result = self.svc.query(
+                {
+                    "user_id": "u-timeout",
+                    "question": "请分析SH600000超时兜底",
+                    "stock_codes": ["SH600000"],
+                }
+            )
+        finally:
+            self.svc.query_optimizer.run_with_timeout = original  # type: ignore[assignment]
+
+        self.assertTrue(bool(result.get("degraded", False)))
+        self.assertEqual(str(result.get("error_code", "")), "query_timeout")
+        self.assertIn("query_timeout", result.get("risk_flags", []))
+        rows = self.svc.query_history_list("", limit=20, stock_code="SH600000")
+        self.assertTrue(any("query_timeout" in str(x.get("error", "")) for x in rows))
+
+    def test_query_history_filter_by_stock_and_time(self) -> None:
+        _ = self.svc.query(
+            {
+                "user_id": "u-history-filter-1",
+                "question": "请分析SH600000近况",
+                "stock_codes": ["SH600000"],
+            }
+        )
+        _ = self.svc.query(
+            {
+                "user_id": "u-history-filter-2",
+                "question": "请分析SZ000001近况",
+                "stock_codes": ["SZ000001"],
+            }
+        )
+        all_rows = self.svc.query_history_list("", limit=80)
+        self.assertGreaterEqual(len(all_rows), 2)
+        target_ts = str(all_rows[0].get("created_at", ""))
+
+        sh_rows = self.svc.query_history_list("", limit=80, stock_code="SH600000")
+        self.assertGreaterEqual(len(sh_rows), 1)
+        self.assertTrue(all("SH600000" in list(map(str, x.get("stock_codes", []))) for x in sh_rows))
+
+        empty_rows = self.svc.query_history_list("", limit=80, stock_code="BJ999999")
+        self.assertEqual(len(empty_rows), 0)
+
+        same_time_rows = self.svc.query_history_list("", limit=80, created_from=target_ts, created_to=target_ts)
+        self.assertGreaterEqual(len(same_time_rows), 1)
+
+        with self.assertRaises(ValueError):
+            _ = self.svc.query_history_list(
+                "",
+                limit=20,
+                created_from="2026-02-20 00:00:00",
+                created_to="2026-02-19 00:00:00",
+            )
+
     def test_deep_think_session_and_round(self) -> None:
         created = self.svc.deep_think_create_session(
             {

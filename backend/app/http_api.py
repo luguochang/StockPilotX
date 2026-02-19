@@ -60,7 +60,10 @@ def create_app() -> FastAPI:
     # ---------------- Existing Core APIs ----------------
     @app.post("/v1/query")
     def query(payload: dict):
-        return svc.query(payload)
+        try:
+            return svc.query(payload)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
 
     @app.post("/v1/query/compare")
     def query_compare(payload: dict):
@@ -70,10 +73,24 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(ex)) from ex
 
     @app.get("/v1/query/history")
-    def query_history(limit: int = 50, authorization: str | None = Header(default=None)):
+    def query_history(
+        limit: int = 50,
+        stock_code: str = "",
+        created_from: str = "",
+        created_to: str = "",
+        authorization: str | None = Header(default=None),
+    ):
         token = _extract_optional_bearer_token(authorization)
         try:
-            return svc.query_history_list(token, limit=limit)
+            return svc.query_history_list(
+                token,
+                limit=limit,
+                stock_code=stock_code,
+                created_from=created_from,
+                created_to=created_to,
+            )
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
