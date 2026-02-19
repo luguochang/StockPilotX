@@ -25,6 +25,7 @@ from backend.app.config import Settings
 from backend.app.data.ingestion import IngestionService, IngestionStore
 from backend.app.data.scheduler import JobConfig, LocalJobScheduler
 from backend.app.data.sources import AnnouncementService, QuoteService
+from backend.app.knowledge.recommender import DocumentRecommender
 from backend.app.evals.service import EvalService
 from backend.app.llm.gateway import MultiProviderLLMGateway
 from backend.app.memory.store import MemoryStore
@@ -102,6 +103,7 @@ class AShareAgentService:
             announcement_service=AnnouncementService(),
             store=self.ingestion_store,
         )
+        self.doc_recommender = DocumentRecommender()
         self.prediction = PredictionService(
             quote_service=self.ingestion.quote_service,
             traces=self.traces,
@@ -2366,6 +2368,68 @@ class AShareAgentService:
 
     def docs_pipeline_runs(self, token: str, doc_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
         return self.web.doc_pipeline_runs(token, doc_id, limit=limit)
+
+    def docs_recommend(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Recommend docs using history + context + graph signals."""
+        _ = self.web.auth_me(token)
+        context = payload if isinstance(payload, dict) else {}
+        safe_top_k = max(1, min(30, int(context.get("top_k", 5) or 5)))
+        stock_code = str(context.get("stock_code", "")).strip().upper()
+
+        history_rows = self.web.query_history_list(token, limit=120)
+        chunks = self.web.rag_doc_chunk_list_internal(status="active", limit=2500)
+        graph_terms: list[str] = []
+        if stock_code:
+            graph = self.knowledge_graph_view(stock_code, limit=30)
+            # Pull neighbor concept words as ranking hints.
+            graph_terms = [
+                str(x.get("target", "")).strip().upper()
+                for x in graph.get("relations", [])
+                if str(x.get("target", "")).strip()
+            ][:60]
+
+        ranked = self.doc_recommender.recommend(
+            chunks=chunks,
+            query_history_rows=history_rows,
+            context=context,
+            graph_terms=graph_terms,
+            top_k=safe_top_k,
+        )
+
+        items: list[dict[str, Any]] = []
+        for row in ranked:
+            doc_meta = self.web.store.query_one(
+                """
+                SELECT doc_id, filename, status, parse_confidence, created_at
+                FROM doc_index
+                WHERE doc_id = ?
+                """,
+                (str(row.get("doc_id", "")),),
+            ) or {}
+            items.append(
+                {
+                    "doc_id": row.get("doc_id", ""),
+                    "filename": str(doc_meta.get("filename", "")),
+                    "status": str(doc_meta.get("status", "")),
+                    "parse_confidence": float(doc_meta.get("parse_confidence", 0.0) or 0.0),
+                    "score": float(row.get("score", 0.0) or 0.0),
+                    "reasons": list(row.get("reasons", [])),
+                    "stock_codes": list(row.get("stock_codes", [])),
+                    "source": str(row.get("source", "")),
+                    "updated_at": str(row.get("updated_at", "")),
+                    "created_at": str(doc_meta.get("created_at", "")),
+                }
+            )
+
+        return {
+            "top_k": safe_top_k,
+            "count": len(items),
+            "context": {
+                "stock_code": stock_code,
+                "question": str(context.get("question", "")),
+            },
+            "items": items,
+        }
 
     def knowledge_graph_view(self, entity_id: str, *, limit: int = 20) -> dict[str, Any]:
         """Return one-hop graph neighborhood for a given entity."""

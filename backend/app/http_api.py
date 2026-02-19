@@ -569,6 +569,16 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    @app.post("/v1/docs/recommend")
+    def docs_recommend(payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.docs_recommend(token, payload)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     @app.get("/v1/docs/{doc_id}/quality-report")
     def docs_quality_report(doc_id: str, authorization: str | None = Header(default=None)):
         token = _extract_optional_bearer_token(authorization)

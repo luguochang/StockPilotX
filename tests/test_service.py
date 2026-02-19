@@ -68,6 +68,28 @@ class ServiceTestCase(unittest.TestCase):
         self.assertTrue(isinstance(graph.get("nodes", []), list))
         self.assertTrue(isinstance(graph.get("relations", []), list))
 
+    def test_docs_recommend(self) -> None:
+        _ = self.svc.docs_upload("doc-rec-1", "rec-a.pdf", "SH600000 银行业 利率波动 风险提示 " * 120, "cninfo")
+        _ = self.svc.docs_index("doc-rec-1")
+        _ = self.svc.docs_upload("doc-rec-2", "rec-b.pdf", "SZ000001 消费行业 复苏 " * 120, "cninfo")
+        _ = self.svc.docs_index("doc-rec-2")
+        # Build history preference signal.
+        self.svc.web.query_history_add(
+            "",
+            question="请分析SH600000风险",
+            stock_codes=["SH600000"],
+            trace_id="t-rec-1",
+            intent="fact",
+            cache_hit=False,
+            latency_ms=123,
+            summary="history seed",
+        )
+        result = self.svc.docs_recommend("", {"stock_code": "SH600000", "question": "请分析银行业和利率影响", "top_k": 5})
+        self.assertGreaterEqual(int(result.get("count", 0)), 1)
+        items = result.get("items", [])
+        self.assertTrue(isinstance(items, list))
+        self.assertIn("doc-rec-1", [str(x.get("doc_id", "")) for x in items])
+
     def test_report_generate_and_get(self) -> None:
         generated = self.svc.report_generate(
             {"user_id": "u3", "stock_code": "SH600000", "period": "1y", "report_type": "fact"}

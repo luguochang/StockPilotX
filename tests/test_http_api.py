@@ -294,6 +294,14 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("upload", stages)
         self.assertIn("index", stages)
 
+        c_rec, rec = self._post(
+            "/v1/docs/recommend",
+            {"stock_code": "SH600000", "question": "请推荐和银行业相关的材料", "top_k": 5},
+        )
+        self.assertEqual(c_rec, 200)
+        self.assertIn("items", rec)
+        self.assertTrue(isinstance(rec.get("items", []), list))
+
         qr_code, quality = self._get("/v1/docs/api-doc-1/quality-report")
         self.assertEqual(qr_code, 200)
         self.assertIn("quality_score", quality)

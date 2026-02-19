@@ -273,3 +273,48 @@
 - [x] 知识图谱 API 路由
 - [x] 服务层/API 层测试
 - [x] 回归测试通过
+
+## 第6批增量（Knowledge Hub - 智能推荐）
+
+### 新增能力
+
+1. 文档推荐引擎（history + context + graph）
+- 新增文件：`backend/app/knowledge/recommender.py`
+  - `DocumentRecommender.recommend()`：
+    - 历史偏好信号：基于 query history 的股票频次
+    - 上下文信号：`stock_code` 与问题关键词匹配
+    - 图谱信号：知识图谱邻域概念词匹配
+    - 质量信号：`quality_score` 加权
+  - 输出文档级推荐结果（去重、排序、原因）。
+
+2. 服务层推荐能力
+- `backend/app/service.py`
+  - 注入 `DocumentRecommender`
+  - 新增 `docs_recommend(token, payload)`：
+    - 聚合 `query_history + rag_doc_chunk + knowledge_graph`
+    - 返回推荐列表（含 `score/reasons/stock_codes/source`）
+
+3. 新增 API
+- `backend/app/http_api.py`
+  - `POST /v1/docs/recommend`
+
+### 第6批自测
+
+执行命令：
+```bash
+.\.venv\Scripts\python -m pytest -q tests/test_service.py -k "test_docs_recommend"
+.\.venv\Scripts\python -m pytest -q tests/test_http_api.py -k "test_docs_upload_and_index"
+.\.venv\Scripts\python -m pytest -q tests -k "docs or query or web or api or knowledge_graph or recommend"
+```
+
+结果：
+- 1 passed, 29 deselected
+- 1 passed, 19 deselected
+- 31 passed, 55 deselected
+
+### 第6批 Checklist
+
+- [x] 文档推荐引擎
+- [x] 推荐服务层聚合逻辑
+- [x] 推荐 API
+- [x] 新增测试与回归通过
