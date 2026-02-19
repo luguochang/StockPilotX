@@ -1436,6 +1436,84 @@ class WebAppService:
         )
         return row or {"error": "not_found", "chunk_id": chunk_id}
 
+    def rag_doc_chunk_get_detail(
+        self,
+        token: str,
+        *,
+        chunk_id: str,
+        context_window: int = 1,
+    ) -> dict[str, Any]:
+        """Load one chunk with adjacent context for UI定位展示."""
+        _ = self.require_role(token, {"admin", "ops"})
+        normalized_chunk_id = str(chunk_id or "").strip()
+        if not normalized_chunk_id:
+            raise ValueError("chunk_id is required")
+        safe_window = max(0, min(3, int(context_window)))
+        row = self.store.query_one(
+            """
+            SELECT chunk_id, doc_id, chunk_no, chunk_text, chunk_text_redacted, source, source_url,
+                   effective_status, quality_score, stock_codes_json, industry_tags_json, updated_at
+            FROM rag_doc_chunk
+            WHERE chunk_id = ?
+            LIMIT 1
+            """,
+            (normalized_chunk_id,),
+        )
+        if not row:
+            return {"error": "not_found", "chunk_id": normalized_chunk_id}
+        row["stock_codes"] = self._json_loads_or(row.get("stock_codes_json"), [])
+        row["industry_tags"] = self._json_loads_or(row.get("industry_tags_json"), [])
+        row.pop("stock_codes_json", None)
+        row.pop("industry_tags_json", None)
+
+        prev_rows: list[dict[str, Any]] = []
+        next_rows: list[dict[str, Any]] = []
+        if safe_window > 0:
+            prev_rows = self.store.query_all(
+                """
+                SELECT chunk_id, doc_id, chunk_no, chunk_text_redacted, effective_status, updated_at
+                FROM rag_doc_chunk
+                WHERE doc_id = ? AND chunk_no < ?
+                ORDER BY chunk_no DESC
+                LIMIT ?
+                """,
+                (str(row.get("doc_id", "")), int(row.get("chunk_no", 0)), safe_window),
+            )
+            next_rows = self.store.query_all(
+                """
+                SELECT chunk_id, doc_id, chunk_no, chunk_text_redacted, effective_status, updated_at
+                FROM rag_doc_chunk
+                WHERE doc_id = ? AND chunk_no > ?
+                ORDER BY chunk_no ASC
+                LIMIT ?
+                """,
+                (str(row.get("doc_id", "")), int(row.get("chunk_no", 0)), safe_window),
+            )
+
+        def _map_context(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            mapped: list[dict[str, Any]] = []
+            for item in items:
+                text = str(item.get("chunk_text_redacted", "")).strip()
+                mapped.append(
+                    {
+                        "chunk_id": str(item.get("chunk_id", "")),
+                        "doc_id": str(item.get("doc_id", "")),
+                        "chunk_no": int(item.get("chunk_no", 0)),
+                        "effective_status": str(item.get("effective_status", "")),
+                        "updated_at": str(item.get("updated_at", "")),
+                        "excerpt": (text[:220] + "...") if len(text) > 220 else text,
+                    }
+                )
+            return mapped
+
+        return {
+            "chunk": row,
+            "context": {
+                "prev": list(reversed(_map_context(prev_rows))),
+                "next": _map_context(next_rows),
+            },
+        }
+
     def rag_doc_chunk_set_status_by_doc(self, *, doc_id: str, status: str) -> None:
         normalized = str(status).strip().lower()
         if normalized not in {"active", "review", "rejected", "archived"}:

@@ -1,6 +1,7 @@
-"use client";
+﻿"use client";
 
-import { useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Alert, Button, Card, Input, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 
@@ -16,7 +17,9 @@ type DocRow = {
   created_at?: string;
 };
 
-export default function DocsCenterPage() {
+function DocsCenterContent() {
+  const searchParams = useSearchParams();
+
   const [docs, setDocs] = useState<DocRow[]>([]);
   const [queue, setQueue] = useState<DocRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -31,6 +34,10 @@ export default function DocsCenterPage() {
   const [filename, setFilename] = useState("demo-note.txt");
   const [source, setSource] = useState("user_upload");
   const [content, setContent] = useState("这是用于测试的文本内容，可直接走旧的 JSON 上传接口。\nSH600000 纪要。\n");
+
+  const [locatedChunk, setLocatedChunk] = useState<Record<string, any> | null>(null);
+  const [locatedContext, setLocatedContext] = useState<Record<string, any> | null>(null);
+  const [locating, setLocating] = useState(false);
 
   async function parseOrThrow(resp: Response) {
     const body = await resp.json();
@@ -63,6 +70,36 @@ export default function DocsCenterPage() {
       reader.readAsArrayBuffer(uploadFile);
     });
   }
+
+  async function loadChunkLocation(chunkId: string, silent = false) {
+    const normalizedChunkId = chunkId.trim();
+    if (!normalizedChunkId) return;
+    setLocating(true);
+    if (!silent) resetFeedback();
+    try {
+      const resp = await fetch(`${API_BASE}/v1/rag/docs/chunks/${encodeURIComponent(normalizedChunkId)}?context_window=1`);
+      const body = (await parseOrThrow(resp)) as Record<string, any>;
+      setLocatedChunk((body?.chunk as Record<string, any> | undefined) ?? null);
+      setLocatedContext((body?.context as Record<string, any> | undefined) ?? null);
+      const currentDocId = String(body?.chunk?.doc_id ?? "").trim();
+      if (currentDocId) setDocId(currentDocId);
+      if (!silent) setMessage(`已定位片段：${normalizedChunkId}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "定位片段失败");
+    } finally {
+      setLocating(false);
+    }
+  }
+
+  useEffect(() => {
+    const queryDocId = String(searchParams.get("doc_id") ?? "").trim();
+    const queryChunkId = String(searchParams.get("chunk_id") ?? "").trim();
+    if (queryDocId) setDocId(queryDocId);
+    if (queryChunkId) {
+      loadChunkLocation(queryChunkId, true).catch(() => undefined);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   async function load() {
     setLoading(true);
@@ -172,7 +209,7 @@ export default function DocsCenterPage() {
     {
       title: "状态",
       key: "status",
-      render: (_, row) => (
+      render: (_: unknown, row: DocRow) => (
         <Space>
           <Tag color={row.needs_review ? "orange" : "green"}>{row.needs_review ? "待复核" : "可用"}</Tag>
           {row.review_status ? <Tag>{row.review_status}</Tag> : null}
@@ -182,14 +219,20 @@ export default function DocsCenterPage() {
     { title: "创建时间", dataIndex: "created_at", key: "created_at" },
   ];
 
+  const queryChunkId = String(searchParams.get("chunk_id") ?? "").trim();
+  const queryText = String(searchParams.get("q") ?? "").trim();
+
   return (
     <main className="container shell-fade-in">
       <Card className="premium-card">
         <Space direction="vertical" style={{ width: "100%" }} size={10}>
           <Title level={2} style={{ margin: 0 }}>文档知识中心</Title>
-          <Text type="secondary">覆盖接口：`/v1/rag/workflow/upload-and-index`、`/v1/docs/*`、`/v1/docs/review-queue`。</Text>
+          <Text type="secondary">覆盖接口：`/v1/rag/workflow/upload-and-index`、`/v1/docs/*`、`/v1/rag/docs/chunks/{'{'}chunk_id{'}'}`。</Text>
           <Space wrap>
             <Button type="primary" loading={loading} onClick={load}>刷新列表与复核队列</Button>
+            {queryChunkId ? (
+              <Button loading={locating} onClick={() => loadChunkLocation(queryChunkId)}>重新定位 URL 片段</Button>
+            ) : null}
           </Space>
         </Space>
       </Card>
@@ -229,6 +272,60 @@ export default function DocsCenterPage() {
       {message ? <Alert style={{ marginTop: 12 }} type="success" showIcon message={message} /> : null}
       {error ? <Alert style={{ marginTop: 12 }} type="error" showIcon message={error} /> : null}
 
+      {(locatedChunk || locating || queryChunkId) ? (
+        <Card className="premium-card" style={{ marginTop: 12 }} title="片段定位视图">
+          <Space direction="vertical" style={{ width: "100%" }} size={10}>
+            <Text type="secondary">
+              来源参数：chunk_id={queryChunkId || "-"} {queryText ? `| query=${queryText}` : ""}
+            </Text>
+            {locating ? <Text>正在加载定位片段...</Text> : null}
+            {!locating && locatedChunk ? (
+              <>
+                <Space wrap>
+                  <Tag>doc_id: {String(locatedChunk.doc_id ?? "-")}</Tag>
+                  <Tag>chunk_no: {String(locatedChunk.chunk_no ?? "-")}</Tag>
+                  <Tag>{String(locatedChunk.source ?? "-")}</Tag>
+                  <Tag>{String(locatedChunk.effective_status ?? "-")}</Tag>
+                </Space>
+                <Card size="small" title="当前片段">
+                  <Text style={{ whiteSpace: "pre-wrap", color: "#334155" }}>
+                    {String(locatedChunk.chunk_text_redacted || locatedChunk.chunk_text || "")}
+                  </Text>
+                </Card>
+                <Card size="small" title="上文片段">
+                  <Space direction="vertical" style={{ width: "100%" }}>
+                    {(locatedContext?.prev ?? []).length === 0 ? (
+                      <Text type="secondary">无上文片段</Text>
+                    ) : (
+                      (locatedContext?.prev ?? []).map((ctx: any) => (
+                        <Card key={`prev-${String(ctx?.chunk_id ?? "")}`} size="small">
+                          <Text strong>#{String(ctx?.chunk_no ?? "-")}</Text>
+                          <Text style={{ display: "block", color: "#475569", marginTop: 4 }}>{String(ctx?.excerpt ?? "")}</Text>
+                        </Card>
+                      ))
+                    )}
+                  </Space>
+                </Card>
+                <Card size="small" title="下文片段">
+                  <Space direction="vertical" style={{ width: "100%" }}>
+                    {(locatedContext?.next ?? []).length === 0 ? (
+                      <Text type="secondary">无下文片段</Text>
+                    ) : (
+                      (locatedContext?.next ?? []).map((ctx: any) => (
+                        <Card key={`next-${String(ctx?.chunk_id ?? "")}`} size="small">
+                          <Text strong>#{String(ctx?.chunk_no ?? "-")}</Text>
+                          <Text style={{ display: "block", color: "#475569", marginTop: 4 }}>{String(ctx?.excerpt ?? "")}</Text>
+                        </Card>
+                      ))
+                    )}
+                  </Space>
+                </Card>
+              </>
+            ) : null}
+          </Space>
+        </Card>
+      ) : null}
+
       <Card className="premium-card" style={{ marginTop: 12 }} title="文档列表">
         <Table rowKey="doc_id" columns={columns} dataSource={docs} pagination={false} />
       </Card>
@@ -241,7 +338,7 @@ export default function DocsCenterPage() {
             {
               title: "操作",
               key: "actions",
-              render: (_, row) => (
+              render: (_: unknown, row: DocRow) => (
                 <Space>
                   <Button size="small" type="primary" onClick={() => reviewAction(row.doc_id, "approve")}>通过</Button>
                   <Button size="small" danger onClick={() => reviewAction(row.doc_id, "reject")}>驳回</Button>
@@ -254,5 +351,13 @@ export default function DocsCenterPage() {
         />
       </Card>
     </main>
+  );
+}
+
+export default function DocsCenterPage() {
+  return (
+    <Suspense fallback={<main className="container"><Card><Text>加载中...</Text></Card></main>}>
+      <DocsCenterContent />
+    </Suspense>
   );
 }

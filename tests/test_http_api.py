@@ -396,6 +396,10 @@ class HttpApiTestCase(unittest.TestCase):
         c4, updated = self._post(f"/v1/rag/docs/chunks/{chunk_id}/status", {"status": "review"})
         self.assertEqual(c4, 200)
         self.assertEqual(str(updated.get("effective_status", "")), "review")
+        c4b, detail = self._get(f"/v1/rag/docs/chunks/{chunk_id}?context_window=1")
+        self.assertEqual(c4b, 200)
+        self.assertEqual(str((detail.get("chunk") or {}).get("chunk_id", "")), chunk_id)
+        self.assertIn("context", detail)
 
         c5, qa_pool = self._get("/v1/rag/qa-memory?limit=10")
         self.assertEqual(c5, 200)

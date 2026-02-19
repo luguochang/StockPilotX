@@ -187,6 +187,11 @@ class ServiceTestCase(unittest.TestCase):
 
         updated = self.svc.rag_doc_chunk_status_set("", chunk_id, {"status": "review"})
         self.assertEqual(str(updated.get("effective_status", "")), "review")
+        detail = self.svc.rag_doc_chunk_detail("", chunk_id, context_window=1)
+        self.assertEqual(str((detail.get("chunk") or {}).get("chunk_id", "")), chunk_id)
+        self.assertIn("context", detail)
+        self.assertIn("prev", detail.get("context", {}))
+        self.assertIn("next", detail.get("context", {}))
 
         _ = self.svc.rag_source_policy_set("", "user_upload", {"auto_approve": True, "trust_score": 0.8, "enabled": True})
         policy_after = self.svc.web.rag_source_policy_get("user_upload")

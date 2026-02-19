@@ -887,6 +887,18 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    @app.get("/v1/rag/docs/chunks/{chunk_id}")
+    def rag_doc_chunk_detail(
+        chunk_id: str,
+        context_window: int = 1,
+        authorization: str | None = Header(default=None),
+    ):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_doc_chunk_detail(token, chunk_id, context_window=context_window)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     @app.post("/v1/rag/docs/chunks/{chunk_id}/status")
     def rag_doc_chunk_status_set(chunk_id: str, payload: dict, authorization: str | None = Header(default=None)):
         token = _extract_bearer_token(authorization)

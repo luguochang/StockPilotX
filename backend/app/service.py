@@ -4743,6 +4743,20 @@ class AShareAgentService:
             offset=offset,
         )
 
+    def rag_doc_chunk_detail(
+        self,
+        token: str,
+        chunk_id: str,
+        *,
+        context_window: int = 1,
+    ) -> dict[str, Any]:
+        """Return chunk detail with nearby context for定位查看."""
+        return self.web.rag_doc_chunk_get_detail(
+            token,
+            chunk_id=chunk_id,
+            context_window=context_window,
+        )
+
     def rag_doc_chunk_status_set(self, token: str, chunk_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self.web.rag_doc_chunk_set_status(token, chunk_id=chunk_id, status=str(payload.get("status", "review")))
 

@@ -7,6 +7,7 @@ import {
   Card,
   Col,
   Collapse,
+  Drawer,
   Input,
   InputNumber,
   Progress,
@@ -82,6 +83,11 @@ export default function RagCenterPage() {
   const [uploadAutoIndex, setUploadAutoIndex] = useState(true);
   const [showUploadAdvanced, setShowUploadAdvanced] = useState(false);
   const [retrievalPreview, setRetrievalPreview] = useState<Record<string, any> | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailChunk, setDetailChunk] = useState<Record<string, any> | null>(null);
+  const [detailContext, setDetailContext] = useState<Record<string, any> | null>(null);
+  const [detailQuery, setDetailQuery] = useState("");
 
   const [editSource, setEditSource] = useState("user_upload");
   const [editAutoApprove, setEditAutoApprove] = useState(false);
@@ -178,6 +184,30 @@ export default function RagCenterPage() {
     } catch {
       // Preview failure should not block upload flow.
       return null;
+    }
+  }
+
+  async function openChunkDetail(hit: Record<string, any>, queryText: string) {
+    const chunkId = String(hit?.chunk_id ?? "").trim();
+    if (!chunkId) {
+      setError("当前命中项没有 chunk_id，无法定位到文档片段");
+      return;
+    }
+    setDetailOpen(true);
+    setDetailLoading(true);
+    setDetailChunk(null);
+    setDetailContext(null);
+    setDetailQuery(queryText);
+    try {
+      const params = new URLSearchParams({ context_window: "1" });
+      const resp = await fetch(`${API_BASE}/v1/rag/docs/chunks/${encodeURIComponent(chunkId)}?${params.toString()}`);
+      const body = (await parseOrThrow(resp)) as Record<string, any>;
+      setDetailChunk((body?.chunk as Record<string, any> | undefined) ?? null);
+      setDetailContext((body?.context as Record<string, any> | undefined) ?? null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "加载 chunk 定位详情失败");
+    } finally {
+      setDetailLoading(false);
     }
   }
 
@@ -530,9 +560,6 @@ export default function RagCenterPage() {
                     />
                     {(retrievalPreview.items ?? []).map((item: any, index: number) => {
                       const hits = Array.isArray(item?.top_hits) ? item.top_hits.slice(0, 2) : [];
-                      const hitSummary = hits
-                        .map((hit: any) => `${Number(hit?.rank ?? 0)}.${hit?.is_target_doc ? "当前文档" : "其他"} ${String(hit?.excerpt ?? "")}`)
-                        .join(" | ");
                       return (
                         <Card key={`${String(item?.query ?? "q")}-${index}`} size="small" style={{ background: "#f8fafc" }}>
                           <Space direction="vertical" size={4} style={{ width: "100%" }}>
@@ -541,7 +568,43 @@ export default function RagCenterPage() {
                               {item?.target_hit ? `命中当前文档，rank=${String(item?.target_hit_rank ?? "-")}` : "未命中当前文档"}
                               {`，latency=${String(item?.latency_ms ?? 0)}ms`}
                             </Text>
-                            <Text style={{ color: "#475569" }}>Top 命中：{hitSummary || "暂无"}</Text>
+                            {hits.length > 0 ? (
+                              <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                                {hits.map((hit: any, hitIndex: number) => (
+                                  <Card key={`${String(item?.query ?? "q")}-${hitIndex}`} size="small">
+                                    <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                                      <Space wrap>
+                                        <Tag color={Boolean(hit?.is_target_doc) ? "green" : "blue"}>
+                                          #{String(hit?.rank ?? hitIndex + 1)} {Boolean(hit?.is_target_doc) ? "当前文档" : "其他文档"}
+                                        </Tag>
+                                        <Tag>{String(hit?.retrieval_track ?? "unknown_track")}</Tag>
+                                        {String(hit?.chunk_id ?? "").trim() ? (
+                                          <Button size="small" onClick={() => openChunkDetail(hit, String(item?.query ?? ""))}>
+                                            定位查看
+                                          </Button>
+                                        ) : (
+                                          <Tag>无 chunk_id</Tag>
+                                        )}
+                                        {String(hit?.chunk_id ?? "").trim() && String(hit?.doc_id ?? "").trim() ? (
+                                          <a
+                                            href={`/docs-center?doc_id=${encodeURIComponent(String(hit.doc_id))}&chunk_id=${encodeURIComponent(
+                                              String(hit.chunk_id),
+                                            )}&q=${encodeURIComponent(String(item?.query ?? ""))}`}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                          >
+                                            在文档页打开
+                                          </a>
+                                        ) : null}
+                                      </Space>
+                                      <Text style={{ color: "#475569" }}>{String(hit?.excerpt ?? "") || "暂无摘录"}</Text>
+                                    </Space>
+                                  </Card>
+                                ))}
+                              </Space>
+                            ) : (
+                              <Text style={{ color: "#475569" }}>Top 命中：暂无</Text>
+                            )}
                           </Space>
                         </Card>
                       );
@@ -739,6 +802,78 @@ export default function RagCenterPage() {
           ) : null}
         </>
       ) : null}
+
+      <Drawer
+        title="文档片段定位"
+        placement="right"
+        width={640}
+        open={detailOpen}
+        onClose={() => setDetailOpen(false)}
+      >
+        <Space direction="vertical" size={10} style={{ width: "100%" }}>
+          {detailLoading ? <Text>正在加载片段详情...</Text> : null}
+          {!detailLoading && !detailChunk ? <Alert type="warning" showIcon message="未找到片段详情" /> : null}
+          {!detailLoading && detailChunk ? (
+            <>
+              <Alert
+                type="info"
+                showIcon
+                message={`doc_id=${String(detailChunk.doc_id ?? "-")} | chunk_no=${String(detailChunk.chunk_no ?? "-")}`}
+                description={`query=${detailQuery || "-"}`}
+              />
+              <Space wrap>
+                <Tag>{String(detailChunk.source ?? "-")}</Tag>
+                <Tag>{String(detailChunk.effective_status ?? "-")}</Tag>
+                <Tag>quality={Number(detailChunk.quality_score ?? 0).toFixed(2)}</Tag>
+              </Space>
+              <Card size="small" title="当前片段">
+                <Text style={{ whiteSpace: "pre-wrap", color: "#334155" }}>
+                  {String(detailChunk.chunk_text_redacted || detailChunk.chunk_text || "")}
+                </Text>
+              </Card>
+              <Card size="small" title="上文片段">
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  {(detailContext?.prev ?? []).length === 0 ? (
+                    <Text type="secondary">无上文片段</Text>
+                  ) : (
+                    (detailContext?.prev ?? []).map((ctx: any) => (
+                      <Card key={`prev-${String(ctx?.chunk_id ?? "")}`} size="small">
+                        <Text strong>#{String(ctx?.chunk_no ?? "-")}</Text>
+                        <Text style={{ display: "block", color: "#475569", marginTop: 4 }}>{String(ctx?.excerpt ?? "")}</Text>
+                      </Card>
+                    ))
+                  )}
+                </Space>
+              </Card>
+              <Card size="small" title="下文片段">
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  {(detailContext?.next ?? []).length === 0 ? (
+                    <Text type="secondary">无下文片段</Text>
+                  ) : (
+                    (detailContext?.next ?? []).map((ctx: any) => (
+                      <Card key={`next-${String(ctx?.chunk_id ?? "")}`} size="small">
+                        <Text strong>#{String(ctx?.chunk_no ?? "-")}</Text>
+                        <Text style={{ display: "block", color: "#475569", marginTop: 4 }}>{String(ctx?.excerpt ?? "")}</Text>
+                      </Card>
+                    ))
+                  )}
+                </Space>
+              </Card>
+              {String(detailChunk.doc_id ?? "").trim() && String(detailChunk.chunk_id ?? "").trim() ? (
+                <a
+                  href={`/docs-center?doc_id=${encodeURIComponent(String(detailChunk.doc_id))}&chunk_id=${encodeURIComponent(
+                    String(detailChunk.chunk_id),
+                  )}&q=${encodeURIComponent(detailQuery || "")}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  在文档页打开此定位
+                </a>
+              ) : null}
+            </>
+          ) : null}
+        </Space>
+      </Drawer>
     </main>
   );
 }
