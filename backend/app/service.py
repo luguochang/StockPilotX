@@ -840,6 +840,7 @@ class AShareAgentService:
             quality_status=quality_status,
             context="deepthink",
         )
+        runtime_guard = dict(budget_usage.get("runtime_guard", {}) or {}) if isinstance(budget_usage, dict) else {}
         return {
             "stock_code": stock_code,
             "question": question[:200],
@@ -856,6 +857,8 @@ class AShareAgentService:
             "stop_reason": stop_reason,
             "budget_warn": bool(budget_usage.get("warn")),
             "budget_exceeded": bool(budget_usage.get("exceeded")),
+            "runtime_guard": runtime_guard,
+            "runtime_timeout": bool(runtime_guard.get("timed_out", False)),
             "citations": citations[:6],
             "market_regime": str(regime.get("regime_label", "")),
             "regime_confidence": float(regime.get("regime_confidence", 0.0) or 0.0),
@@ -6227,6 +6230,8 @@ class AShareAgentService:
         note = str(parse_note or "").lower()
         if "pdf_binary_stream_detected" in note:
             return "PDF parsing failed: binary stream detected, not human-readable text"
+        if "pdf_parser_unavailable" in note:
+            return "PDF parsing failed: parser unavailable in runtime, install PDF parser and retry"
         normalized = re.sub(r"\s+", " ", str(extracted_text or "")).strip()
         if not normalized:
             return "No readable text extracted from file"
@@ -7052,6 +7057,11 @@ class AShareAgentService:
             parse_verdict = {
                 "status": "failed",
                 "message": "PDF parse failed: detected compressed binary stream instead of document text",
+            }
+        elif "pdf_parser_unavailable" in parse_note_lower:
+            parse_verdict = {
+                "status": "failed",
+                "message": "PDF parse failed: parser unavailable in runtime, please install parser and re-upload",
             }
         elif "pdf_ascii_fallback" in parse_note_lower and (
             ("pdf_parser_unavailable" in parse_note_lower) or not parse_stage_detail
@@ -10058,6 +10068,30 @@ class AShareAgentService:
             requested_max_events=payload.get("archive_max_events"),
         )
         archive_max_events = int(archive_policy["max_events"])
+        requested_round_timeout = self._safe_float(payload.get("round_timeout_seconds", 0.0), default=0.0)
+        default_round_timeout = self._safe_float(
+            getattr(self.settings, "deep_round_timeout_seconds", 45.0),
+            default=45.0,
+        )
+        round_timeout_seconds = max(
+            0.1,
+            min(600.0, requested_round_timeout if requested_round_timeout > 0 else default_round_timeout),
+        )
+        requested_stage_soft_timeout = self._safe_float(payload.get("stage_soft_timeout_seconds", 0.0), default=0.0)
+        default_stage_soft_timeout = self._safe_float(
+            getattr(self.settings, "deep_round_stage_soft_timeout_seconds", max(8.0, round_timeout_seconds * 0.6)),
+            default=max(8.0, round_timeout_seconds * 0.6),
+        )
+        stage_soft_timeout_seconds = max(
+            0.05,
+            min(round_timeout_seconds, requested_stage_soft_timeout if requested_stage_soft_timeout > 0 else default_stage_soft_timeout),
+        )
+        runtime_guard_state = {
+            "warn_emitted": False,
+            "timed_out": False,
+            "timeout_stage": "",
+            "elapsed_ms": 0,
+        }
 
         event_seq = 0
         first_event_ms: int | None = None
@@ -10080,6 +10114,21 @@ class AShareAgentService:
             if first_event_ms is None:
                 first_event_ms = int(round((time.perf_counter() - started_at) * 1000))
             return event
+
+        def runtime_guard_snapshot(stage: str) -> dict[str, Any]:
+            elapsed_seconds = max(0.0, float(time.perf_counter() - started_at))
+            elapsed_ms = int(round(elapsed_seconds * 1000))
+            remaining_seconds = max(0.0, float(round_timeout_seconds - elapsed_seconds))
+            return {
+                "stage": str(stage),
+                "elapsed_ms": elapsed_ms,
+                "elapsed_seconds": round(elapsed_seconds, 4),
+                "remaining_seconds": round(remaining_seconds, 4),
+                "round_timeout_seconds": float(round_timeout_seconds),
+                "stage_soft_timeout_seconds": float(stage_soft_timeout_seconds),
+                "warn": bool(elapsed_seconds >= stage_soft_timeout_seconds),
+                "timed_out": bool(elapsed_seconds >= round_timeout_seconds),
+            }
 
         try:
             code = stock_codes[0] if stock_codes else "SH600000"
@@ -10119,6 +10168,18 @@ class AShareAgentService:
                 "conflict_sources": [],
                 "counter_view": "no significant counter view",
             }
+            multi_role_pre = {
+                "enabled": False,
+                "trace_id": "",
+                "debate_mode": "not_started",
+                "role_count": 0,
+                "consensus_signal": "hold",
+                "consensus_confidence": 0.5,
+                "disagreement_score": 0.0,
+                "conflict_sources": [],
+                "counter_view": "",
+                "judge_summary": "",
+            }
 
             # 鍏堝彂 round_started锛岀‘淇濆墠绔湪璁＄畻鍓嶅氨鑳芥嬁鍒扳€滃凡寮€濮嬫墽琛屸€濈殑鍙嶉銆?
             yield emit(
@@ -10144,6 +10205,14 @@ class AShareAgentService:
                 {
                     "stage": "planning",
                     "message": "Task planning completed. Starting multi-agent execution.",
+                },
+            )
+            yield emit(
+                "runtime_guard",
+                {
+                    "status": "armed",
+                    "round_timeout_seconds": float(round_timeout_seconds),
+                    "stage_soft_timeout_seconds": float(stage_soft_timeout_seconds),
                 },
             )
             if bool(report_context.get("available", False)):
@@ -10212,6 +10281,16 @@ class AShareAgentService:
                             "message": f"Auto-refresh has {len(refresh_failed)} failed categories; confidence will be reduced.",
                         },
                     )
+                refresh_guard = runtime_guard_snapshot("data_refresh")
+                runtime_guard_state["elapsed_ms"] = int(refresh_guard.get("elapsed_ms", 0) or 0)
+                if bool(refresh_guard.get("warn")) and not bool(runtime_guard_state["warn_emitted"]):
+                    runtime_guard_state["warn_emitted"] = True
+                    yield emit("runtime_guard", {"status": "warning", **refresh_guard})
+                if bool(refresh_guard.get("timed_out")):
+                    runtime_guard_state["timed_out"] = True
+                    runtime_guard_state["timeout_stage"] = str(refresh_guard.get("stage", "data_refresh"))
+                    stop_reason = "DEEP_ROUND_TIMEOUT"
+                    yield emit("runtime_timeout", {"reason": "round_timeout", **refresh_guard})
                 quote = dict(deep_pack.get("realtime", {}) or {})
                 bars = list(deep_pack.get("history", []) or [])[-180:]
                 financial = dict(deep_pack.get("financial", {}) or {})
@@ -10279,8 +10358,57 @@ class AShareAgentService:
                     },
                 )
                 yield emit("calendar_watchlist", {"items": list(intel_payload.get("calendar_watchlist", []))[:8]})
+                intel_guard = runtime_guard_snapshot("intel_search")
+                runtime_guard_state["elapsed_ms"] = int(intel_guard.get("elapsed_ms", 0) or 0)
+                if bool(intel_guard.get("warn")) and not bool(runtime_guard_state["warn_emitted"]):
+                    runtime_guard_state["warn_emitted"] = True
+                    yield emit("runtime_guard", {"status": "warning", **intel_guard})
+                if bool(intel_guard.get("timed_out")):
+                    runtime_guard_state["timed_out"] = True
+                    runtime_guard_state["timeout_stage"] = str(intel_guard.get("stage", "intel_search"))
+                    stop_reason = "DEEP_ROUND_TIMEOUT"
+                    yield emit("runtime_timeout", {"reason": "round_timeout", **intel_guard})
 
                 yield emit("progress", {"stage": "debate", "message": "Generating multi-agent viewpoints"})
+                data_pack_missing = [str(x).strip() for x in list(deep_pack.get("missing_data", []) or []) if str(x).strip()]
+                pre_quality_reasons = [f"input_pack:{x}" for x in data_pack_missing]
+                if refresh_failed:
+                    pre_quality_reasons.append("input_pack:auto_refresh_failed")
+                pre_quality_reasons = list(dict.fromkeys(pre_quality_reasons))
+                pre_quality_status = "degraded" if data_pack_missing else "watch" if refresh_failed else "pass"
+                pre_quality_gate = {"overall_status": pre_quality_status, "reasons": pre_quality_reasons}
+                pre_multi = self._predict_run_multi_role_debate(
+                    stock_code=code,
+                    question=question,
+                    quote=quote,
+                    trend=trend,
+                    quant_20=quant_20,
+                    quality_gate=pre_quality_gate,
+                    input_pack=deep_pack,
+                )
+                multi_role_pre = {
+                    "enabled": True,
+                    "trace_id": str(pre_multi.get("trace_id", "")),
+                    "debate_mode": str(pre_multi.get("debate_mode", "rule_fallback")),
+                    "role_count": int(len(list(pre_multi.get("opinions", []) or []))),
+                    "consensus_signal": str(pre_multi.get("consensus_signal", "hold")),
+                    "consensus_confidence": round(
+                        max(0.0, min(1.0, self._safe_float(pre_multi.get("consensus_confidence", 0.5), default=0.5))),
+                        4,
+                    ),
+                    "disagreement_score": round(
+                        max(0.0, min(1.0, self._safe_float(pre_multi.get("disagreement_score", 0.0), default=0.0))),
+                        4,
+                    ),
+                    "conflict_sources": [
+                        str(x).strip()
+                        for x in list(pre_multi.get("conflict_sources", []) or [])
+                        if str(x).strip()
+                    ],
+                    "counter_view": str(pre_multi.get("counter_view", ""))[:280],
+                    "judge_summary": str(pre_multi.get("judge_summary", ""))[:280],
+                }
+                yield emit("pre_arbitration", dict(multi_role_pre))
                 rule_core = self._build_rule_based_debate_opinions(question, trend, quote, quant_20)
                 core_opinions = rule_core
                 if self.settings.llm_external_enabled and self.llm_gateway.providers:
@@ -10342,6 +10470,23 @@ class AShareAgentService:
                     )
                     for opinion in core_opinions
                 ]
+                pre_core = [
+                    self._normalize_deep_opinion(
+                        agent=str(opinion.get("agent", "")),
+                        signal=str(opinion.get("signal", "hold")),
+                        confidence=self._safe_float(opinion.get("confidence", 0.5), default=0.5),
+                        reason=str(opinion.get("reason", "")),
+                        evidence_ids=evidence_ids,
+                        risk_tags=["pre_arbitration_core"],
+                    )
+                    for opinion in list(pre_multi.get("opinions", []) or [])
+                    if isinstance(opinion, dict) and str(opinion.get("agent", "")).strip() and str(opinion.get("agent", "")).strip() != "supervisor_agent"
+                ]
+                # Deduplicate by agent name: pre-arbitration output has higher precedence than ad-hoc debate output.
+                normalized_core_by_agent: dict[str, dict[str, Any]] = {}
+                for row in pre_core + normalized_core:
+                    normalized_core_by_agent[str(row.get("agent", "")).strip()] = row
+                normalized_core = [row for row in normalized_core_by_agent.values() if str(row.get("agent", "")).strip()]
                 report_opinions: list[dict[str, Any]] = []
                 if bool(report_context.get("available", False)):
                     report_opinions.append(
@@ -10376,8 +10521,14 @@ class AShareAgentService:
 
                 pre_arb = self._arbitrate_opinions(opinions)
                 data_pack_missing = [str(x) for x in list(deep_pack.get("missing_data", []) or []) if str(x).strip()]
+                merged_conflicts = list(pre_arb.get("conflict_sources", [])) + list(multi_role_pre.get("conflict_sources", []))
                 if data_pack_missing:
-                    pre_arb["conflict_sources"] = list(dict.fromkeys(list(pre_arb.get("conflict_sources", [])) + ["data_gap"]))
+                    merged_conflicts.append("data_gap")
+                if bool(runtime_guard_state.get("timed_out", False)):
+                    merged_conflicts.append("runtime_timeout")
+                pre_arb["conflict_sources"] = list(
+                    dict.fromkeys([str(x).strip() for x in merged_conflicts if str(x).strip()])
+                )
                 if float(pre_arb["disagreement_score"]) >= 0.45 and round_no < max_rounds:
                     replan_triggered = True
                     task_graph.append(
@@ -10402,6 +10553,11 @@ class AShareAgentService:
                 arbitration = self._arbitrate_opinions(opinions)
                 if budget_usage["warn"]:
                     arbitration["conflict_sources"] = list(dict.fromkeys(list(arbitration["conflict_sources"]) + ["budget_warning"]))
+                if bool(runtime_guard_state.get("timed_out", False)):
+                    # Runtime timeout is treated as a hard conflict source to force conservative downstream handling.
+                    arbitration["conflict_sources"] = list(
+                        dict.fromkeys(list(arbitration.get("conflict_sources", [])) + ["runtime_timeout"])
+                    )
 
             # 閫愭潯杈撳嚭 Agent 澧為噺涓庢渶缁堣鐐癸紝淇濊瘉鍓嶇鑳芥寔缁埛鏂般€?
             for opinion in opinions:
@@ -10438,6 +10594,27 @@ class AShareAgentService:
                         "reason": "disagreement_above_threshold",
                     },
                 )
+            runtime_guard_final = runtime_guard_snapshot("round_finalize")
+            runtime_guard_state["elapsed_ms"] = int(runtime_guard_final.get("elapsed_ms", 0) or 0)
+            if bool(runtime_guard_final.get("warn")) and not bool(runtime_guard_state["warn_emitted"]):
+                runtime_guard_state["warn_emitted"] = True
+                yield emit("runtime_guard", {"status": "warning", **runtime_guard_final})
+            if bool(runtime_guard_final.get("timed_out")) and not bool(runtime_guard_state["timed_out"]):
+                runtime_guard_state["timed_out"] = True
+                runtime_guard_state["timeout_stage"] = str(runtime_guard_final.get("stage", "round_finalize"))
+                stop_reason = "DEEP_ROUND_TIMEOUT"
+                yield emit("runtime_timeout", {"reason": "round_timeout", **runtime_guard_final})
+                arbitration["conflict_sources"] = list(
+                    dict.fromkeys(list(arbitration.get("conflict_sources", [])) + ["runtime_timeout"])
+                )
+            budget_usage["runtime_guard"] = {
+                "warn_emitted": bool(runtime_guard_state.get("warn_emitted", False)),
+                "timed_out": bool(runtime_guard_state.get("timed_out", False)),
+                "timeout_stage": str(runtime_guard_state.get("timeout_stage", "")),
+                "elapsed_ms": int(runtime_guard_state.get("elapsed_ms", 0) or 0),
+                "round_timeout_seconds": float(round_timeout_seconds),
+                "stage_soft_timeout_seconds": float(stage_soft_timeout_seconds),
+            }
             business_summary = self._deep_build_business_summary(
                 stock_code=code,
                 question=question,
@@ -10464,7 +10641,12 @@ class AShareAgentService:
             if bool(journal_link.get("enabled", False)):
                 yield emit("journal_linked", dict(journal_link))
 
-            session_status = "completed" if round_no >= max_rounds or stop_reason else "in_progress"
+            terminal_stop_reasons = {"DEEP_BUDGET_EXCEEDED"}
+            session_status = (
+                "completed"
+                if round_no >= max_rounds or str(stop_reason or "").strip() in terminal_stop_reasons
+                else "in_progress"
+            )
             snapshot = self.web.deep_think_append_round(
                 session_id=session_id,
                 round_id=round_id,
@@ -10484,6 +10666,11 @@ class AShareAgentService:
             # 涓氬姟鎽樿閫氳繃浼氳瘽蹇収閫忎紶缁欏悓姝ユ帴鍙ｈ皟鐢ㄦ柟锛屼究浜庡墠绔洿鎺ュ睍绀恒€?
             snapshot["business_summary"] = business_summary
             snapshot["journal_link"] = journal_link
+            snapshot["multi_role_pre"] = dict(multi_role_pre)
+            snapshot["runtime_guard"] = dict(budget_usage.get("runtime_guard", {}) or {})
+            if isinstance(snapshot.get("rounds"), list) and snapshot["rounds"]:
+                snapshot["rounds"][-1]["multi_role_pre"] = dict(multi_role_pre)
+                snapshot["rounds"][-1]["runtime_guard"] = dict(budget_usage.get("runtime_guard", {}) or {})
 
             avg_confidence = sum(float(x.get("confidence", 0.0)) for x in opinions) / max(1, len(opinions))
             quality_score = self._quality_score_for_group_card(
@@ -10514,6 +10701,8 @@ class AShareAgentService:
                         "disagreement_score": arbitration["disagreement_score"],
                         "replan_triggered": replan_triggered,
                         "stop_reason": stop_reason,
+                        "multi_role_pre_trace_id": str(multi_role_pre.get("trace_id", "")),
+                        "runtime_guard": dict(budget_usage.get("runtime_guard", {}) or {}),
                         "archive_policy": archive_policy,
                     },
                 )
@@ -10525,6 +10714,8 @@ class AShareAgentService:
                     "status": session_status,
                     "current_round": int(snapshot.get("current_round", round_no)),
                     "archive_policy": archive_policy,
+                    "multi_role_pre": dict(multi_role_pre),
+                    "runtime_guard": dict(budget_usage.get("runtime_guard", {}) or {}),
                 },
             )
             done_event = emit(

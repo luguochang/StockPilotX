@@ -56,6 +56,9 @@ class Settings:
     deep_archive_tenant_policy_json: str = "{}"
     deep_archive_export_task_max_attempts: int = 2
     deep_archive_export_retry_backoff_seconds: float = 0.35
+    # DeepThink runtime guard: cap one round wall-clock latency and emit warning before timeout.
+    deep_round_timeout_seconds: float = 45.0
+    deep_round_stage_soft_timeout_seconds: float = 28.0
     rag_vector_enabled: bool = True
     rag_vector_index_dir: str = str(_DATA_DIR / "vector")
     rag_vector_top_k: int = 8
@@ -120,6 +123,10 @@ class Settings:
             ),
             deep_archive_export_retry_backoff_seconds=max(
                 0.0, float(os.getenv("DEEP_ARCHIVE_EXPORT_RETRY_BACKOFF_SECONDS", "0.35"))
+            ),
+            deep_round_timeout_seconds=max(0.1, float(os.getenv("DEEP_ROUND_TIMEOUT_SECONDS", "45"))),
+            deep_round_stage_soft_timeout_seconds=max(
+                0.05, float(os.getenv("DEEP_ROUND_STAGE_SOFT_TIMEOUT_SECONDS", "28"))
             ),
             rag_vector_enabled=_to_bool(os.getenv("RAG_VECTOR_ENABLED"), True),
             rag_vector_index_dir=os.getenv("RAG_VECTOR_INDEX_DIR", str(_DATA_DIR / "vector")),

@@ -515,6 +515,39 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(str(verdict.get("status", "")), "failed")
         self.assertIn("pdf internals", str(verdict.get("message", "")).lower())
 
+    def test_rag_doc_preview_marks_parser_unavailable_failed(self) -> None:
+        doc_id = f"rag-parser-unavailable-{uuid.uuid4().hex[:8]}"
+        upload_id = f"ragu-parser-unavailable-{uuid.uuid4().hex[:8]}"
+        _ = self.svc.docs_upload(doc_id, "parser-unavailable.pdf", "SH600000 正常文本内容 " * 120, "user_upload")
+        _ = self.svc.docs_index(doc_id)
+        _ = self.svc.web.rag_upload_asset_upsert(
+            "",
+            upload_id=upload_id,
+            doc_id=doc_id,
+            filename="parser-unavailable.pdf",
+            source="user_upload",
+            source_url="",
+            file_sha256=uuid.uuid4().hex,
+            file_size=4096,
+            content_type="application/pdf",
+            stock_codes=["SH600000"],
+            tags=[],
+            parse_note="pdf_parser_unavailable,pdf_ascii_fallback",
+            status="indexed",
+            job_status="completed",
+            current_stage="asset_recorded",
+            parser_name="legacy_parser",
+            ocr_used=False,
+            quality_score=0.62,
+            vector_ready=True,
+            verification_passed=True,
+            created_by="unit-test",
+        )
+        preview_doc = self.svc.rag_doc_preview("", doc_id=doc_id, page=1)
+        verdict = preview_doc.get("parse_verdict", {})
+        self.assertEqual(str(verdict.get("status", "")), "failed")
+        self.assertIn("parser unavailable", str(verdict.get("message", "")).lower())
+
     def test_rag_retrieval_preview_api_wrapper(self) -> None:
         _ = self.svc.docs_upload("rag-preview-doc", "preview.txt", "SH600000 营收增长且现金流改善" * 140, "user_upload")
         _ = self.svc.docs_index("rag-preview-doc")
@@ -1091,6 +1124,8 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("task_graph", latest)
         self.assertTrue(latest["task_graph"])
         self.assertIn("budget_usage", latest)
+        self.assertIn("multi_role_pre", latest)
+        self.assertIn("runtime_guard", latest)
 
         stream_events = list(self.svc.deep_think_stream_events(session_id))
         names = [x["event"] for x in stream_events]
@@ -1098,6 +1133,8 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("market_regime", names)
         self.assertIn("intel_snapshot", names)
         self.assertIn("intel_status", names)
+        self.assertIn("pre_arbitration", names)
+        self.assertIn("runtime_guard", names)
         self.assertIn("agent_opinion_final", names)
         self.assertIn("arbitration_final", names)
         self.assertIn("business_summary", names)
@@ -1109,6 +1146,8 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("signal_guard_applied", business_payload)
         self.assertIn("confidence_adjustment_detail", business_payload)
         self.assertIn("analysis_dimensions", business_payload)
+        self.assertIn("runtime_guard", business_payload)
+        self.assertIn("runtime_timeout", business_payload)
         self.assertTrue(isinstance(business_payload.get("analysis_dimensions", []), list))
         self.assertGreaterEqual(len(business_payload.get("analysis_dimensions", [])), 5)
         journal_link_payload = next((x.get("data", {}) for x in stream_events if str(x.get("event", "")) == "journal_linked"), {})
@@ -1201,6 +1240,8 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("market_regime", names)
         self.assertIn("intel_snapshot", names)
         self.assertIn("intel_status", names)
+        self.assertIn("pre_arbitration", names)
+        self.assertIn("runtime_guard", names)
         self.assertIn("agent_opinion_final", names)
         self.assertIn("arbitration_final", names)
         self.assertIn("business_summary", names)
@@ -1214,6 +1255,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("signal_guard_applied", business_payload)
         self.assertIn("confidence_adjustment_detail", business_payload)
         self.assertIn("analysis_dimensions", business_payload)
+        self.assertIn("runtime_guard", business_payload)
         self.assertGreaterEqual(len(business_payload.get("analysis_dimensions", [])), 5)
         journal_link_payload = next((x.get("data", {}) for x in events if str(x.get("event", "")) == "journal_linked"), {})
         self.assertTrue(bool(journal_link_payload.get("ok", False)))
@@ -1279,6 +1321,45 @@ class ServiceTestCase(unittest.TestCase):
         latest = snapshot["rounds"][-1]
         self.assertEqual(latest["stop_reason"], "DEEP_BUDGET_EXCEEDED")
         self.assertEqual(snapshot["status"], "completed")
+
+    def test_deep_think_runtime_timeout_guard(self) -> None:
+        created = self.svc.deep_think_create_session(
+            {
+                "user_id": "deep-timeout-guard",
+                "question": "璇锋祴璇昏疆娆¤秴鏃堕檷绾ч€昏緫",
+                "stock_codes": ["SH600000"],
+                "max_rounds": 3,
+            }
+        )
+        session_id = created["session_id"]
+        original_intel = self.svc._deep_fetch_intel_via_llm_websearch  # type: ignore[attr-defined]
+
+        def slow_intel(**kwargs):  # type: ignore[no-untyped-def]
+            time.sleep(0.2)
+            return original_intel(**kwargs)
+
+        self.svc._deep_fetch_intel_via_llm_websearch = slow_intel  # type: ignore[assignment]
+        try:
+            snapshot = self.svc.deep_think_run_round(
+                session_id,
+                {
+                    "round_timeout_seconds": 0.1,
+                    "stage_soft_timeout_seconds": 0.05,
+                },
+            )
+        finally:
+            self.svc._deep_fetch_intel_via_llm_websearch = original_intel  # type: ignore[assignment]
+
+        latest = snapshot["rounds"][-1]
+        self.assertEqual(str(latest.get("stop_reason", "")), "DEEP_ROUND_TIMEOUT")
+        self.assertIn("budget_usage", latest)
+        self.assertIn("runtime_guard", dict(latest.get("budget_usage", {}) or {}))
+        runtime_guard = dict((latest.get("budget_usage", {}) or {}).get("runtime_guard", {}) or {})
+        self.assertTrue(bool(runtime_guard.get("timed_out", False)))
+        self.assertEqual(str(snapshot.get("status", "")), "in_progress")
+        stored = self.svc.deep_think_list_events(session_id, limit=200)
+        stored_names = [str(x.get("event", "")) for x in stored["events"]]
+        self.assertIn("runtime_timeout", stored_names)
 
     def test_deep_think_report_export_markdown_and_pdf(self) -> None:
         created = self.svc.deep_think_create_session(

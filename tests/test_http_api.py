@@ -1156,6 +1156,8 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("consensus_signal", round_snapshot["rounds"][-1])
         self.assertIn("task_graph", round_snapshot["rounds"][-1])
         self.assertIn("budget_usage", round_snapshot["rounds"][-1])
+        self.assertIn("multi_role_pre", round_snapshot["rounds"][-1])
+        self.assertIn("runtime_guard", round_snapshot["rounds"][-1])
 
         c3, loaded = self._get(f"/v1/deep-think/sessions/{session_id}")
         self.assertEqual(c3, 200)
@@ -1168,6 +1170,8 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("event: market_regime", stream_text)
         self.assertIn("event: intel_snapshot", stream_text)
         self.assertIn("event: intel_status", stream_text)
+        self.assertIn("event: pre_arbitration", stream_text)
+        self.assertIn("event: runtime_guard", stream_text)
         self.assertIn("event: agent_opinion_final", stream_text)
         self.assertIn("event: arbitration_final", stream_text)
         self.assertIn("event: journal_linked", stream_text)
@@ -1325,6 +1329,8 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("event: market_regime", stream_text)
         self.assertIn("event: intel_snapshot", stream_text)
         self.assertIn("event: intel_status", stream_text)
+        self.assertIn("event: pre_arbitration", stream_text)
+        self.assertIn("event: runtime_guard", stream_text)
         self.assertIn("event: agent_opinion_final", stream_text)
         self.assertIn("event: arbitration_final", stream_text)
         self.assertIn("event: business_summary", stream_text)
@@ -1388,6 +1394,32 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c2, 200)
         latest = snapshot["rounds"][-1]
         self.assertEqual(latest["stop_reason"], "DEEP_BUDGET_EXCEEDED")
+
+    def test_deep_think_runtime_timeout_guard(self) -> None:
+        c1, session = self._post(
+            "/v1/deep-think/sessions",
+            {
+                "user_id": "api-deep-timeout",
+                "question": "璇锋祴璇昏疆娆¤秴鏃堕檷绾ч€昏緫",
+                "stock_codes": ["SH600000"],
+                "max_rounds": 3,
+            },
+        )
+        self.assertEqual(c1, 200)
+        session_id = session["session_id"]
+        c2, snapshot = self._post(
+            f"/v1/deep-think/sessions/{session_id}/rounds",
+            {"round_timeout_seconds": 0.1, "stage_soft_timeout_seconds": 0.05},
+        )
+        self.assertEqual(c2, 200)
+        latest = snapshot["rounds"][-1]
+        self.assertEqual(str(latest.get("stop_reason", "")), "DEEP_ROUND_TIMEOUT")
+        self.assertEqual(str(snapshot.get("status", "")), "in_progress")
+        runtime_guard = dict((latest.get("budget_usage", {}) or {}).get("runtime_guard", {}) or {})
+        self.assertTrue(bool(runtime_guard.get("timed_out", False)))
+        c3, events_snapshot = self._get(f"/v1/deep-think/sessions/{session_id}/events?limit=200")
+        self.assertEqual(c3, 200)
+        self.assertTrue(any(str(x.get("event", "")) == "runtime_timeout" for x in events_snapshot.get("events", [])))
 
     def test_deep_think_intel_self_test_and_trace(self) -> None:
         c1, probe = self._get("/v1/deep-think/intel/self-test?stock_code=SH600000&question=%E8%87%AA%E6%A3%80")

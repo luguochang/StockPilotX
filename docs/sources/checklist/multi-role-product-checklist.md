@@ -15,11 +15,13 @@
 - [x] R1-05：R1 接口自测与文档归档
 - [x] R2-01：Report 接入多角色内核
 - [x] R2-02：新增 `GET /v1/report/self-test`，覆盖报告同步/异步链路冒烟
-- [ ] R3-01：DeepThink 接入多角色预裁决
-- [ ] R4-01：稳定性与超时治理
+- [x] R3-01：DeepThink 接入多角色预裁决
+- [x] R4-01：稳定性与超时治理
 - [ ] R5-01：前端收口与最终验收
 
 ## 本轮记录
 - 2026-02-20：启动 R1 开发，先完成后端核心与诊断接口。
 - 2026-02-20：R1 完成并补齐可复现自测（predict + trace）。
 - 2026-02-20：R2 完成，Report 接入多角色裁决并新增报告自测接口。
+- 2026-02-20：R3 完成，DeepThink 复用多角色预裁决并输出 `pre_arbitration` 事件。
+- 2026-02-20：R4 完成，DeepThink 增加运行时超时守卫（`runtime_guard` / `runtime_timeout` / `DEEP_ROUND_TIMEOUT`）。
