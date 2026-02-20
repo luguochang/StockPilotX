@@ -206,3 +206,40 @@ $env:PYTHONPATH='.'; .\.venv\Scripts\python scripts\generate_gate_decision_repor
 - [x] 迭代追踪字段
 - [x] 路径测试覆盖
 - [x] 回归自测与记录
+
+---
+
+## Batch 5（2026-02-20）
+
+### 对应计划项
+
+- Phase 2 / 6.3：SQL Agent PoC 安全约束（只读 + 白名单 + 安全校验 + 行数上限）
+
+### 本批代码改动
+
+1. 新增 `backend/app/query/sql_guard.py`
+- `SQLSafetyValidator.validate_select_sql(...)`：
+  - 仅允许 `SELECT`
+  - 禁止写操作和危险函数/注释注入模式
+  - 校验 `FROM/JOIN` 表白名单
+  - 校验 `SELECT` 字段白名单（PoC 级近似解析）
+  - 强制 `LIMIT` 且限制上限
+
+2. 新增 `tests/test_sql_guard.py`
+- 覆盖正常查询、非只读、越权表、超限、危险语句五类场景。
+
+### 自测记录
+
+```powershell
+.\.venv\Scripts\python -m pytest -q tests\test_sql_guard.py tests\test_eval_gate_decision.py
+```
+
+结果：`9 passed`
+
+### Checklist
+
+- [x] SQL 只读约束
+- [x] 表白名单约束
+- [x] 字段白名单约束
+- [x] LIMIT 上限约束
+- [x] 安全回归用例
