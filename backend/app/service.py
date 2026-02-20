@@ -164,6 +164,10 @@ class AShareAgentService:
         self._report_task_lock = threading.RLock()
         self._report_tasks: dict[str, dict[str, Any]] = {}
         self._report_task_executor = ThreadPoolExecutor(max_workers=2)
+        # Runtime guards: avoid tasks hanging in running/partial_ready without visible heartbeat.
+        self._report_task_timeout_seconds = 300
+        self._report_task_stall_seconds = 75
+        self._report_task_heartbeat_interval_seconds = 1.0
         self._backtest_runs: dict[str, dict[str, Any]] = {}
         self._deep_archive_ts_format = "%Y-%m-%d %H:%M:%S"
         self._deep_archive_export_executor = ThreadPoolExecutor(max_workers=2)
@@ -2296,8 +2300,21 @@ class AShareAgentService:
             "query": {"history_min": 90, "news_min": 8, "research_min": 6},
             "query_stream": {"history_min": 90, "news_min": 8, "research_min": 6},
             "analysis_studio": {"history_min": 90, "news_min": 8, "research_min": 6},
-            "deepthink": {"history_min": 120, "news_min": 10, "research_min": 8, "macro_min": 6},
-            "report": {"history_min": 120, "news_min": 10, "research_min": 8, "macro_min": 6},
+            # DeepThink/Report are long-horizon decisions: require close-to-1y bars by default.
+            "deepthink": {
+                "history_min": 252,
+                "history_fetch_limit": 520,
+                "news_min": 10,
+                "research_min": 8,
+                "macro_min": 6,
+            },
+            "report": {
+                "history_min": 252,
+                "history_fetch_limit": 520,
+                "news_min": 10,
+                "research_min": 8,
+                "macro_min": 6,
+            },
             "predict": {"history_min": 260, "history_fetch_limit": 520, "news_min": 4, "research_min": 4},
             "overview": {"history_min": 120, "news_min": 8, "research_min": 6},
             "intel": {"history_min": 120, "news_min": 10, "research_min": 8, "macro_min": 6},
@@ -3955,6 +3972,8 @@ class AShareAgentService:
         except Exception:
             intel = {}
         history_sample_size = len(list(overview.get("history", []) or []))
+        refresh_actions = list(((report_input_pack.get("dataset", {}) or {}).get("refresh_actions", []) or []))
+        refresh_failed_count = len([x for x in refresh_actions if str((x or {}).get("status", "")).strip().lower() != "ok"])
         quality_reasons: list[str] = []
         if len(list(query_result.get("citations", []) or [])) < 3:
             quality_reasons.append("citations_insufficient")
@@ -3962,6 +3981,8 @@ class AShareAgentService:
             quality_reasons.append("history_sample_insufficient")
         if str(predict_snapshot.get("data_quality", "")).strip() != "real":
             quality_reasons.append("predict_degraded")
+        if refresh_failed_count > 0:
+            quality_reasons.append("auto_refresh_failed")
         quality_reasons.extend([str(x) for x in list(report_input_pack.get("missing_data", []) or []) if str(x).strip()])
         quality_reasons = list(dict.fromkeys(quality_reasons))
         # Weighted quality gate: avoid over-penalizing isolated soft gaps (e.g. research_only gap).
@@ -3978,6 +3999,7 @@ class AShareAgentService:
             "fund_missing": 0.06,
             "predict_degraded": 0.06,
             "citations_insufficient": 0.10,
+            "auto_refresh_failed": 0.12,
         }
         quality_penalty = 0.0
         for reason in quality_reasons:
@@ -4014,6 +4036,8 @@ class AShareAgentService:
             "event_timeline_count": int(len(list(report_input_pack.get("event_timeline_1y", []) or []))),
             "uncertainty_note_count": int(len(list(report_input_pack.get("evidence_uncertainty", []) or []))),
             "time_horizon_coverage": dict(report_input_pack.get("time_horizon_coverage", {}) or {}),
+            "refresh_action_count": int(len(refresh_actions)),
+            "refresh_failed_count": int(refresh_failed_count),
             "missing_data": list(report_input_pack.get("missing_data", []) or []),
             "data_quality": str(report_input_pack.get("data_quality", "ready")),
         }
@@ -4921,8 +4945,67 @@ class AShareAgentService:
         }
         return self._sanitize_report_payload(result)
 
+    def _report_task_mark_failed(self, task: dict[str, Any], *, error_code: str, error_message: str) -> None:
+        """Mark one report task as failed with a normalized error payload."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        task["status"] = "failed"
+        task["current_stage"] = "failed"
+        task["stage_message"] = "Report task failed"
+        task["error_code"] = str(error_code or "report_task_failed")
+        task["error_message"] = str(error_message or "report_task_failed")[:260]
+        task["updated_at"] = now_iso
+        task["heartbeat_at"] = now_iso
+        task["completed_at"] = now_iso
+
+    def _report_task_apply_runtime_guard(self, task: dict[str, Any]) -> None:
+        """Apply timeout/stall guard in-place before task snapshot/result is returned."""
+        status = str(task.get("status", "")).strip().lower()
+        if status in {"completed", "failed", "cancelled"}:
+            return
+        now = datetime.now(timezone.utc)
+
+        deadline_raw = str(task.get("deadline_at", "")).strip()
+        if deadline_raw:
+            deadline = self._parse_time(deadline_raw)
+            if now > deadline:
+                self._report_task_mark_failed(
+                    task,
+                    error_code="report_task_timeout",
+                    error_message="Report task exceeded runtime limit; please retry with fewer inputs.",
+                )
+                return
+
+        # If worker heartbeat disappears for too long, fail fast so frontend does not spin forever.
+        heartbeat_raw = str(task.get("heartbeat_at", "")).strip() or str(task.get("updated_at", "")).strip()
+        if heartbeat_raw and status in {"running", "partial_ready"}:
+            heartbeat_at = self._parse_time(heartbeat_raw)
+            if (now - heartbeat_at).total_seconds() > float(self._report_task_stall_seconds):
+                self._report_task_mark_failed(
+                    task,
+                    error_code="report_task_stalled",
+                    error_message="Report task heartbeat stalled; please retry.",
+                )
+
+    def _report_task_tick_heartbeat(
+        self,
+        task: dict[str, Any],
+        *,
+        progress_floor: float = 0.0,
+        stage_message: str | None = None,
+    ) -> None:
+        """Touch heartbeat and keep progress moving while long-running stage is executing."""
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        task["updated_at"] = now_iso
+        task["heartbeat_at"] = now_iso
+        if stage_message is not None:
+            task["stage_message"] = stage_message
+        if progress_floor > 0:
+            task["progress"] = max(float(task.get("progress", 0.0) or 0.0), float(progress_floor))
+
     def _report_task_snapshot(self, task: dict[str, Any]) -> dict[str, Any]:
         """Project internal task state to API-safe payload."""
+        self._report_task_apply_runtime_guard(task)
         has_full = bool(task.get("result_full"))
         has_partial = bool(task.get("result_partial"))
         level = "full" if has_full else "partial" if has_partial else "none"
@@ -4939,6 +5022,15 @@ class AShareAgentService:
             data_pack_status = "failed" if str(task.get("status", "")) == "failed" else "partial"
         elif missing_data:
             data_pack_status = "partial"
+        stage_started_at = str(task.get("stage_started_at", "")).strip()
+        heartbeat_at = str(task.get("heartbeat_at", "")).strip()
+        stage_elapsed_seconds = 0
+        heartbeat_age_seconds = 0
+        now = datetime.now(timezone.utc)
+        if stage_started_at:
+            stage_elapsed_seconds = max(0, int((now - self._parse_time(stage_started_at)).total_seconds()))
+        if heartbeat_at:
+            heartbeat_age_seconds = max(0, int((now - self._parse_time(heartbeat_at)).total_seconds()))
         return {
             "task_id": str(task.get("task_id", "")),
             "status": str(task.get("status", "queued")),
@@ -4949,6 +5041,11 @@ class AShareAgentService:
             "updated_at": str(task.get("updated_at", "")),
             "started_at": str(task.get("started_at", "")),
             "completed_at": str(task.get("completed_at", "")),
+            "deadline_at": str(task.get("deadline_at", "")),
+            "heartbeat_at": heartbeat_at,
+            "stage_started_at": stage_started_at,
+            "stage_elapsed_seconds": int(stage_elapsed_seconds),
+            "heartbeat_age_seconds": int(heartbeat_age_seconds),
             "result_level": level,
             "has_partial_result": has_partial,
             "has_full_result": has_full,
@@ -4972,6 +5069,7 @@ class AShareAgentService:
                 now_iso = datetime.now(timezone.utc).isoformat()
                 task["status"] = "cancelled"
                 task["updated_at"] = now_iso
+                task["heartbeat_at"] = now_iso
                 task["completed_at"] = now_iso
                 task["stage_message"] = "Task was cancelled before start"
                 return
@@ -4979,6 +5077,8 @@ class AShareAgentService:
             task["status"] = "running"
             task["started_at"] = now_iso
             task["updated_at"] = now_iso
+            task["heartbeat_at"] = now_iso
+            task["stage_started_at"] = now_iso
             task["current_stage"] = "partial"
             task["stage_message"] = "Generating minimum viable result"
             task["progress"] = max(float(task.get("progress", 0.0) or 0.0), 0.1)
@@ -4992,10 +5092,14 @@ class AShareAgentService:
                 current = self._report_tasks.get(task_id)
                 if not current:
                     return
+                self._report_task_apply_runtime_guard(current)
+                if str(current.get("status", "")) == "failed":
+                    return
                 if bool(current.get("cancel_requested", False)):
                     now = datetime.now(timezone.utc).isoformat()
                     current["status"] = "cancelled"
                     current["updated_at"] = now
+                    current["heartbeat_at"] = now
                     current["completed_at"] = now
                     current["stage_message"] = "Task cancelled"
                     return
@@ -5004,17 +5108,56 @@ class AShareAgentService:
                 current["stage_message"] = "Partial result ready; generating full report"
                 current["progress"] = max(float(current.get("progress", 0.0) or 0.0), 0.45)
                 current["result_partial"] = partial
-                current["updated_at"] = datetime.now(timezone.utc).isoformat()
+                now_iso = datetime.now(timezone.utc).isoformat()
+                current["updated_at"] = now_iso
+                current["heartbeat_at"] = now_iso
+                current["stage_started_at"] = now_iso
 
-            full = self.report_generate(task_payload)
+            keepalive_stop = threading.Event()
+
+            def _keepalive_loop() -> None:
+                while not keepalive_stop.wait(self._report_task_heartbeat_interval_seconds):
+                    with self._report_task_lock:
+                        running = self._report_tasks.get(task_id)
+                        if not running:
+                            return
+                        self._report_task_apply_runtime_guard(running)
+                        if str(running.get("status", "")) in {"completed", "failed", "cancelled"}:
+                            return
+                        if bool(running.get("cancel_requested", False)):
+                            return
+                        stage_started = str(running.get("stage_started_at", "")).strip()
+                        elapsed = 0
+                        if stage_started:
+                            elapsed = max(0, int((datetime.now(timezone.utc) - self._parse_time(stage_started)).total_seconds()))
+                        # Keep users informed that full generation is still progressing.
+                        dynamic_progress = min(0.92, 0.45 + min(0.42, float(elapsed) / 150.0))
+                        self._report_task_tick_heartbeat(
+                            running,
+                            progress_floor=dynamic_progress,
+                            stage_message=f"Generating full report ({elapsed}s)",
+                        )
+
+            keepalive_thread = threading.Thread(target=_keepalive_loop, daemon=True)
+            keepalive_thread.start()
+            try:
+                full = self.report_generate(task_payload)
+            finally:
+                keepalive_stop.set()
+                keepalive_thread.join(timeout=1.0)
+
             with self._report_task_lock:
                 current = self._report_tasks.get(task_id)
                 if not current:
+                    return
+                self._report_task_apply_runtime_guard(current)
+                if str(current.get("status", "")) == "failed":
                     return
                 if bool(current.get("cancel_requested", False)):
                     now = datetime.now(timezone.utc).isoformat()
                     current["status"] = "cancelled"
                     current["updated_at"] = now
+                    current["heartbeat_at"] = now
                     current["completed_at"] = now
                     current["stage_message"] = "Task cancelled"
                     return
@@ -5027,26 +5170,26 @@ class AShareAgentService:
                     current["result_partial"] = current["result_full"]
                 now = datetime.now(timezone.utc).isoformat()
                 current["updated_at"] = now
+                current["heartbeat_at"] = now
+                current["stage_started_at"] = now
                 current["completed_at"] = now
         except Exception as ex:  # noqa: BLE001
             with self._report_task_lock:
                 current = self._report_tasks.get(task_id)
                 if not current:
                     return
-                now = datetime.now(timezone.utc).isoformat()
-                current["status"] = "failed"
-                current["current_stage"] = "failed"
-                current["stage_message"] = "Report task failed"
-                current["error_code"] = "report_task_failed"
-                current["error_message"] = str(ex)[:260]
-                current["updated_at"] = now
-                current["completed_at"] = now
+                self._report_task_mark_failed(
+                    current,
+                    error_code="report_task_failed",
+                    error_message=str(ex),
+                )
 
     def report_task_create(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create async report task and return status immediately."""
         req = ReportRequest(**payload)
         task_id = f"rpt-{uuid.uuid4().hex[:12]}"
         now_iso = datetime.now(timezone.utc).isoformat()
+        deadline_iso = (datetime.now(timezone.utc) + timedelta(seconds=max(60, int(self._report_task_timeout_seconds)))).isoformat()
         task_payload = {
             "user_id": str(req.user_id),
             "stock_code": str(req.stock_code).strip().upper(),
@@ -5069,6 +5212,9 @@ class AShareAgentService:
                 "stage_message": "Task queued",
                 "created_at": now_iso,
                 "updated_at": now_iso,
+                "heartbeat_at": now_iso,
+                "deadline_at": deadline_iso,
+                "stage_started_at": now_iso,
                 "started_at": "",
                 "completed_at": "",
                 "error_code": "",
@@ -5101,6 +5247,7 @@ class AShareAgentService:
             task = self._report_tasks.get(key)
             if not task:
                 return {"error": "not_found", "task_id": key}
+            self._report_task_apply_runtime_guard(task)
             full = task.get("result_full")
             partial = task.get("result_partial")
             if isinstance(full, dict):
@@ -5110,6 +5257,8 @@ class AShareAgentService:
                     "result_level": "full",
                     "display_ready": True,
                     "partial_reason": "",
+                    "deadline_at": str(task.get("deadline_at", "")),
+                    "heartbeat_at": str(task.get("heartbeat_at", "")),
                     "result": full,
                 }
             if isinstance(partial, dict):
@@ -5119,6 +5268,8 @@ class AShareAgentService:
                     "result_level": "partial",
                     "display_ready": False,
                     "partial_reason": "warming_up",
+                    "deadline_at": str(task.get("deadline_at", "")),
+                    "heartbeat_at": str(task.get("heartbeat_at", "")),
                     "result": partial,
                 }
             return {
@@ -5127,6 +5278,8 @@ class AShareAgentService:
                 "result_level": "none",
                 "display_ready": False,
                 "partial_reason": "",
+                "deadline_at": str(task.get("deadline_at", "")),
+                "heartbeat_at": str(task.get("heartbeat_at", "")),
                 "result": None,
             }
 
@@ -5145,6 +5298,7 @@ class AShareAgentService:
             task["cancel_requested"] = True
             now_iso = datetime.now(timezone.utc).isoformat()
             task["updated_at"] = now_iso
+            task["heartbeat_at"] = now_iso
             if status == "queued":
                 task["status"] = "cancelled"
                 task["current_stage"] = "cancelled"
@@ -8226,6 +8380,10 @@ class AShareAgentService:
             else:
                 yield emit("progress", {"stage": "data_refresh", "message": "Refreshing market and history samples"})
                 deep_pack = self._build_llm_input_pack(code, question=question, scenario="deepthink")
+                refresh_actions = list(((deep_pack.get("dataset", {}) or {}).get("refresh_actions", []) or []))
+                refresh_failed = [
+                    x for x in refresh_actions if str((x or {}).get("status", "")).strip().lower() != "ok"
+                ]
                 yield emit(
                     "data_pack",
                     {
@@ -8233,8 +8391,28 @@ class AShareAgentService:
                         "coverage": dict((deep_pack.get("dataset", {}) or {}).get("coverage", {}) or {}),
                         "missing_data": list(deep_pack.get("missing_data", []) or []),
                         "data_quality": str(deep_pack.get("data_quality", "")),
+                        "time_horizon_coverage": dict(deep_pack.get("time_horizon_coverage", {}) or {}),
+                        "refresh_action_count": int(len(refresh_actions)),
+                        "refresh_failed_count": int(len(refresh_failed)),
+                        "refresh_actions": [
+                            {
+                                "category": str((row or {}).get("category", "")),
+                                "status": str((row or {}).get("status", "")),
+                                "latency_ms": int((row or {}).get("latency_ms", 0) or 0),
+                                "error": str((row or {}).get("error", "")),
+                            }
+                            for row in refresh_actions
+                        ][:12],
                     },
                 )
+                if refresh_failed:
+                    yield emit(
+                        "progress",
+                        {
+                            "stage": "data_gap_warning",
+                            "message": f"Auto-refresh has {len(refresh_failed)} failed categories; confidence will be reduced.",
+                        },
+                    )
                 quote = dict(deep_pack.get("realtime", {}) or {})
                 bars = list(deep_pack.get("history", []) or [])[-180:]
                 financial = dict(deep_pack.get("financial", {}) or {})

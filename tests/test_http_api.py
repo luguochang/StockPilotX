@@ -312,6 +312,10 @@ class HttpApiTestCase(unittest.TestCase):
             c_get, snapshot = self._get(f"/v1/report/tasks/{task_id}")
             self.assertEqual(c_get, 200)
             self.assertIn("report_quality_dashboard", snapshot)
+            self.assertIn("deadline_at", snapshot)
+            self.assertIn("heartbeat_at", snapshot)
+            self.assertIn("stage_elapsed_seconds", snapshot)
+            self.assertIn("heartbeat_age_seconds", snapshot)
             final_status = str(snapshot.get("status", ""))
             if final_status in {"completed", "failed"}:
                 break
@@ -322,6 +326,8 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c_result, 200)
         self.assertIn("result_level", result)
         self.assertIn("status", result)
+        self.assertIn("deadline_at", result)
+        self.assertIn("heartbeat_at", result)
         payload = result.get("result")
         if isinstance(payload, dict):
             self.assertIn("report_modules", payload)

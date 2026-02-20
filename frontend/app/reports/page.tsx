@@ -52,6 +52,12 @@ type ReportTask = {
   // Full-first UX helper fields: only render full report by default.
   display_ready?: boolean;
   partial_reason?: string;
+  // Runtime observability fields: used to detect long-spin / stale heartbeat issues.
+  deadline_at?: string;
+  heartbeat_at?: string;
+  stage_started_at?: string;
+  stage_elapsed_seconds?: number;
+  heartbeat_age_seconds?: number;
 };
 
 type TaskResult = {
@@ -60,6 +66,8 @@ type TaskResult = {
   result_level: "none" | "partial" | "full" | string;
   display_ready?: boolean;
   partial_reason?: string;
+  deadline_at?: string;
+  heartbeat_at?: string;
   result: Record<string, unknown> | null;
 };
 
@@ -507,6 +515,15 @@ export default function ReportsPage() {
             <Text>状态: <Tag color={statusColor(task.status)}>{task.status}</Tag></Text>
             <Text>阶段: {task.current_stage || "-"}</Text>
             <Text type="secondary">{task.stage_message || "等待中"}</Text>
+            {typeof task.stage_elapsed_seconds === "number" ? (
+              <Text type="secondary">阶段耗时: {Math.max(0, Number(task.stage_elapsed_seconds || 0))}s</Text>
+            ) : null}
+            {typeof task.heartbeat_age_seconds === "number" ? (
+              <Text type="secondary">心跳延迟: {Math.max(0, Number(task.heartbeat_age_seconds || 0))}s</Text>
+            ) : null}
+            {String(task.deadline_at ?? "").trim() ? (
+              <Text type="secondary">任务超时阈值: {String(task.deadline_at)}</Text>
+            ) : null}
             <Text>
               数据包状态: <Tag color={statusColor(String(task.data_pack_status ?? "unknown"))}>{String(task.data_pack_status ?? "unknown")}</Tag>
             </Text>
@@ -523,6 +540,13 @@ export default function ReportsPage() {
             <Progress percent={Math.max(0, Math.min(100, Number((Number(task.progress || 0) * 100).toFixed(1))))} strokeColor="#2563eb" />
             {taskDataPackMissing.length ? <Alert type="warning" showIcon message={`数据缺口: ${taskDataPackMissing.join("；")}`} /> : null}
             {task.error_message ? <Alert type="error" showIcon message={task.error_message} /> : null}
+            {taskRunning(task.status) && Number(task.heartbeat_age_seconds ?? 0) > 20 ? (
+              <Alert
+                type="warning"
+                showIcon
+                message={`任务心跳延迟 ${Number(task.heartbeat_age_seconds).toFixed(0)}s，若持续上升系统将自动判定超时。`}
+              />
+            ) : null}
             <Space style={{ width: "100%", justifyContent: "space-between" }}>
               <Text type="secondary">临时结果预览</Text>
               <Switch
@@ -580,6 +604,9 @@ export default function ReportsPage() {
                 </Text>
                 <Text style={{ color: "#475569" }}>
                   财报/事件/不确定性: {String(dataPackPreview.quarterly_fundamentals_count ?? 0)} / {String(dataPackPreview.event_timeline_count ?? 0)} / {String(dataPackPreview.uncertainty_note_count ?? 0)}
+                </Text>
+                <Text style={{ color: "#475569" }}>
+                  自动补数动作: {String(dataPackPreview.refresh_action_count ?? 0)}（失败 {String(dataPackPreview.refresh_failed_count ?? 0)}）
                 </Text>
                 <Text style={{ color: "#475569" }}>预测质量: {String(dataPackPreview.predict_quality ?? "unknown")}</Text>
                 <Text style={{ color: "#475569" }}>情报信号: {String(dataPackPreview.intel_signal ?? "unknown")}</Text>

@@ -185,6 +185,10 @@ class ServiceTestCase(unittest.TestCase):
         for _ in range(120):
             snapshot = self.svc.report_task_get(task_id)
             self.assertIn("report_quality_dashboard", snapshot)
+            self.assertIn("deadline_at", snapshot)
+            self.assertIn("heartbeat_at", snapshot)
+            self.assertIn("stage_elapsed_seconds", snapshot)
+            self.assertIn("heartbeat_age_seconds", snapshot)
             final_status = str(snapshot.get("status", ""))
             if final_status in {"completed", "failed", "partial_ready"}:
                 break
@@ -194,6 +198,8 @@ class ServiceTestCase(unittest.TestCase):
         result = self.svc.report_task_result(task_id)
         self.assertIn("result_level", result)
         self.assertIn("status", result)
+        self.assertIn("deadline_at", result)
+        self.assertIn("heartbeat_at", result)
         if final_status in {"completed", "partial_ready"}:
             self.assertIn(str(result.get("result_level", "")), {"partial", "full"})
             self.assertIsInstance(result.get("result"), dict)
@@ -204,6 +210,14 @@ class ServiceTestCase(unittest.TestCase):
                 self.assertIn("committee", payload)
                 self.assertIn("analysis_nodes", payload)
                 self.assertIn("quality_dashboard", payload)
+
+    def test_report_and_deepthink_require_1y_history_baseline(self) -> None:
+        report_profile = self.svc._scenario_dataset_requirements("report")  # type: ignore[attr-defined]
+        deepthink_profile = self.svc._scenario_dataset_requirements("deepthink")  # type: ignore[attr-defined]
+        self.assertGreaterEqual(int(report_profile.get("history_min", 0) or 0), 252)
+        self.assertGreaterEqual(int(deepthink_profile.get("history_min", 0) or 0), 252)
+        self.assertGreaterEqual(int(report_profile.get("history_fetch_limit", 0) or 0), 520)
+        self.assertGreaterEqual(int(deepthink_profile.get("history_fetch_limit", 0) or 0), 520)
 
     def test_ingest_endpoints(self) -> None:
         daily = self.svc.ingest_market_daily(["SH600000", "SZ000001"])
