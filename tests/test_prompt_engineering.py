@@ -46,6 +46,9 @@ class PromptEngineeringTestCase(unittest.TestCase):
         self.assertIn("prompt_total_pass_rate", metrics)
         self.assertIn("prompt_redteam_pass_rate", metrics)
         self.assertIn("prompt_freshness_timestamp_rate", metrics)
+        self.assertIn("prompt_failed_case_count", metrics)
+        self.assertIn("prompt_failed_case_ids", metrics)
+        self.assertIn("prompt_group_stats", metrics)
 
     def test_stable_release_blocked_when_gate_failed(self) -> None:
         with tempfile.TemporaryDirectory() as td:

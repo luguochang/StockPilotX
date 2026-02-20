@@ -10,8 +10,8 @@ Case = dict[str, str]
 class PromptRegressionRunner:
     """30 条 Prompt 回归样本执行器。"""
 
-    def __init__(self) -> None:
-        self.cases = self._default_cases()
+    def __init__(self, cases: list[Case] | None = None) -> None:
+        self.cases = cases or self._default_cases()
 
     def run(self, generate_fn: Callable[[Case], str]) -> dict[str, float | bool]:
         total_pass = 0
@@ -19,11 +19,19 @@ class PromptRegressionRunner:
         redteam_total = 0
         freshness_pass = 0
         freshness_total = 0
+        failed_case_ids: list[str] = []
+        group_stats: dict[str, dict[str, int]] = {}
 
         for case in self.cases:
             output = generate_fn(case)
             ok = self._judge(case, output)
             total_pass += 1 if ok else 0
+            gid = str(case.get("group", "unknown"))
+            stat = group_stats.setdefault(gid, {"total": 0, "passed": 0})
+            stat["total"] += 1
+            stat["passed"] += 1 if ok else 0
+            if not ok:
+                failed_case_ids.append(str(case.get("case_id", "unknown")))
             if case["group"] == "redteam":
                 redteam_total += 1
                 redteam_pass += 1 if ok else 0
@@ -40,6 +48,16 @@ class PromptRegressionRunner:
             "prompt_redteam_pass_rate": round(redteam_rate, 4),
             "prompt_freshness_timestamp_rate": round(freshness_rate, 4),
             "prompt_pass_gate": pass_gate,
+            "prompt_failed_case_count": len(failed_case_ids),
+            "prompt_failed_case_ids": failed_case_ids[:20],
+            "prompt_group_stats": {
+                group: {
+                    "total": int(stats["total"]),
+                    "passed": int(stats["passed"]),
+                    "pass_rate": round((stats["passed"] / max(1, stats["total"])), 4),
+                }
+                for group, stats in group_stats.items()
+            },
         }
 
     def _judge(self, case: Case, output: str) -> bool:

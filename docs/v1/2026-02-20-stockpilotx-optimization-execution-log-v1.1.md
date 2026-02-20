@@ -320,3 +320,52 @@ $env:PYTHONPATH='.'; .\.venv\Scripts\python scripts\generate_gate_decision_repor
 - [x] CacheMiddleware
 - [x] PIIMiddleware
 - [x] 中间件行为单测
+
+---
+
+## Batch 8（2026-02-20）
+
+### 对应计划项
+
+- Phase 3 / 8.3：Prompt 评测扩展（case 级可追溯、分组统计、报表化）
+
+### 本批代码改动
+
+1. `backend/app/prompt/evaluator.py`
+- `PromptRegressionRunner` 支持传入自定义 case 集。
+- 新增输出字段：
+  - `prompt_failed_case_count`
+  - `prompt_failed_case_ids`
+  - `prompt_group_stats`（group 维度 pass_rate）
+
+2. 新增脚本
+- `scripts/run_prompt_regression_report.py`
+- 自动产出 JSON + Markdown 报告，沉淀到 `docs/v1/prompt-evals/`。
+
+3. 测试补充
+- `tests/test_prompt_engineering.py` 增加新指标字段断言。
+
+4. 产物
+- `docs/v1/prompt-evals/prompt-regression-20260220-141544.json`
+- `docs/v1/prompt-evals/prompt-regression-20260220-141544.md`
+
+### 自测记录
+
+1. 命令：
+```powershell
+.\.venv\Scripts\python -m pytest -q tests\test_prompt_engineering.py tests\test_eval_gate_decision.py
+```
+结果：`7 passed`
+
+2. 命令：
+```powershell
+$env:PYTHONPATH='.'; .\.venv\Scripts\python scripts\run_prompt_regression_report.py
+```
+结果：报告文件生成成功。
+
+### Checklist
+
+- [x] Prompt case 级失败定位
+- [x] 分组 pass-rate 统计
+- [x] 报告脚本化导出
+- [x] 自测通过
