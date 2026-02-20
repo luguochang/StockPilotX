@@ -788,10 +788,12 @@ def create_app() -> FastAPI:
             _raise_auth_http_error(ex)
 
     @app.post("/v1/reports/{report_id}/export")
-    def report_export(report_id: str, authorization: str | None = Header(default=None)):
+    def report_export(report_id: str, format: str = "markdown", authorization: str | None = Header(default=None)):
         token = _extract_bearer_token(authorization)
         try:
-            return svc.report_export(token, report_id)
+            return svc.report_export(token, report_id, format=format)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 

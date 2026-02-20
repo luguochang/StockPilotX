@@ -110,12 +110,31 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("final_decision", generated)
         self.assertIn("committee", generated)
         self.assertIn("metric_snapshot", generated)
+        self.assertIn("analysis_nodes", generated)
+        self.assertIn("quality_dashboard", generated)
+        modules = generated.get("report_modules", [])
+        if isinstance(modules, list) and modules:
+            self.assertIn("module_quality_score", modules[0])
+            self.assertIn("module_degrade_code", modules[0])
+        nodes = generated.get("analysis_nodes", [])
+        if isinstance(nodes, list) and nodes:
+            self.assertIn("node_id", nodes[0])
+            self.assertIn("summary", nodes[0])
         self.assertIn("quality_gate", loaded)
         self.assertIn("report_data_pack_summary", loaded)
         self.assertIn("report_modules", loaded)
         self.assertIn("final_decision", loaded)
         self.assertIn("committee", loaded)
         self.assertIn("metric_snapshot", loaded)
+        self.assertIn("quality_dashboard", loaded)
+
+        # Export should support multiple formats for downstream delivery.
+        export_markdown = self.svc.report_export("", generated["report_id"], format="module_markdown")
+        self.assertEqual(str(export_markdown.get("format", "")), "module_markdown")
+        self.assertIn("模块化报告导出", str(export_markdown.get("content", "")))
+        export_json = self.svc.report_export("", generated["report_id"], format="json_bundle")
+        self.assertEqual(str(export_json.get("format", "")), "json_bundle")
+        self.assertIsInstance(export_json.get("json_bundle"), dict)
 
     def test_report_task_lifecycle(self) -> None:
         task = self.svc.report_task_create(
@@ -146,6 +165,8 @@ class ServiceTestCase(unittest.TestCase):
                 self.assertIn("report_modules", payload)
                 self.assertIn("final_decision", payload)
                 self.assertIn("committee", payload)
+                self.assertIn("analysis_nodes", payload)
+                self.assertIn("quality_dashboard", payload)
 
     def test_ingest_endpoints(self) -> None:
         daily = self.svc.ingest_market_daily(["SH600000", "SZ000001"])

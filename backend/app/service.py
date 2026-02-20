@@ -3002,6 +3002,7 @@ class AShareAgentService:
         quality_gate: dict[str, Any],
         intel: dict[str, Any],
         quality_reasons: list[str],
+        analysis_nodes: list[dict[str, Any]] | None = None,
     ) -> dict[str, str]:
         """Build committee-style summary for product display."""
         signal = str(final_decision.get("signal", "hold"))
@@ -3009,15 +3010,280 @@ class AShareAgentService:
         risk_level = str(intel.get("risk_level", "medium") or "medium")
         catalysts = len(list(intel.get("key_catalysts", []) or []))
         risk_watch = len(list(intel.get("risk_watch", []) or []))
+        node_by_id = {
+            str(row.get("node_id", "")).strip().lower(): row
+            for row in list(analysis_nodes or [])
+            if isinstance(row, dict) and str(row.get("node_id", "")).strip()
+        }
+        research_node = dict(node_by_id.get("research_summarizer", {}) or {})
+        risk_node = dict(node_by_id.get("risk_arbiter", {}) or {})
         research_note = (
             f"研究汇总：当前倾向 `{signal}`（置信度 {confidence:.2f}），"
             f"已识别催化 {catalysts} 项、风险观察 {risk_watch} 项。"
         )
+        if str(research_node.get("summary", "")).strip():
+            research_note = str(research_node.get("summary", "")).strip()
         risk_note = (
             f"风险仲裁：风险等级 `{risk_level}`，质量门控 `{quality_gate.get('status', 'unknown')}`，"
             f"质量原因 {', '.join(quality_reasons) if quality_reasons else 'none'}。"
         )
+        if str(risk_node.get("summary", "")).strip():
+            risk_note = str(risk_node.get("summary", "")).strip()
         return {"research_note": research_note, "risk_note": risk_note}
+
+    def _build_report_research_summarizer_node(
+        self,
+        *,
+        code: str,
+        query_result: dict[str, Any],
+        overview: dict[str, Any],
+        intel: dict[str, Any],
+        final_decision: dict[str, Any],
+        quality_gate: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build nodeized research synthesizer output for downstream display/bridging."""
+        citations = list(query_result.get("citations", []) or [])
+        citation_refs = [str(row.get("source_id", "")).strip() for row in citations if str(row.get("source_id", "")).strip()]
+        news_rows = list(overview.get("news", []) or [])
+        catalysts = list(intel.get("key_catalysts", []) or [])
+        quality_reasons = [str(x).strip() for x in list(quality_gate.get("reasons", []) or []) if str(x).strip()]
+        summary_parts = [
+            f"研究汇总器：{code} 当前信号 `{self._normalize_report_signal(str(final_decision.get('signal', 'hold')))}`",
+            f"证据引用 {len(citation_refs)} 条，新闻样本 {len(news_rows)} 条，催化事件 {len(catalysts)} 条。",
+        ]
+        if quality_reasons:
+            summary_parts.append(f"质量门控提示：{','.join(quality_reasons[:3])}")
+        highlights: list[str] = []
+        if str(query_result.get("answer", "")).strip():
+            highlights.append(str(query_result.get("answer", "")).strip()[:220])
+        for row in catalysts[:2]:
+            item = str(row.get("summary", row.get("title", ""))).strip()
+            if item:
+                highlights.append(item[:180])
+        for row in news_rows[-2:]:
+            title = str(row.get("title", "")).strip()
+            if title:
+                highlights.append(title[:160])
+        return {
+            "node_id": "research_summarizer",
+            "title": "研究汇总器",
+            "status": "ready" if citation_refs else "degraded",
+            "signal": self._normalize_report_signal(str(final_decision.get("signal", "hold"))),
+            "confidence": round(
+                max(
+                    0.2,
+                    min(
+                        self._safe_float(final_decision.get("confidence", 0.5), default=0.5),
+                        self._safe_float(quality_gate.get("score", 0.5), default=0.5),
+                    ),
+                ),
+                4,
+            ),
+            "summary": " ".join(summary_parts)[:320],
+            "highlights": highlights[:6],
+            "evidence_refs": citation_refs[:8],
+            "coverage": {
+                "citation_count": int(len(citation_refs)),
+                "news_count": int(len(news_rows)),
+                "catalyst_count": int(len(catalysts)),
+            },
+            "degrade_reason": quality_reasons,
+        }
+
+    def _build_report_risk_arbiter_node(
+        self,
+        *,
+        intel: dict[str, Any],
+        quality_gate: dict[str, Any],
+        final_decision: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build nodeized risk arbiter output with actionable guardrails."""
+        risk_level = str(intel.get("risk_level", "medium") or "medium").strip().lower() or "medium"
+        risk_watch = list(intel.get("risk_watch", []) or [])
+        quality_status = str(quality_gate.get("status", "unknown") or "unknown")
+        quality_score = self._safe_float(quality_gate.get("score", 0.0), default=0.0)
+        quality_reasons = [str(x).strip() for x in list(quality_gate.get("reasons", []) or []) if str(x).strip()]
+        signal = self._normalize_report_signal(str(final_decision.get("signal", "hold")))
+
+        guardrails: list[str] = [
+            "若单日波动显著放大，降低新增仓位节奏。",
+            "遇到关键风险事件落地，先执行风险限额再更新观点。",
+        ]
+        if signal == "buy":
+            guardrails.insert(0, "采用分批建仓，避免单次重仓暴露。")
+        if signal == "reduce":
+            guardrails.insert(0, "优先削减高波动仓位并保留观察仓。")
+        if quality_status != "pass":
+            guardrails.append("当前处于质量降级，补齐缺失数据前不放大风险敞口。")
+
+        risk_signal = "warning" if risk_level in {"high", "very_high"} or quality_status != "pass" else "normal"
+        veto = bool(risk_signal == "warning" and (signal == "buy" and quality_status != "pass"))
+        summary = (
+            f"风险仲裁器：风险等级 `{risk_level}`，风险观察 {len(risk_watch)} 项，"
+            f"质量门控 `{quality_status}`（{quality_score:.2f}）。"
+        )
+        if quality_reasons:
+            summary += f" 主要降级原因：{','.join(quality_reasons[:3])}。"
+
+        return {
+            "node_id": "risk_arbiter",
+            "title": "风险仲裁器",
+            "status": "ready",
+            "signal": risk_signal,
+            "confidence": round(max(0.2, min(1.0, max(quality_score, 0.35))), 4),
+            "summary": summary[:320],
+            "highlights": [
+                str(row.get("summary", row.get("title", ""))).strip()[:180]
+                for row in risk_watch[:3]
+                if str(row.get("summary", row.get("title", ""))).strip()
+            ],
+            "coverage": {
+                "risk_watch_count": int(len(risk_watch)),
+                "quality_status": quality_status,
+            },
+            "degrade_reason": quality_reasons,
+            "guardrails": guardrails[:6],
+            "veto": veto,
+        }
+
+    def _normalize_report_analysis_nodes(self, nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Normalize analysis node payload to stable schema."""
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in nodes:
+            if not isinstance(row, dict):
+                continue
+            node_id = str(row.get("node_id", "")).strip().lower()
+            if not node_id or node_id in seen:
+                continue
+            seen.add(node_id)
+            highlights = [self._sanitize_report_text(str(x).strip()) for x in list(row.get("highlights", []) or []) if str(x).strip()]
+            evidence_refs = [str(x).strip() for x in list(row.get("evidence_refs", []) or []) if str(x).strip()]
+            degrade_reason = [str(x).strip() for x in list(row.get("degrade_reason", []) or []) if str(x).strip()]
+            guardrails = [self._sanitize_report_text(str(x).strip()) for x in list(row.get("guardrails", []) or []) if str(x).strip()]
+            normalized.append(
+                {
+                    "node_id": node_id,
+                    "title": self._sanitize_report_text(str(row.get("title", node_id)).strip() or node_id),
+                    "status": str(row.get("status", "ready")).strip().lower() or "ready",
+                    "signal": self._normalize_report_signal(str(row.get("signal", "hold"))),
+                    "confidence": round(max(0.0, min(1.0, self._safe_float(row.get("confidence", 0.5), default=0.5))), 4),
+                    "summary": self._sanitize_report_text(str(row.get("summary", "")).strip()),
+                    "highlights": highlights[:8],
+                    "evidence_refs": evidence_refs[:12],
+                    "coverage": dict(row.get("coverage", {}) or {}),
+                    "degrade_reason": degrade_reason,
+                    "guardrails": guardrails[:8],
+                    "veto": bool(row.get("veto", False)),
+                }
+            )
+        return normalized
+
+    def _build_report_quality_dashboard(
+        self,
+        *,
+        report_modules: list[dict[str, Any]],
+        quality_gate: dict[str, Any],
+        final_decision: dict[str, Any],
+        analysis_nodes: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Build module-level quality board with coverage/evidence/consistency metrics."""
+        modules = self._normalize_report_modules(report_modules)
+        node_rows = self._normalize_report_analysis_nodes(list(analysis_nodes or []))
+        module_count = len(modules)
+        module_scores = [self._safe_float(row.get("module_quality_score", 0.0), default=0.0) for row in modules]
+        avg_module_score = sum(module_scores) / float(module_count) if module_count else 0.0
+        min_module_score = min(module_scores) if module_scores else 0.0
+        coverage_full = sum(1 for row in modules if str((row.get("coverage", {}) or {}).get("status", "")).strip().lower() == "full")
+        coverage_ratio = float(coverage_full) / float(module_count) if module_count else 0.0
+        unique_evidence = {
+            str(item).strip()
+            for row in modules
+            for item in list(row.get("evidence_refs", []) or [])
+            if str(item).strip()
+        }
+        evidence_density = float(len(unique_evidence)) / float(module_count) if module_count else 0.0
+        decision_confidence = self._safe_float(final_decision.get("confidence", 0.5), default=0.5)
+        consistency_score = max(0.0, min(1.0, 1.0 - abs(decision_confidence - avg_module_score)))
+        node_veto = any(bool(row.get("veto", False)) for row in node_rows)
+        quality_gate_score = self._safe_float(quality_gate.get("score", 0.0), default=0.0)
+
+        overall_score = (
+            avg_module_score * 0.38
+            + coverage_ratio * 0.22
+            + min(1.0, evidence_density / 2.0) * 0.15
+            + consistency_score * 0.15
+            + quality_gate_score * 0.10
+        )
+        overall_score = max(0.0, min(1.0, overall_score))
+        status = "pass" if overall_score >= 0.75 and not node_veto else "degraded" if overall_score >= 0.5 else "critical"
+        low_quality_modules = [str(row.get("module_id", "")) for row in modules if self._safe_float(row.get("module_quality_score", 0.0), default=0.0) < 0.45]
+        reasons: list[str] = [str(x).strip() for x in list(quality_gate.get("reasons", []) or []) if str(x).strip()]
+        if node_veto:
+            reasons.append("risk_arbiter_veto")
+        reasons = list(dict.fromkeys(reasons))
+        return {
+            "status": status,
+            "overall_score": round(overall_score, 4),
+            "module_count": int(module_count),
+            "avg_module_quality": round(avg_module_score, 4),
+            "min_module_quality": round(min_module_score, 4),
+            "coverage_ratio": round(coverage_ratio, 4),
+            "evidence_ref_count": int(len(unique_evidence)),
+            "evidence_density": round(evidence_density, 4),
+            "consistency_score": round(consistency_score, 4),
+            "low_quality_modules": low_quality_modules[:8],
+            "reasons": reasons,
+            "node_veto": node_veto,
+        }
+
+    def _render_report_module_markdown(self, report_payload: dict[str, Any]) -> str:
+        """Render report payload into moduleized markdown for export."""
+        report_id = str(report_payload.get("report_id", "")).strip()
+        stock_code = str(report_payload.get("stock_code", "")).strip().upper() or "UNKNOWN"
+        report_type = str(report_payload.get("report_type", "")).strip() or "report"
+        final_decision = dict(report_payload.get("final_decision", {}) or {})
+        committee = dict(report_payload.get("committee", {}) or {})
+        quality_dashboard = dict(report_payload.get("quality_dashboard", {}) or {})
+        modules = self._normalize_report_modules(list(report_payload.get("report_modules", []) or []))
+        lines = [
+            f"# {stock_code} 模块化报告导出",
+            "",
+            f"- report_id: {report_id or 'n/a'}",
+            f"- report_type: {report_type}",
+            f"- signal: {self._normalize_report_signal(str(final_decision.get('signal', 'hold')))}",
+            f"- confidence: {self._safe_float(final_decision.get('confidence', 0.0), default=0.0):.2f}",
+            "",
+            "## 委员会纪要",
+            f"- 研究汇总: {self._sanitize_report_text(str(committee.get('research_note', '')).strip()) or 'n/a'}",
+            f"- 风险仲裁: {self._sanitize_report_text(str(committee.get('risk_note', '')).strip()) or 'n/a'}",
+            "",
+            "## 质量看板",
+            f"- status: {str(quality_dashboard.get('status', 'unknown'))}",
+            f"- overall_score: {self._safe_float(quality_dashboard.get('overall_score', 0.0), default=0.0):.2f}",
+            f"- coverage_ratio: {self._safe_float(quality_dashboard.get('coverage_ratio', 0.0), default=0.0):.2f}",
+            f"- consistency_score: {self._safe_float(quality_dashboard.get('consistency_score', 0.0), default=0.0):.2f}",
+            f"- low_quality_modules: {','.join(list(quality_dashboard.get('low_quality_modules', []) or [])) or 'none'}",
+            "",
+        ]
+        for module in modules:
+            module_id = str(module.get("module_id", "")).strip() or "module"
+            title = self._sanitize_report_text(str(module.get("title", module_id)).strip() or module_id)
+            content = self._sanitize_report_text(str(module.get("content", "")).strip())
+            coverage = dict(module.get("coverage", {}) or {})
+            lines.extend(
+                [
+                    f"## {title} ({module_id})",
+                    f"- confidence: {self._safe_float(module.get('confidence', 0.0), default=0.0):.2f}",
+                    f"- module_quality_score: {self._safe_float(module.get('module_quality_score', 0.0), default=0.0):.2f}",
+                    f"- coverage: {str(coverage.get('status', 'unknown'))}/{int(coverage.get('data_points', 0) or 0)}",
+                    f"- degrade_reason: {','.join(list(module.get('degrade_reason', []) or [])) or 'none'}",
+                    "",
+                    content or "该模块暂无可用内容。",
+                    "",
+                ]
+            )
+        return "\n".join(lines).strip() + "\n"
 
     def _build_fallback_report_modules(
         self,
@@ -3179,6 +3445,9 @@ class AShareAgentService:
             }
             confidence = max(0.0, min(1.0, self._safe_float(row.get("confidence", 0.5), default=0.5)))
             degrade_reason = [str(x).strip() for x in list(row.get("degrade_reason", []) or []) if str(x).strip()]
+            coverage_factor = {"full": 1.0, "partial": 0.78, "missing": 0.4}.get(str(coverage["status"]).lower(), 0.7)
+            degrade_penalty = min(0.35, 0.08 * float(len(degrade_reason)))
+            module_quality_score = max(0.0, min(1.0, confidence * coverage_factor - degrade_penalty))
             normalized.append(
                 {
                     "module_id": module_id,
@@ -3188,6 +3457,8 @@ class AShareAgentService:
                     "coverage": coverage,
                     "confidence": round(confidence, 4),
                     "degrade_reason": degrade_reason,
+                    "module_quality_score": round(module_quality_score, 4),
+                    "module_degrade_code": str(degrade_reason[0]) if degrade_reason else "",
                 }
             )
         return normalized
@@ -3261,11 +3532,30 @@ class AShareAgentService:
             quality_gate=quality_gate,
             quality_reasons=quality_reasons,
         )
+        # Nodeized committee pipeline: explicitly separate research synthesis and risk arbitration.
+        analysis_nodes = self._normalize_report_analysis_nodes(
+            [
+                self._build_report_research_summarizer_node(
+                    code=code,
+                    query_result=query_result,
+                    overview=overview,
+                    intel=intel,
+                    final_decision=final_decision,
+                    quality_gate=quality_gate,
+                ),
+                self._build_report_risk_arbiter_node(
+                    intel=intel,
+                    quality_gate=quality_gate,
+                    final_decision=final_decision,
+                ),
+            ]
+        )
         committee = self._build_report_committee_notes(
             final_decision=final_decision,
             quality_gate=quality_gate,
             intel=intel,
             quality_reasons=quality_reasons,
+            analysis_nodes=analysis_nodes,
         )
         report_modules = self._build_fallback_report_modules(
             code=code,
@@ -3277,6 +3567,12 @@ class AShareAgentService:
             quality_gate=quality_gate,
             quality_reasons=quality_reasons,
             final_decision=final_decision,
+        )
+        quality_dashboard = self._build_report_quality_dashboard(
+            report_modules=report_modules,
+            quality_gate=quality_gate,
+            final_decision=final_decision,
+            analysis_nodes=analysis_nodes,
         )
         module_order = [
             "executive_summary",
@@ -3526,6 +3822,13 @@ class AShareAgentService:
             "research_note": self._sanitize_report_text(str(committee.get("research_note", "")).strip() or "研究汇总暂不可用。"),
             "risk_note": self._sanitize_report_text(str(committee.get("risk_note", "")).strip() or "风险仲裁暂不可用。"),
         }
+        analysis_nodes = self._normalize_report_analysis_nodes(list(analysis_nodes or []))
+        quality_dashboard = self._build_report_quality_dashboard(
+            report_modules=report_modules,
+            quality_gate=quality_gate,
+            final_decision=final_decision,
+            analysis_nodes=analysis_nodes,
+        )
 
         # Project module payload into report_sections for backward-compatible renderers.
         for module in report_modules:
@@ -3557,6 +3860,20 @@ class AShareAgentService:
                 "section_id": "metric_snapshot",
                 "title": "指标快照",
                 "content": json.dumps(metric_snapshot, ensure_ascii=False),
+            }
+        )
+        report_sections.append(
+            {
+                "section_id": "analysis_nodes",
+                "title": "研究与风险节点",
+                "content": json.dumps(analysis_nodes, ensure_ascii=False),
+            }
+        )
+        report_sections.append(
+            {
+                "section_id": "quality_dashboard",
+                "title": "质量评估看板",
+                "content": json.dumps(quality_dashboard, ensure_ascii=False),
             }
         )
 
@@ -3598,6 +3915,8 @@ class AShareAgentService:
             "committee": committee,
             "final_decision": final_decision,
             "metric_snapshot": metric_snapshot,
+            "analysis_nodes": analysis_nodes,
+            "quality_dashboard": quality_dashboard,
             "confidence_attribution": {
                 "citation_count": len(list(query_result.get("citations", []) or [])),
                 "history_sample_size": history_sample_size,
@@ -3646,6 +3965,8 @@ class AShareAgentService:
         resp["committee"] = committee
         resp["final_decision"] = final_decision
         resp["metric_snapshot"] = metric_snapshot
+        resp["analysis_nodes"] = analysis_nodes
+        resp["quality_dashboard"] = quality_dashboard
         resp["confidence_attribution"] = {
             "citation_count": len(list(query_result.get("citations", []) or [])),
             "history_sample_size": history_sample_size,
@@ -3678,6 +3999,44 @@ class AShareAgentService:
         if not report:
             return {"error": "not_found", "report_id": report_id}
         return self._sanitize_report_payload(dict(report))
+
+    def _latest_report_context(self, stock_code: str) -> dict[str, Any]:
+        """Get latest in-memory report context for one stock to assist DeepThink rounds."""
+        code = str(stock_code or "").strip().upper()
+        if not code:
+            return {"available": False}
+        latest: dict[str, Any] | None = None
+        # Iterate reverse insertion order to find newest matching report quickly.
+        for value in reversed(list(self._reports.values())):
+            if not isinstance(value, dict):
+                continue
+            row_code = str(value.get("stock_code", "")).strip().upper()
+            if row_code == code:
+                latest = value
+                break
+        if not latest:
+            return {"available": False, "stock_code": code}
+        decision = dict(latest.get("final_decision", {}) or {})
+        committee = dict(latest.get("committee", {}) or {})
+        node_map = {
+            str(row.get("node_id", "")).strip().lower(): row
+            for row in list(latest.get("analysis_nodes", []) or [])
+            if isinstance(row, dict) and str(row.get("node_id", "")).strip()
+        }
+        research_node = dict(node_map.get("research_summarizer", {}) or {})
+        risk_node = dict(node_map.get("risk_arbiter", {}) or {})
+        return {
+            "available": True,
+            "stock_code": code,
+            "report_id": str(latest.get("report_id", "")),
+            "signal": self._normalize_report_signal(str(decision.get("signal", "hold"))),
+            "confidence": max(0.0, min(1.0, self._safe_float(decision.get("confidence", 0.5), default=0.5))),
+            "rationale": str(decision.get("rationale", ""))[:400],
+            "research_note": str(committee.get("research_note", ""))[:300],
+            "risk_note": str(committee.get("risk_note", ""))[:300],
+            "research_summary": str(research_node.get("summary", ""))[:280],
+            "risk_summary": str(risk_node.get("summary", ""))[:280],
+        }
 
     def _sanitize_report_text(self, raw: str) -> str:
         """Normalize known mojibake fragments in report-facing Chinese text."""
@@ -3738,6 +4097,12 @@ class AShareAgentService:
         if module_rows:
             body["report_modules"] = self._normalize_report_modules(module_rows)
 
+        node_rows: list[dict[str, Any]] = []
+        for row in list(body.get("analysis_nodes", []) or []):
+            if isinstance(row, dict):
+                node_rows.append(dict(row))
+        body["analysis_nodes"] = self._normalize_report_analysis_nodes(node_rows)
+
         committee = dict(body.get("committee", {}) or {})
         if committee:
             body["committee"] = {
@@ -3781,6 +4146,12 @@ class AShareAgentService:
                 else "Report quality is normal.",
             }
         body["degrade"] = degrade
+        body["quality_dashboard"] = self._build_report_quality_dashboard(
+            report_modules=list(body.get("report_modules", []) or []),
+            quality_gate=dict(body.get("quality_gate", {}) or {}),
+            final_decision=dict(body.get("final_decision", {}) or {}),
+            analysis_nodes=list(body.get("analysis_nodes", []) or []),
+        )
         if "result_level" not in body:
             body["result_level"] = "full"
         return body
@@ -3865,6 +4236,36 @@ class AShareAgentService:
                 "invalidation_conditions": ["full_report_ready"],
                 "execution_plan": ["等待完整报告结果", "优先核验数据缺口后再决策"],
             },
+            "analysis_nodes": [
+                {
+                    "node_id": "research_summarizer",
+                    "title": "研究汇总器",
+                    "status": "degraded",
+                    "signal": "hold",
+                    "confidence": 0.45,
+                    "summary": "研究汇总器：当前仅有 partial 证据，结论仅供预览。",
+                    "highlights": ["等待 full 报告补齐核心证据后再更新结论。"],
+                    "evidence_refs": [str(item.get("source_id", "")) for item in citations[:4] if str(item.get("source_id", "")).strip()],
+                    "coverage": {"citation_count": int(len(citations))},
+                    "degrade_reason": ["partial_result"],
+                    "guardrails": [],
+                    "veto": False,
+                },
+                {
+                    "node_id": "risk_arbiter",
+                    "title": "风险仲裁器",
+                    "status": "ready",
+                    "signal": "warning",
+                    "confidence": 0.52,
+                    "summary": "风险仲裁器：partial 阶段默认保持风控优先，不建议执行重仓动作。",
+                    "highlights": ["完整风险矩阵未生成前，维持观望仓位。"],
+                    "evidence_refs": [],
+                    "coverage": {"risk_watch_count": 0, "quality_status": "degraded"},
+                    "degrade_reason": ["partial_result"],
+                    "guardrails": ["等待 full 报告后再执行仓位动作。"],
+                    "veto": True,
+                },
+            ],
             "metric_snapshot": {
                 "history_sample_size": 0,
                 "news_count": 0,
@@ -3878,6 +4279,20 @@ class AShareAgentService:
                 "status": "degraded",
                 "score": 0.55,
                 "reasons": ["partial_result"],
+            },
+            "quality_dashboard": {
+                "status": "degraded",
+                "overall_score": 0.48,
+                "module_count": 3,
+                "avg_module_quality": 0.43,
+                "min_module_quality": 0.38,
+                "coverage_ratio": 0.0,
+                "evidence_ref_count": int(len(citations)),
+                "evidence_density": round(float(len(citations)) / 3.0, 4) if citations else 0.0,
+                "consistency_score": 0.72,
+                "low_quality_modules": ["executive_summary", "risk_matrix", "execution_plan"],
+                "reasons": ["partial_result"],
+                "node_veto": True,
             },
             "report_data_pack_summary": {
                 "as_of": datetime.now(timezone.utc).isoformat(),
@@ -3938,6 +4353,7 @@ class AShareAgentService:
             "data_pack_status": data_pack_status,
             "data_pack_missing": missing_data,
             "quality_gate_detail": dict(best_result.get("quality_gate", {}) or {}),
+            "report_quality_dashboard": dict(best_result.get("quality_dashboard", {}) or {}),
         }
 
     def _run_report_task(self, task_id: str) -> None:
@@ -6301,12 +6717,58 @@ class AShareAgentService:
     def report_versions(self, token: str, report_id: str) -> list[dict[str, Any]]:
         return self.web.report_versions(token, report_id)
 
-    def report_export(self, token: str, report_id: str) -> dict[str, Any]:
+    def report_export(self, token: str, report_id: str, *, format: str = "markdown") -> dict[str, Any]:
         payload = self.web.report_export(token, report_id)
         if "error" in payload:
             return payload
-        payload["markdown"] = self._sanitize_report_text(str(payload.get("markdown", "")))
-        return payload
+        export_format = str(format or "markdown").strip().lower() or "markdown"
+        if export_format not in {"markdown", "module_markdown", "json_bundle"}:
+            raise ValueError("format must be one of: markdown, module_markdown, json_bundle")
+
+        # Prefer in-memory enriched payload so export can include modules/quality board.
+        cached = self._reports.get(report_id)
+        report_payload = self._sanitize_report_payload(dict(cached)) if isinstance(cached, dict) else {}
+        report_payload["report_id"] = report_id
+        report_payload["version"] = int(payload.get("version", 0) or 0)
+        if not str(report_payload.get("markdown", "")).strip():
+            report_payload["markdown"] = self._sanitize_report_text(str(payload.get("markdown", "")))
+
+        module_markdown = self._render_report_module_markdown(report_payload)
+        json_bundle = {
+            "report_id": report_id,
+            "version": report_payload.get("version", 0),
+            "stock_code": str(report_payload.get("stock_code", "")),
+            "report_type": str(report_payload.get("report_type", "")),
+            "final_decision": dict(report_payload.get("final_decision", {}) or {}),
+            "committee": dict(report_payload.get("committee", {}) or {}),
+            "report_modules": list(report_payload.get("report_modules", []) or []),
+            "analysis_nodes": list(report_payload.get("analysis_nodes", []) or []),
+            "quality_dashboard": dict(report_payload.get("quality_dashboard", {}) or {}),
+            "metric_snapshot": dict(report_payload.get("metric_snapshot", {}) or {}),
+            "quality_gate": dict(report_payload.get("quality_gate", {}) or {}),
+        }
+        if export_format == "module_markdown":
+            content = module_markdown
+            media_type = "text/markdown; charset=utf-8"
+        elif export_format == "json_bundle":
+            content = json.dumps(json_bundle, ensure_ascii=False, indent=2)
+            media_type = "application/json; charset=utf-8"
+        else:
+            content = self._sanitize_report_text(str(report_payload.get("markdown", "")))
+            media_type = "text/markdown; charset=utf-8"
+
+        return {
+            "report_id": report_id,
+            "version": report_payload.get("version", 0),
+            "format": export_format,
+            "media_type": media_type,
+            "content": content,
+            # Keep legacy field for older clients that still read markdown directly.
+            "markdown": content if export_format != "json_bundle" else self._sanitize_report_text(str(report_payload.get("markdown", ""))),
+            "module_markdown": module_markdown,
+            "json_bundle": json_bundle,
+            "quality_dashboard": dict(report_payload.get("quality_dashboard", {}) or {}),
+        }
 
     def docs_list(self, token: str) -> list[dict[str, Any]]:
         return self.web.docs_list(token)
@@ -6736,6 +7198,20 @@ class AShareAgentService:
         round_id = f"dtr-{uuid.uuid4().hex[:12]}"
         question = str(payload.get("question", session.get("question", "")))
         stock_codes = [str(x).upper() for x in payload.get("stock_codes", session.get("stock_codes", []))]
+        report_context = self._latest_report_context(stock_codes[0] if stock_codes else "")
+        if bool(report_context.get("available", False)):
+            # Inject prior report committee hints to reduce context switching between modules.
+            question = (
+                f"{question}\n"
+                "【最近报告上下文】\n"
+                f"- signal: {str(report_context.get('signal', 'hold'))}\n"
+                f"- confidence: {float(report_context.get('confidence', 0.0) or 0.0):.2f}\n"
+                f"- research_note: {str(report_context.get('research_note', ''))}\n"
+                f"- risk_note: {str(report_context.get('risk_note', ''))}\n"
+                f"- research_summary: {str(report_context.get('research_summary', ''))}\n"
+                f"- risk_summary: {str(report_context.get('risk_summary', ''))}\n"
+                f"- rationale: {str(report_context.get('rationale', ''))}"
+            )
         archive_policy = self._resolve_deep_archive_retention_policy(
             session=session,
             requested_max_events=payload.get("archive_max_events"),
@@ -6829,6 +7305,19 @@ class AShareAgentService:
                     "message": "Task planning completed. Starting multi-agent execution.",
                 },
             )
+            if bool(report_context.get("available", False)):
+                yield emit(
+                    "report_context",
+                    {
+                        "report_id": str(report_context.get("report_id", "")),
+                        "signal": str(report_context.get("signal", "hold")),
+                        "confidence": float(report_context.get("confidence", 0.0) or 0.0),
+                        "research_note": str(report_context.get("research_note", "")),
+                        "risk_note": str(report_context.get("risk_note", "")),
+                        "research_summary": str(report_context.get("research_summary", "")),
+                        "risk_summary": str(report_context.get("risk_summary", "")),
+                    },
+                )
 
             if bool(budget_usage.get("warn")):
                 yield emit("budget_warning", dict(budget_usage))
@@ -6988,7 +7477,22 @@ class AShareAgentService:
                     )
                     for opinion in core_opinions
                 ]
-                opinions = normalized_core + extra_opinions
+                report_opinions: list[dict[str, Any]] = []
+                if bool(report_context.get("available", False)):
+                    report_opinions.append(
+                        self._normalize_deep_opinion(
+                            agent="report_committee_agent",
+                            signal=str(report_context.get("signal", "hold")),
+                            confidence=float(report_context.get("confidence", 0.5) or 0.5),
+                            reason=(
+                                "Reusing latest report committee context for cross-module continuity: "
+                                + str(report_context.get("rationale", ""))
+                            )[:420],
+                            evidence_ids=[str(report_context.get("report_id", ""))] if str(report_context.get("report_id", "")) else [],
+                            risk_tags=["report_context_bridge"],
+                        )
+                    )
+                opinions = normalized_core + report_opinions + extra_opinions
                 intel_decision = intel_payload.get("decision_adjustment", {})
                 if isinstance(intel_decision, dict):
                     intel_signal = str(intel_decision.get("signal_bias", "hold")).strip().lower()

@@ -48,6 +48,7 @@ type ReportTask = {
   data_pack_status?: "ready" | "partial" | "failed" | string;
   data_pack_missing?: string[];
   quality_gate_detail?: Record<string, unknown>;
+  report_quality_dashboard?: Record<string, unknown>;
 };
 
 type TaskResult = {
@@ -68,6 +69,8 @@ type ReportModule = {
   };
   confidence?: number;
   degrade_reason?: string[];
+  module_quality_score?: number;
+  module_degrade_code?: string;
 };
 
 type FinalDecision = {
@@ -82,6 +85,20 @@ type CommitteeNotes = {
   research_note?: string;
   risk_note?: string;
 };
+
+type ReportAnalysisNode = {
+  node_id: string;
+  title: string;
+  status?: string;
+  signal?: string;
+  confidence?: number;
+  summary?: string;
+  highlights?: string[];
+  guardrails?: string[];
+  veto?: boolean;
+};
+
+type ReportExportFormat = "markdown" | "module_markdown" | "json_bundle";
 
 function statusColor(status: string): string {
   if (status === "ok" || status === "completed") return "success";
@@ -123,6 +140,9 @@ export default function ReportsPage() {
   const [selectedDecision, setSelectedDecision] = useState<FinalDecision | null>(null);
   const [selectedCommittee, setSelectedCommittee] = useState<CommitteeNotes | null>(null);
   const [selectedMetrics, setSelectedMetrics] = useState<Record<string, unknown>>({});
+  const [selectedAnalysisNodes, setSelectedAnalysisNodes] = useState<ReportAnalysisNode[]>([]);
+  const [selectedQualityDashboard, setSelectedQualityDashboard] = useState<Record<string, unknown>>({});
+  const [exportFormat, setExportFormat] = useState<ReportExportFormat>("markdown");
 
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -135,6 +155,7 @@ export default function ReportsPage() {
   const taskQualityStatus = String(taskQualityGate.status ?? "unknown");
   const taskQualityScore = Number(taskQualityGate.score ?? 0);
   const taskQualityReasons = Array.isArray(taskQualityGate.reasons) ? taskQualityGate.reasons.map((item) => String(item)) : [];
+  const taskQualityDashboard = parseObject(task?.report_quality_dashboard);
 
   const heroSlides = [
     { src: "/assets/images/nyse-floor-1963.jpg", alt: "Archive report", caption: "档案回溯" },
@@ -201,6 +222,8 @@ export default function ReportsPage() {
         } : undefined,
         confidence: Number(row.confidence ?? 0),
         degrade_reason: Array.isArray(row.degrade_reason) ? row.degrade_reason.map((item) => String(item)) : [],
+        module_quality_score: Number(row.module_quality_score ?? 0),
+        module_degrade_code: String(row.module_degrade_code ?? ""),
       }))
       .filter((row) => Boolean(row.module_id));
     setSelectedModules(normalizedModules);
@@ -222,6 +245,23 @@ export default function ReportsPage() {
       risk_note: String(committee.risk_note ?? ""),
     } : null);
     setSelectedMetrics(parseObject(result.metric_snapshot));
+    const nodeRows = Array.isArray(result.analysis_nodes) ? result.analysis_nodes : [];
+    const normalizedNodes: ReportAnalysisNode[] = nodeRows
+      .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === "object")
+      .map((row) => ({
+        node_id: String(row.node_id ?? "").trim().toLowerCase(),
+        title: String(row.title ?? row.node_id ?? "节点"),
+        status: String(row.status ?? ""),
+        signal: String(row.signal ?? ""),
+        confidence: Number(row.confidence ?? 0),
+        summary: String(row.summary ?? ""),
+        highlights: Array.isArray(row.highlights) ? row.highlights.map((item) => String(item)) : [],
+        guardrails: Array.isArray(row.guardrails) ? row.guardrails.map((item) => String(item)) : [],
+        veto: Boolean(row.veto),
+      }))
+      .filter((row) => Boolean(row.node_id));
+    setSelectedAnalysisNodes(normalizedNodes);
+    setSelectedQualityDashboard(parseObject(result.quality_dashboard));
   }
 
   async function syncTaskResult(taskId: string) {
@@ -305,8 +345,17 @@ export default function ReportsPage() {
     setLoading(true);
     setError("");
     try {
-      const body = (await fetchJson(`/v1/reports/${reportId}/export`, { method: "POST" })) as { markdown?: string };
-      setSelectedMarkdown(String(body.markdown ?? ""));
+      const body = (await fetchJson(
+        `/v1/reports/${reportId}/export?format=${encodeURIComponent(exportFormat)}`,
+        { method: "POST" },
+      )) as { markdown?: string; content?: string; json_bundle?: Record<string, unknown> };
+      const content = typeof body.content === "string"
+        ? body.content
+        : exportFormat === "json_bundle"
+          ? JSON.stringify(parseObject(body.json_bundle), null, 2)
+          : String(body.markdown ?? "");
+      setSelectedMarkdown(content);
+      setSelectedRaw(JSON.stringify(body, null, 2));
       setActiveReportId(reportId);
     } catch (e) {
       setError(e instanceof Error ? e.message : "导出报告失败");
@@ -415,6 +464,11 @@ export default function ReportsPage() {
             </Text>
             {taskQualityScore > 0 ? <Text type="secondary">任务质量得分: {taskQualityScore.toFixed(2)}</Text> : null}
             {taskQualityReasons.length ? <Text type="secondary">任务质量原因: {taskQualityReasons.join("；")}</Text> : null}
+            {Object.keys(taskQualityDashboard).length ? (
+              <Text type="secondary">
+                质量看板: {String(taskQualityDashboard.status ?? "unknown")} / overall={Number(taskQualityDashboard.overall_score ?? 0).toFixed(2)}
+              </Text>
+            ) : null}
             <Progress percent={Math.max(0, Math.min(100, Number((Number(task.progress || 0) * 100).toFixed(1))))} strokeColor="#2563eb" />
             {taskDataPackMissing.length ? <Alert type="warning" showIcon message={`数据缺口: ${taskDataPackMissing.join("；")}`} /> : null}
             {task.error_message ? <Alert type="error" showIcon message={task.error_message} /> : null}
@@ -510,6 +564,10 @@ export default function ReportsPage() {
                           覆盖状态: {String(module.coverage?.status ?? "unknown")} / 数据点: {Number(module.coverage?.data_points ?? 0)}
                         </Text>
                         <Text type="secondary">模块置信度: {Number(module.confidence ?? 0).toFixed(2)}</Text>
+                        <Text type="secondary">模块质量分: {Number(module.module_quality_score ?? 0).toFixed(2)}</Text>
+                        {module.module_degrade_code ? (
+                          <Text type="secondary">降级码: {module.module_degrade_code}</Text>
+                        ) : null}
                         {Array.isArray(module.degrade_reason) && module.degrade_reason.length > 0 ? (
                           <Text type="secondary">降级原因: {module.degrade_reason.join("；")}</Text>
                         ) : null}
@@ -521,25 +579,85 @@ export default function ReportsPage() {
             </Card>
           </Col>
           <Col xs={24} lg={8}>
-            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>指标快照</span>}>
-              {Object.keys(selectedMetrics).length === 0 ? (
-                <Alert type="info" showIcon message="暂无指标快照" />
-              ) : (
-                <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                  {Object.entries(selectedMetrics)
-                    .slice(0, 16)
-                    .map(([key, value]) => (
-                      <Text key={key} type="secondary">{key}: {String(value)}</Text>
-                    ))}
-                </Space>
-              )}
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>指标快照与质量看板</span>}>
+              <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                {Object.keys(selectedQualityDashboard).length ? (
+                  <>
+                    <Text type="secondary">
+                      看板状态: <Tag color={statusColor(String(selectedQualityDashboard.status ?? "unknown"))}>{String(selectedQualityDashboard.status ?? "unknown")}</Tag>
+                    </Text>
+                    <Text type="secondary">overall_score: {Number(selectedQualityDashboard.overall_score ?? 0).toFixed(2)}</Text>
+                    <Text type="secondary">coverage_ratio: {Number(selectedQualityDashboard.coverage_ratio ?? 0).toFixed(2)}</Text>
+                    <Text type="secondary">consistency_score: {Number(selectedQualityDashboard.consistency_score ?? 0).toFixed(2)}</Text>
+                    <Text type="secondary">evidence_ref_count: {Number(selectedQualityDashboard.evidence_ref_count ?? 0)}</Text>
+                  </>
+                ) : (
+                  <Alert type="info" showIcon message="暂无质量看板" />
+                )}
+                {Object.keys(selectedMetrics).length === 0 ? (
+                  <Alert type="info" showIcon message="暂无指标快照" />
+                ) : (
+                  <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                    {Object.entries(selectedMetrics)
+                      .slice(0, 16)
+                      .map(([key, value]) => (
+                        <Text key={key} type="secondary">{key}: {String(value)}</Text>
+                      ))}
+                  </Space>
+                )}
+              </Space>
             </Card>
           </Col>
         </Row>
       ) : null}
 
+      {selectedAnalysisNodes.length > 0 ? (
+        <Card className="premium-card" style={{ marginTop: 12 }} title={<span style={{ color: "#0f172a" }}>研究/风险节点</span>}>
+          <List
+            size="small"
+            dataSource={selectedAnalysisNodes}
+            renderItem={(node) => (
+              <List.Item>
+                <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                  <Text>
+                    {node.title} <Tag color={statusColor(String(node.status ?? "unknown"))}>{String(node.status ?? "unknown")}</Tag>
+                    <Tag color={statusColor(String(node.signal ?? "hold"))}>{String(node.signal ?? "hold")}</Tag>
+                  </Text>
+                  <Text type="secondary">置信度: {Number(node.confidence ?? 0).toFixed(2)}</Text>
+                  <Text type="secondary">{node.summary || "暂无摘要"}</Text>
+                  {Array.isArray(node.highlights) && node.highlights.length > 0 ? (
+                    <Text type="secondary">要点: {node.highlights.join("；")}</Text>
+                  ) : null}
+                  {Array.isArray(node.guardrails) && node.guardrails.length > 0 ? (
+                    <Text type="secondary">风控约束: {node.guardrails.join("；")}</Text>
+                  ) : null}
+                  {node.veto ? <Tag color="error">VETO</Tag> : null}
+                </Space>
+              </List.Item>
+            )}
+          />
+        </Card>
+      ) : null}
+
       <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.08 }}>
-        <Card className="premium-card" style={{ marginTop: 12 }} title={<span style={{ color: "#0f172a" }}>报告索引</span>}>
+        <Card
+          className="premium-card"
+          style={{ marginTop: 12 }}
+          title={<span style={{ color: "#0f172a" }}>报告索引</span>}
+          extra={(
+            <Select<ReportExportFormat>
+              size="small"
+              value={exportFormat}
+              onChange={(next) => setExportFormat(next)}
+              options={[
+                { label: "Markdown 导出", value: "markdown" },
+                { label: "模块化 Markdown", value: "module_markdown" },
+                { label: "JSON Bundle", value: "json_bundle" },
+              ]}
+              style={{ width: 180 }}
+            />
+          )}
+        >
           <List
             bordered
             dataSource={items}

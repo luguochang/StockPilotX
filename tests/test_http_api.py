@@ -269,6 +269,17 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("final_decision", report)
         self.assertIn("committee", report)
         self.assertIn("metric_snapshot", report)
+        self.assertIn("analysis_nodes", report)
+        self.assertIn("quality_dashboard", report)
+        modules = report.get("report_modules", [])
+        if isinstance(modules, list) and modules:
+            self.assertIn("module_quality_score", modules[0])
+            self.assertIn("module_degrade_code", modules[0])
+
+        export_code, export_body = self._post(f"/v1/reports/{report_id}/export?format=module_markdown", {})
+        self.assertEqual(export_code, 200)
+        self.assertEqual(str(export_body.get("format", "")), "module_markdown")
+        self.assertIn("模块化报告导出", str(export_body.get("content", "")))
 
     def test_report_task_endpoints(self) -> None:
         code, created = self._post(
@@ -303,6 +314,8 @@ class HttpApiTestCase(unittest.TestCase):
             self.assertIn("report_modules", payload)
             self.assertIn("final_decision", payload)
             self.assertIn("committee", payload)
+            self.assertIn("analysis_nodes", payload)
+            self.assertIn("quality_dashboard", payload)
 
     def test_ingest_market_daily(self) -> None:
         code, body = self._post("/v1/ingest/market-daily", {"stock_codes": ["SH600000", "SZ000001"]})

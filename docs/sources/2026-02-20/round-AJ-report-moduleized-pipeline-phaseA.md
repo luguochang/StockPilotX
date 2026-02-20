@@ -53,15 +53,42 @@
 - `test_report_generate_and_get` 增加新字段断言。
 - `test_report_task_endpoints` 增加任务结果新字段断言。
 
+### 2.4 增量优化（Phase B 完成）
+1. 报告模块质量分落地：`module_quality_score/module_degrade_code`
+- 在 `_normalize_report_modules` 统一产出模块级质量分，便于前端按模块识别“可用度”。
+2. 研究汇总器 + 风险仲裁器节点化
+- 新增 `_build_report_research_summarizer_node` 与 `_build_report_risk_arbiter_node`。
+- 报告输出新增 `analysis_nodes`，并回填到委员会纪要，形成可解释“研究-风控”双节点。
+3. DeepThink 读取最近报告上下文
+- 新增 `_latest_report_context`，按股票读取最近报告的 `final_decision + committee`。
+- 在 `deep_think_run_round_stream_events` 中：
+  - 通过 `report_context` 事件下发最近报告摘要；
+  - 将报告信号注入 `report_committee_agent` 观点，参与当轮仲裁；
+  - 追加 `research_summary/risk_summary` 进入跨轮上下文，减少模块间信息断层。
+
+### 2.5 增量优化（Phase C 完成）
+1. 报告导出格式增强
+- `POST /v1/reports/{report_id}/export` 支持 `format=markdown/module_markdown/json_bundle`。
+- 新增 `_render_report_module_markdown`，用于模块化 Markdown 导出模板。
+2. 报告质量评估看板
+- 新增 `_build_report_quality_dashboard`，输出覆盖率、证据密度、一致性等指标。
+- 报告任务快照新增 `report_quality_dashboard`，前端轮询阶段可提前看到质量趋势。
+3. 前端报告中心补齐展示
+- 新增“研究/风险节点”卡片、质量看板指标显示、导出格式选择器。
+- 导出结果支持按格式回显（Markdown/模块化 Markdown/JSON Bundle）。
+
 ## 3. 接口输出新增字段说明
 以下字段已在 `POST /v1/report/generate` 与 `GET /v1/report/{report_id}` 输出：
 1. `report_modules`: 模块化报告数组（模块 ID、内容、置信度、覆盖状态、降级原因）。
 2. `final_decision`: 最终决策（signal/confidence/rationale/invalidation_conditions/execution_plan）。
 3. `committee`: 委员会纪要（research_note/risk_note）。
 4. `metric_snapshot`: 指标快照（趋势、估值、质量、引用等关键指标）。
+5. `analysis_nodes`: 节点化仲裁输出（research_summarizer/risk_arbiter）。
+6. `quality_dashboard`: 质量看板（覆盖率/证据密度/一致性/低质量模块）。
 
 异步任务结果接口 `GET /v1/report/tasks/{task_id}/result`：
 1. partial 结果也会返回上述核心结构（最小可用版本）。
+2. 任务状态接口 `GET /v1/report/tasks/{task_id}` 新增 `report_quality_dashboard` 字段。
 
 ## 4. 自测结果
 执行命令：
@@ -70,13 +97,14 @@
 3. `cd frontend; npx tsc --noEmit`
 4. `cd frontend; npm run build`
 5. `\.venv\Scripts\python.exe scripts/full_api_selftest.py`
+6. `$env:SMOKE_RUN_HEAVY='1'; $env:SMOKE_HEAVY_CRITICAL='1'; .\.venv\Scripts\python.exe scripts/full_api_selftest.py`
 
 结果：
-1. 后端服务测试：`2 passed`
-2. API 测试：`2 passed`
+1. 后端服务/API 全量回归：`82 passed`
 3. 前端 TypeScript 检查：通过
 4. 前端构建：通过
 5. 全接口轻量 smoke：`total=129 failed=0`
+6. 全接口 heavy-critical smoke：`total=129 failed=0`
 
 ## 5. 业务价值
 1. 报告可读性从“原始文本堆叠”升级为“业务模块化阅读”。
@@ -84,7 +112,7 @@
 3. partial 阶段也有结构化反馈，减少等待焦虑和空白体验。
 4. 通过 `metric_snapshot + quality_gate` 保留质量可解释性，避免“高置信度错觉”。
 
-## 6. 下一步建议（Phase B）
-1. 引入“研究汇总器 + 风险仲裁器”独立节点化执行，并写入 DeepThink 跨轮输入。
-2. 增强 `report_modules` 的证据链粒度（source_id -> excerpt -> reliability -> freshness）。
-3. 增加模块级质量分与可追溯审计字段（module_quality_score/module_degrade_code）。
+## 6. 下一步建议（Phase D）
+1. 将 `analysis_nodes` 纳入报告版本差异对比，支持“版本间风控变化”追踪。
+2. 为导出 JSON Bundle 增加 schema version 字段，便于后续自动化消费。
+3. 增加模块级证据时效（freshness）评分，进一步提升结论可解释性。

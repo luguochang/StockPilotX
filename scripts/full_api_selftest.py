@@ -69,6 +69,30 @@ def _should_skip_light_route(method: str, route: str) -> bool:
     return False
 
 
+def _is_heavy_critical_route(method: str, route: str) -> bool:
+    """Limit heavy mode to critical user-facing chains when requested."""
+    critical_exact = {
+        "/v1/query",
+        "/v1/query/stream",
+        "/v1/deep-think/sessions",
+        "/v1/deep-think/sessions/{session_id}/rounds",
+        "/v2/deep-think/sessions/{session_id}/rounds/stream",
+        "/v1/report/generate",
+        "/v1/report/tasks",
+        "/v1/report/tasks/{task_id}",
+        "/v1/report/tasks/{task_id}/result",
+        "/v1/predict/run",
+        "/v1/analysis/intel-card",
+        "/v1/market/overview/{stock_code}",
+    }
+    if route in critical_exact:
+        return True
+    # Keep a small read-only surface for baseline liveness around critical flows.
+    if method == "GET" and route in {"/v1/auth/me", "/v1/reports"}:
+        return True
+    return False
+
+
 def _payload_for(route: str, ctx: dict[str, str]) -> dict[str, Any]:
     # Default smoke mode is lightweight: validate route liveness and input handling
     # without forcing expensive model/data workflows on every run.
@@ -218,7 +242,8 @@ def _payload_for(route: str, ctx: dict[str, str]) -> dict[str, Any]:
             # Use discovered prompt version to avoid synthetic-not-found failures.
             "base_version": prompt_version or "stable",
             "candidate_version": prompt_version or "stable",
-            "variables": {"question": "smoke", "stock_codes": ["SH600000"]},
+            # Include common template variables to avoid false negatives from strict prompt contracts.
+            "variables": {"question": "smoke", "stock_codes": ["SH600000"], "evidence": "source:smoke"},
         }
     if route == "/v1/a2a/tasks":
         return {"agent_id": "supervisor_agent", "task_type": "smoke", "payload": {"question": "smoke"}}
@@ -525,6 +550,7 @@ def run_full_smoke() -> int:
         ctx = _seed_context(client, headers)
         verbose = os.environ.get("SMOKE_VERBOSE", "").strip() in {"1", "true", "TRUE"}
         run_heavy = os.environ.get("SMOKE_RUN_HEAVY", "").strip() in {"1", "true", "TRUE"}
+        heavy_critical_only = os.environ.get("SMOKE_HEAVY_CRITICAL", "").strip() in {"1", "true", "TRUE"}
 
         routes: list[tuple[str, str]] = []
         for route in app.routes:
@@ -556,6 +582,17 @@ def run_full_smoke() -> int:
                         status_code=299,
                         ok=True,
                         detail="skipped_light_mode",
+                    )
+                )
+                continue
+            if run_heavy and heavy_critical_only and (not _is_heavy_critical_route(method, template)):
+                results.append(
+                    SmokeResult(
+                        method=method,
+                        route=template,
+                        status_code=298,
+                        ok=True,
+                        detail="skipped_heavy_critical_only",
                     )
                 )
                 continue
