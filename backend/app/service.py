@@ -52,6 +52,7 @@ from backend.app.rag.evaluation import RetrievalEvaluator, default_retrieval_dat
 from backend.app.rag.graphrag import GraphRAGService
 from backend.app.rag.embedding_provider import EmbeddingProvider, EmbeddingRuntimeConfig
 from backend.app.rag.hybrid_retriever_v2 import HybridRetrieverV2
+from backend.app.rag.parsing import DocumentParsingRouter
 from backend.app.rag.retriever import HybridRetriever, RetrievalItem
 from backend.app.rag.vector_store import LocalSummaryVectorStore, VectorSummaryRecord
 from backend.app.state import AgentState
@@ -110,6 +111,7 @@ class AShareAgentService:
         )
         self._vector_signature = ""
         self._vector_refreshed_at = 0.0
+        self.document_parser = DocumentParsingRouter(prefer_docling=True)
 
         self.ingestion_store = IngestionStore()
         self.ingestion = IngestionService(
@@ -4070,9 +4072,165 @@ class AShareAgentService:
             quality_gate=quality_gate,
             quality_reasons=quality_reasons,
         )
+        multi_role_decision: dict[str, Any] = {
+            "enabled": False,
+            "trace_id": "",
+            "debate_mode": "disabled",
+            "opinions": [],
+            "consensus_signal": str(final_decision.get("signal", "hold")),
+            "consensus_confidence": float(final_decision.get("confidence", 0.5) or 0.5),
+            "disagreement_score": 0.0,
+            "conflict_sources": [],
+            "counter_view": "",
+            "judge_summary": "",
+        }
+        # Reuse one arbitration kernel across Predict/Report to avoid signal drift between modules.
+        try:
+            history_rows = [dict(row) for row in list(overview.get("history", []) or []) if isinstance(row, dict)]
+            trend_for_debate = dict(overview.get("trend", {}) or {})
+            if not trend_for_debate and history_rows:
+                trend_for_debate = self._trend_metrics(history_rows)
+
+            quote_for_debate = dict(overview.get("realtime", {}) or {})
+            if not quote_for_debate:
+                latest_bar = history_rows[-1] if history_rows else {}
+                quote_for_debate = {
+                    "price": self._safe_float(latest_bar.get("close", 0.0), default=0.0),
+                    "pct_change": self._safe_float(latest_bar.get("pct_change", 0.0), default=0.0),
+                }
+
+            predict_rows = [dict(row) for row in list(predict_snapshot.get("results", []) or []) if isinstance(row, dict)]
+            first_predict = predict_rows[0] if predict_rows else {}
+            horizon_rows = [dict(row) for row in list(first_predict.get("horizons", []) or []) if isinstance(row, dict)]
+            quant_20 = next(
+                (row for row in horizon_rows if str(row.get("horizon", "")).strip().lower() == "20d"),
+                horizon_rows[0] if horizon_rows else {},
+            )
+            if not quant_20:
+                quant_20 = {
+                    "horizon": "20d",
+                    "signal": "hold",
+                    "up_probability": 0.5,
+                    "rationale": "report_fallback_quant20_missing",
+                }
+
+            report_quality_for_debate = {
+                "overall_status": str(quality_gate.get("status", "pass")),
+                "reasons": list(quality_reasons),
+            }
+            raw_multi_role = self._predict_run_multi_role_debate(
+                stock_code=code,
+                question=f"report:{code}:{req.report_type}:{req.period}",
+                quote=quote_for_debate,
+                trend=trend_for_debate,
+                quant_20=quant_20,
+                quality_gate=report_quality_for_debate,
+                input_pack=report_input_pack,
+            )
+            opinions = [
+                self._normalize_deep_opinion(
+                    agent=str(row.get("agent", "unknown")),
+                    signal=str(row.get("signal", "hold")),
+                    confidence=self._safe_float(row.get("confidence", 0.5), default=0.5),
+                    reason=str(row.get("reason", "")),
+                    evidence_ids=[str(x).strip() for x in list(row.get("evidence_ids", []) or []) if str(x).strip()],
+                    risk_tags=[str(x).strip() for x in list(row.get("risk_tags", []) or []) if str(x).strip()],
+                )
+                for row in list(raw_multi_role.get("opinions", []) or [])
+                if isinstance(row, dict)
+            ]
+            consensus_signal = self._normalize_report_signal(
+                str(raw_multi_role.get("consensus_signal", final_decision.get("signal", "hold")))
+            )
+            consensus_confidence = max(
+                0.2,
+                min(0.95, self._safe_float(raw_multi_role.get("consensus_confidence", 0.5), default=0.5)),
+            )
+            multi_role_decision = {
+                "enabled": bool(opinions),
+                "trace_id": str(raw_multi_role.get("trace_id", "")),
+                "debate_mode": str(raw_multi_role.get("debate_mode", "rule_fallback")),
+                "opinions": opinions,
+                "consensus_signal": consensus_signal,
+                "consensus_confidence": round(consensus_confidence, 4),
+                "disagreement_score": round(self._safe_float(raw_multi_role.get("disagreement_score", 0.0), default=0.0), 4),
+                "conflict_sources": [
+                    str(x).strip()
+                    for x in list(raw_multi_role.get("conflict_sources", []) or [])
+                    if str(x).strip()
+                ],
+                "counter_view": str(raw_multi_role.get("counter_view", "")).strip()[:320],
+                "judge_summary": str(raw_multi_role.get("judge_summary", "")).strip()[:320],
+            }
+            if bool(multi_role_decision.get("enabled", False)):
+                final_decision["signal"] = str(multi_role_decision.get("consensus_signal", final_decision.get("signal", "hold")))
+                blended_confidence = (
+                    self._safe_float(final_decision.get("confidence", 0.5), default=0.5) * 0.55
+                    + float(multi_role_decision.get("consensus_confidence", 0.5) or 0.5) * 0.45
+                )
+                final_decision["confidence"] = round(
+                    max(
+                        0.25,
+                        min(
+                            self._safe_float(quality_gate.get("score", 0.5), default=0.5),
+                            blended_confidence,
+                        ),
+                    ),
+                    4,
+                )
+                judge_summary = str(multi_role_decision.get("judge_summary", "")).strip()
+                if judge_summary:
+                    final_decision["rationale"] = f"{str(final_decision.get('rationale', '')).strip()} 多角色裁决：{judge_summary}".strip()
+                conflict_sources = [str(x).strip() for x in list(multi_role_decision.get("conflict_sources", []) or []) if str(x).strip()]
+                if conflict_sources:
+                    final_decision["invalidation_conditions"] = list(
+                        dict.fromkeys(
+                            list(final_decision.get("invalidation_conditions", []) or [])
+                            + [f"角色冲突源持续存在：{', '.join(conflict_sources[:3])}"]
+                        )
+                    )[:10]
+                counter_view = str(multi_role_decision.get("counter_view", "")).strip()
+                if counter_view:
+                    final_decision["execution_plan"] = list(
+                        dict.fromkeys(
+                            list(final_decision.get("execution_plan", []) or [])
+                            + [f"反方观点复核：{counter_view[:120]}"]
+                        )
+                    )[:8]
+        except Exception as ex:  # noqa: BLE001
+            # Report should still render even if arbitration helper fails unexpectedly.
+            multi_role_decision["judge_summary"] = f"multi_role_fallback:{str(ex)[:160]}"
+
+        multi_role_node: dict[str, Any] | None = None
+        if bool(multi_role_decision.get("enabled", False)):
+            quality_status = str(quality_gate.get("status", "pass")).strip().lower() or "pass"
+            node_status = "degraded" if quality_status == "degraded" else "watch" if quality_status == "watch" else "ready"
+            multi_role_node = {
+                "node_id": "multi_role_judge",
+                "title": "多角色裁决器",
+                "status": node_status,
+                "signal": str(multi_role_decision.get("consensus_signal", "hold")),
+                "confidence": self._safe_float(multi_role_decision.get("consensus_confidence", 0.5), default=0.5),
+                "summary": str(multi_role_decision.get("judge_summary", "")).strip() or "多角色裁决已执行。",
+                "highlights": [
+                    f"冲突源：{', '.join(list(multi_role_decision.get('conflict_sources', [])) or ['none'])}",
+                    f"分歧度：{self._safe_float(multi_role_decision.get('disagreement_score', 0.0), default=0.0):.2f}",
+                ],
+                "evidence_refs": [],
+                "coverage": {"role_count": int(len(list(multi_role_decision.get("opinions", []) or [])))},
+                "degrade_reason": [],
+                "guardrails": (
+                    [f"反方观点：{str(multi_role_decision.get('counter_view', '')).strip()[:120]}"]
+                    if str(multi_role_decision.get("counter_view", "")).strip()
+                    else []
+                ),
+                "veto": bool("risk_veto" in list(multi_role_decision.get("conflict_sources", []) or [])),
+            }
+
         # Nodeized committee pipeline: explicitly separate research synthesis and risk arbitration.
         analysis_nodes = self._normalize_report_analysis_nodes(
-            [
+            list(
+                [
                 self._build_report_research_summarizer_node(
                     code=code,
                     query_result=query_result,
@@ -4086,7 +4244,9 @@ class AShareAgentService:
                     quality_gate=quality_gate,
                     final_decision=final_decision,
                 ),
-            ]
+                ]
+                + ([multi_role_node] if isinstance(multi_role_node, dict) else [])
+            )
         )
         committee = self._build_report_committee_notes(
             final_decision=final_decision,
@@ -4095,6 +4255,11 @@ class AShareAgentService:
             quality_reasons=quality_reasons,
             analysis_nodes=analysis_nodes,
         )
+        if bool(multi_role_decision.get("enabled", False)) and str(multi_role_decision.get("judge_summary", "")).strip():
+            committee["research_note"] = (
+                f"{str(committee.get('research_note', '')).strip()} "
+                f"多角色裁决：{str(multi_role_decision.get('judge_summary', '')).strip()}"
+            ).strip()
         report_modules = self._build_fallback_report_modules(
             code=code,
             query_result=query_result,
@@ -4178,6 +4343,27 @@ class AShareAgentService:
                             "predict_degrade_reasons": list(predict_snapshot.get("degrade_reasons", []) or []),
                             "intel_signal": str(intel.get("overall_signal", "")),
                             "intel_confidence": float(intel.get("confidence", 0.0) or 0.0),
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+                {
+                    "section_id": "multi_role_arbitration",
+                    "title": "多角色仲裁摘要",
+                    "content": json.dumps(
+                        {
+                            "enabled": bool(multi_role_decision.get("enabled", False)),
+                            "trace_id": str(multi_role_decision.get("trace_id", "")),
+                            "debate_mode": str(multi_role_decision.get("debate_mode", "")),
+                            "consensus_signal": str(multi_role_decision.get("consensus_signal", "hold")),
+                            "consensus_confidence": self._safe_float(
+                                multi_role_decision.get("consensus_confidence", 0.5), default=0.5
+                            ),
+                            "disagreement_score": self._safe_float(
+                                multi_role_decision.get("disagreement_score", 0.0), default=0.0
+                            ),
+                            "conflict_sources": list(multi_role_decision.get("conflict_sources", []) or []),
+                            "judge_summary": str(multi_role_decision.get("judge_summary", "")),
                         },
                         ensure_ascii=False,
                     ),
@@ -4467,6 +4653,15 @@ class AShareAgentService:
             f"- position_sizing_hint: {str(final_decision.get('position_sizing_hint', ''))}\n"
             f"- rationale: {str(final_decision.get('rationale', ''))[:400]}\n"
         )
+        if bool(multi_role_decision.get("enabled", False)):
+            markdown += (
+                "\n\n## 多角色仲裁\n"
+                f"- trace_id: {str(multi_role_decision.get('trace_id', ''))}\n"
+                f"- consensus_signal: {str(multi_role_decision.get('consensus_signal', 'hold'))}\n"
+                f"- consensus_confidence: {self._safe_float(multi_role_decision.get('consensus_confidence', 0.5), default=0.5):.2f}\n"
+                f"- conflict_sources: {','.join(list(multi_role_decision.get('conflict_sources', []) or [])) or 'none'}\n"
+                f"- judge_summary: {str(multi_role_decision.get('judge_summary', ''))[:320]}\n"
+            )
         markdown += (
             "\n\n## Data Quality Gate\n"
             f"- status: {quality_gate['status']}\n"
@@ -4494,6 +4689,17 @@ class AShareAgentService:
             "metric_snapshot": metric_snapshot,
             "analysis_nodes": analysis_nodes,
             "quality_dashboard": quality_dashboard,
+            "multi_role_enabled": bool(multi_role_decision.get("enabled", False)),
+            "multi_role_trace_id": str(multi_role_decision.get("trace_id", "")),
+            "multi_role_decision": dict(multi_role_decision),
+            "role_opinions": list(multi_role_decision.get("opinions", []) or []),
+            "judge_summary": str(multi_role_decision.get("judge_summary", "")),
+            "conflict_sources": list(multi_role_decision.get("conflict_sources", []) or []),
+            "consensus_signal": str(multi_role_decision.get("consensus_signal", final_decision.get("signal", "hold"))),
+            "consensus_confidence": self._safe_float(
+                multi_role_decision.get("consensus_confidence", final_decision.get("confidence", 0.5)),
+                default=self._safe_float(final_decision.get("confidence", 0.5), default=0.5),
+            ),
             "confidence_attribution": {
                 "citation_count": len(list(query_result.get("citations", []) or [])),
                 "history_sample_size": history_sample_size,
@@ -4527,6 +4733,17 @@ class AShareAgentService:
             "metric_snapshot": dict(metric_snapshot),
             "quality_gate": dict(quality_gate),
             "evidence_refs": list(evidence_refs),
+            "multi_role_enabled": bool(multi_role_decision.get("enabled", False)),
+            "multi_role_trace_id": str(multi_role_decision.get("trace_id", "")),
+            "multi_role_decision": dict(multi_role_decision),
+            "role_opinions": list(multi_role_decision.get("opinions", []) or []),
+            "judge_summary": str(multi_role_decision.get("judge_summary", "")),
+            "conflict_sources": list(multi_role_decision.get("conflict_sources", []) or []),
+            "consensus_signal": str(multi_role_decision.get("consensus_signal", final_decision.get("signal", "hold"))),
+            "consensus_confidence": self._safe_float(
+                multi_role_decision.get("consensus_confidence", final_decision.get("confidence", 0.5)),
+                default=self._safe_float(final_decision.get("confidence", 0.5), default=0.5),
+            ),
         }
         self.web.save_report_index(
             report_id=report_id,
@@ -4559,6 +4776,17 @@ class AShareAgentService:
         resp["metric_snapshot"] = metric_snapshot
         resp["analysis_nodes"] = analysis_nodes
         resp["quality_dashboard"] = quality_dashboard
+        resp["multi_role_enabled"] = bool(multi_role_decision.get("enabled", False))
+        resp["multi_role_trace_id"] = str(multi_role_decision.get("trace_id", ""))
+        resp["multi_role_decision"] = dict(multi_role_decision)
+        resp["role_opinions"] = list(multi_role_decision.get("opinions", []) or [])
+        resp["judge_summary"] = str(multi_role_decision.get("judge_summary", ""))
+        resp["conflict_sources"] = list(multi_role_decision.get("conflict_sources", []) or [])
+        resp["consensus_signal"] = str(multi_role_decision.get("consensus_signal", final_decision.get("signal", "hold")))
+        resp["consensus_confidence"] = self._safe_float(
+            multi_role_decision.get("consensus_confidence", final_decision.get("confidence", 0.5)),
+            default=self._safe_float(final_decision.get("confidence", 0.5), default=0.5),
+        )
         resp["confidence_attribution"] = {
             "citation_count": len(list(query_result.get("citations", []) or [])),
             "history_sample_size": history_sample_size,
@@ -4602,6 +4830,79 @@ class AShareAgentService:
         if not report:
             return {"error": "not_found", "report_id": report_id}
         return self._sanitize_report_payload(dict(report))
+
+    def report_self_test(
+        self,
+        *,
+        stock_code: str = "SH600000",
+        report_type: str = "research",
+        period: str = "1y",
+    ) -> dict[str, Any]:
+        """Run report sync/async smoke checks and return deterministic diagnostics."""
+        code = str(stock_code or "SH600000").strip().upper().replace(".", "")
+        normalized_report_type = str(report_type or "research").strip() or "research"
+        normalized_period = str(period or "1y").strip() or "1y"
+        payload = {
+            "user_id": "report-self-test",
+            "stock_code": code,
+            "period": normalized_period,
+            "report_type": normalized_report_type,
+        }
+
+        started = time.perf_counter()
+        generated = self.report_generate(payload)
+        sync_latency_ms = int((time.perf_counter() - started) * 1000)
+        report_id = str(generated.get("report_id", "")).strip()
+
+        loaded = self.report_get(report_id) if report_id else {"error": "missing_report_id"}
+        sync_ok = isinstance(loaded, dict) and "error" not in loaded and bool(loaded.get("report_modules"))
+
+        task = self.report_task_create(payload)
+        task_id = str(task.get("task_id", "")).strip()
+        final_status = str(task.get("status", "")).strip().lower() or "created"
+        snapshot = dict(task)
+        for _ in range(120):
+            if final_status in {"completed", "failed", "partial_ready"}:
+                break
+            time.sleep(0.05)
+            snapshot = self.report_task_get(task_id)
+            final_status = str(snapshot.get("status", "")).strip().lower() or final_status
+        async_result = self.report_task_result(task_id) if task_id else {"error": "missing_task_id"}
+        async_payload = dict(async_result.get("result", {}) or {}) if isinstance(async_result, dict) else {}
+        async_ok = bool(async_payload.get("report_modules")) and str(async_result.get("status", "")).strip().lower() in {
+            "completed",
+            "partial_ready",
+            "failed",
+        }
+
+        return {
+            "ok": bool(sync_ok and async_ok),
+            "stock_code": code,
+            "report_type": normalized_report_type,
+            "period": normalized_period,
+            "sync_latency_ms": sync_latency_ms,
+            "sync": {
+                "ok": bool(sync_ok),
+                "report_id": report_id,
+                "quality_status": str((generated.get("quality_gate", {}) or {}).get("status", "")),
+                "multi_role_enabled": bool(generated.get("multi_role_enabled", False)),
+                "multi_role_trace_id": str(generated.get("multi_role_trace_id", "")),
+                "consensus_signal": str(generated.get("consensus_signal", "")),
+                "consensus_confidence": self._safe_float(generated.get("consensus_confidence", 0.0), default=0.0),
+                "module_count": int(len(list(generated.get("report_modules", []) or []))),
+            },
+            "async": {
+                "ok": bool(async_ok),
+                "task_id": task_id,
+                "final_status": final_status,
+                "result_level": str(async_result.get("result_level", "")) if isinstance(async_result, dict) else "",
+                "display_ready": bool(async_result.get("display_ready", False)) if isinstance(async_result, dict) else False,
+                "quality_status": str((async_payload.get("quality_gate", {}) or {}).get("status", "")),
+                "multi_role_enabled": bool(async_payload.get("multi_role_enabled", False)),
+                "multi_role_trace_id": str(async_payload.get("multi_role_trace_id", "")),
+                "module_count": int(len(list(async_payload.get("report_modules", []) or []))),
+            },
+        }
 
     def _latest_report_context(self, stock_code: str) -> dict[str, Any]:
         """Get latest in-memory report context for one stock to assist DeepThink rounds."""
@@ -4774,6 +5075,68 @@ class AShareAgentService:
             if isinstance(row, dict):
                 node_rows.append(dict(row))
         body["analysis_nodes"] = self._normalize_report_analysis_nodes(node_rows)
+
+        role_opinions: list[dict[str, Any]] = []
+        for row in list(body.get("role_opinions", []) or []):
+            if not isinstance(row, dict):
+                continue
+            role_opinions.append(
+                self._normalize_deep_opinion(
+                    agent=str(row.get("agent", "unknown")),
+                    signal=str(row.get("signal", "hold")),
+                    confidence=self._safe_float(row.get("confidence", 0.5), default=0.5),
+                    reason=self._sanitize_report_text(str(row.get("reason", "")).strip()),
+                    evidence_ids=[str(x).strip() for x in list(row.get("evidence_ids", []) or []) if str(x).strip()],
+                    risk_tags=[str(x).strip() for x in list(row.get("risk_tags", []) or []) if str(x).strip()],
+                )
+            )
+        if role_opinions:
+            body["role_opinions"] = role_opinions
+
+        multi_role = dict(body.get("multi_role_decision", {}) or {})
+        if multi_role:
+            multi_role["enabled"] = bool(multi_role.get("enabled", bool(role_opinions)))
+            multi_role["trace_id"] = str(multi_role.get("trace_id", body.get("multi_role_trace_id", ""))).strip()
+            multi_role["debate_mode"] = str(multi_role.get("debate_mode", "rule_fallback")).strip()
+            multi_role["opinions"] = role_opinions or [
+                self._normalize_deep_opinion(
+                    agent=str(row.get("agent", "unknown")),
+                    signal=str(row.get("signal", "hold")),
+                    confidence=self._safe_float(row.get("confidence", 0.5), default=0.5),
+                    reason=self._sanitize_report_text(str(row.get("reason", "")).strip()),
+                    evidence_ids=[str(x).strip() for x in list(row.get("evidence_ids", []) or []) if str(x).strip()],
+                    risk_tags=[str(x).strip() for x in list(row.get("risk_tags", []) or []) if str(x).strip()],
+                )
+                for row in list(multi_role.get("opinions", []) or [])
+                if isinstance(row, dict)
+            ]
+            multi_role["consensus_signal"] = self._normalize_report_signal(
+                str(multi_role.get("consensus_signal", body.get("consensus_signal", "hold")))
+            )
+            multi_role["consensus_confidence"] = round(
+                max(0.0, min(1.0, self._safe_float(multi_role.get("consensus_confidence", body.get("consensus_confidence", 0.5)), default=0.5))),
+                4,
+            )
+            multi_role["disagreement_score"] = round(
+                max(0.0, min(1.0, self._safe_float(multi_role.get("disagreement_score", 0.0), default=0.0))),
+                4,
+            )
+            multi_role["conflict_sources"] = [
+                str(x).strip() for x in list(multi_role.get("conflict_sources", body.get("conflict_sources", [])) or []) if str(x).strip()
+            ]
+            multi_role["counter_view"] = self._sanitize_report_text(str(multi_role.get("counter_view", "")).strip())[:320]
+            multi_role["judge_summary"] = self._sanitize_report_text(
+                str(multi_role.get("judge_summary", body.get("judge_summary", ""))).strip()
+            )[:320]
+            body["multi_role_decision"] = multi_role
+            # Keep top-level compatibility fields so existing frontends can consume report output directly.
+            body["multi_role_enabled"] = bool(multi_role.get("enabled", False))
+            body["multi_role_trace_id"] = str(multi_role.get("trace_id", ""))
+            body["role_opinions"] = list(multi_role.get("opinions", []) or [])
+            body["judge_summary"] = str(multi_role.get("judge_summary", ""))
+            body["conflict_sources"] = list(multi_role.get("conflict_sources", []) or [])
+            body["consensus_signal"] = str(multi_role.get("consensus_signal", "hold"))
+            body["consensus_confidence"] = float(multi_role.get("consensus_confidence", 0.5) or 0.5)
 
         committee = dict(body.get("committee", {}) or {})
         if committee:
@@ -5837,6 +6200,43 @@ class AShareAgentService:
             return "stock"
         return "concept"
 
+    @staticmethod
+    def _looks_like_pdf_binary_stream_text(text: str) -> bool:
+        normalized = str(text or "")
+        if not normalized:
+            return False
+        markers = [
+            "Filter/FlateDecode",
+            "endstream",
+            "stream",
+            "/Length",
+            "Subtype/Type1C",
+            "obj",
+            "endobj",
+        ]
+        hit_count = sum(normalized.count(marker) for marker in markers)
+        return hit_count >= 8 or (hit_count >= 4 and len(normalized) >= 300)
+
+    def _validate_rag_parsed_text(
+        self,
+        *,
+        extracted_text: str,
+        parse_note: str,
+        parse_quality: dict[str, Any],
+    ) -> str | None:
+        note = str(parse_note or "").lower()
+        if "pdf_binary_stream_detected" in note:
+            return "PDF parsing failed: binary stream detected, not human-readable text"
+        normalized = re.sub(r"\s+", " ", str(extracted_text or "")).strip()
+        if not normalized:
+            return "No readable text extracted from file"
+        if "pdf_ascii_fallback" in note and self._looks_like_pdf_binary_stream_text(normalized):
+            return "PDF parsing failed: fallback extracted PDF internals instead of document text"
+        quality_score = float(parse_quality.get("quality_score", 0.0) or 0.0)
+        if quality_score <= 0.01:
+            return "Extracted text quality is too low for indexing"
+        return None
+
     def docs_quality_report(self, doc_id: str) -> dict[str, Any]:
         """Build a quality report for one indexed document.
 
@@ -5933,11 +6333,8 @@ class AShareAgentService:
 
         text_content = str(payload.get("content", "") or "")
         raw_bytes: bytes
-        parse_note_parts: list[str] = []
         if text_content.strip():
             raw_bytes = text_content.encode("utf-8", errors="ignore")
-            extracted = text_content
-            parse_note_parts.append("text_payload")
         else:
             encoded = str(payload.get("content_base64", "")).strip()
             if not encoded:
@@ -5946,18 +6343,16 @@ class AShareAgentService:
                 raw_bytes = base64.b64decode(encoded, validate=True)
             except Exception as ex:  # noqa: BLE001
                 raise ValueError("content_base64 is invalid") from ex
-            extracted, parse_note = self._extract_text_from_upload_bytes(
-                filename=filename,
-                raw_bytes=raw_bytes,
-                content_type=content_type,
-            )
-            if parse_note:
-                parse_note_parts.append(parse_note)
-
-        if not extracted.strip():
-            raise ValueError("uploaded file could not be parsed into text content")
 
         file_sha256 = hashlib.sha256(raw_bytes).hexdigest().lower()
+        doc_id = str(payload.get("doc_id", "")).strip()
+        if not doc_id:
+            # Stable doc id for the same file hash so status and retrieval trace are easy to correlate.
+            doc_id = f"ragdoc-{file_sha256[:12]}"
+            if force_reupload:
+                doc_id = f"{doc_id}-{uuid.uuid4().hex[:4]}"
+        upload_id = str(payload.get("upload_id", "")).strip() or f"ragu-{uuid.uuid4().hex[:12]}"
+
         if not force_reupload:
             existing = self.web.rag_upload_asset_get_by_hash(file_sha256)
             if existing:
@@ -5969,26 +6364,7 @@ class AShareAgentService:
                     "upload_id": str(existing.get("upload_id", "")),
                 }
 
-        doc_id = str(payload.get("doc_id", "")).strip()
-        if not doc_id:
-            # 鐢?hash 鍓嶇紑鐢熸垚绋冲畾 doc_id锛屼究浜庡悗缁法鍏ュ彛杩借釜鍚屼竴鏂囦欢銆?
-            doc_id = f"ragdoc-{file_sha256[:12]}"
-            if force_reupload:
-                doc_id = f"{doc_id}-{uuid.uuid4().hex[:4]}"
-        upload_id = str(payload.get("upload_id", "")).strip() or f"ragu-{uuid.uuid4().hex[:12]}"
-
-        _ = self.docs_upload(doc_id, filename, extracted, source)
-        indexed = None
-        status = "uploaded"
-        if auto_index:
-            indexed = self.docs_index(doc_id)
-            status = "indexed"
-            chunk_rows = self.rag_doc_chunks_list(token, doc_id=doc_id, limit=1)
-            if chunk_rows:
-                status = str(chunk_rows[0].get("effective_status", "indexed"))
-
-        parse_note = ",".join(parse_note_parts)
-        asset = self.web.rag_upload_asset_upsert(
+        self.web.rag_upload_asset_upsert(
             token,
             upload_id=upload_id,
             doc_id=doc_id,
@@ -6000,20 +6376,178 @@ class AShareAgentService:
             content_type=content_type,
             stock_codes=stock_codes,
             tags=tags,
-            parse_note=parse_note,
-            status=status,
+            parse_note="upload_received",
+            status="uploaded",
+            job_status="running",
+            current_stage="upload_received",
             created_by=user_hint,
         )
-        return {
-            "status": "ok",
-            "dedupe_hit": False,
-            "upload_id": upload_id,
-            "doc_id": doc_id,
-            "source": source,
-            "auto_index": auto_index,
-            "index_result": indexed or {},
-            "asset": asset,
-        }
+        self.web.rag_upload_stage_log_add(
+            upload_id=upload_id,
+            doc_id=doc_id,
+            stage="upload_received",
+            status="done",
+            detail={
+                "filename": filename,
+                "content_type": content_type,
+                "file_size": len(raw_bytes),
+                "source": source,
+            },
+        )
+        try:
+            if text_content.strip():
+                extracted = text_content
+                parse_note = "text_payload"
+                normalized = re.sub(r"\s+", " ", extracted).strip()
+                coverage = min(1.0, len(normalized) / 3000.0)
+                parse_trace = {
+                    "parser_name": "text_payload",
+                    "parser_version": "1",
+                    "ocr_used": False,
+                    "duration_ms": 0,
+                    "notes": ["text_payload"],
+                }
+                parse_quality = {
+                    "text_coverage_ratio": coverage,
+                    "garbled_ratio": 0.0,
+                    "ocr_confidence_avg": 1.0,
+                    "quality_score": max(0.0, min(1.0, coverage * 0.7 + 0.3 if normalized else 0.0)),
+                }
+            else:
+                parsed = self.document_parser.parse(
+                    filename=filename,
+                    raw_bytes=raw_bytes,
+                    content_type=content_type,
+                )
+                extracted = str(parsed.plain_text or "")
+                parse_note = str(parsed.parse_note or "")
+                parse_trace = parsed.trace.to_dict()
+                parse_quality = parsed.quality.to_dict()
+            parse_error = self._validate_rag_parsed_text(
+                extracted_text=extracted,
+                parse_note=parse_note,
+                parse_quality=parse_quality,
+            )
+            if parse_error:
+                raise ValueError(parse_error)
+
+            self.web.rag_upload_asset_set_runtime(
+                upload_id=upload_id,
+                current_stage="parsing",
+                parser_name=str(parse_trace.get("parser_name", "")),
+                ocr_used=bool(parse_trace.get("ocr_used", False)),
+                quality_score=float(parse_quality.get("quality_score", 0.0) or 0.0),
+                parse_note=parse_note,
+            )
+            self.web.rag_upload_stage_log_add(
+                upload_id=upload_id,
+                doc_id=doc_id,
+                stage="parsing",
+                status="done",
+                detail={
+                    "parse_note": parse_note,
+                    "trace": parse_trace,
+                    "quality": parse_quality,
+                },
+            )
+
+            _ = self.docs_upload(doc_id, filename, extracted, source)
+            self.web.rag_upload_stage_log_add(
+                upload_id=upload_id,
+                doc_id=doc_id,
+                stage="asset_uploaded",
+                status="done",
+                detail={"doc_id": doc_id, "source": source},
+            )
+
+            indexed = {}
+            status = "uploaded"
+            vector_ready = False
+            if auto_index:
+                indexed = self.docs_index(doc_id)
+                index_status = str(indexed.get("status", "indexed"))
+                self.web.rag_upload_stage_log_add(
+                    upload_id=upload_id,
+                    doc_id=doc_id,
+                    stage="indexing",
+                    status="done" if index_status == "indexed" else "failed",
+                    detail={"index_result": indexed},
+                )
+                status = "indexed"
+                chunk_rows = self.rag_doc_chunks_list(token, doc_id=doc_id, limit=1)
+                if chunk_rows:
+                    status = str(chunk_rows[0].get("effective_status", "indexed"))
+                    vector_ready = status == "active"
+            else:
+                self.web.rag_upload_stage_log_add(
+                    upload_id=upload_id,
+                    doc_id=doc_id,
+                    stage="indexing",
+                    status="skipped",
+                    detail={"reason": "auto_index_disabled"},
+                )
+
+            asset = self.web.rag_upload_asset_upsert(
+                token,
+                upload_id=upload_id,
+                doc_id=doc_id,
+                filename=filename,
+                source=source,
+                source_url=source_url,
+                file_sha256=file_sha256,
+                file_size=len(raw_bytes),
+                content_type=content_type,
+                stock_codes=stock_codes,
+                tags=tags,
+                parse_note=parse_note,
+                status=status,
+                job_status="completed",
+                current_stage="asset_recorded",
+                error_code="",
+                error_message="",
+                parser_name=str(parse_trace.get("parser_name", "")),
+                ocr_used=bool(parse_trace.get("ocr_used", False)),
+                quality_score=float(parse_quality.get("quality_score", 0.0) or 0.0),
+                vector_ready=vector_ready,
+                verification_passed=False,
+                created_by=user_hint,
+            )
+            self.web.rag_upload_stage_log_add(
+                upload_id=upload_id,
+                doc_id=doc_id,
+                stage="asset_recorded",
+                status="done",
+                detail={"status": status, "vector_ready": vector_ready},
+            )
+            return {
+                "status": "ok",
+                "dedupe_hit": False,
+                "upload_id": upload_id,
+                "doc_id": doc_id,
+                "source": source,
+                "auto_index": auto_index,
+                "index_result": indexed,
+                "asset": asset,
+                "parse_note": parse_note,
+                "parse_trace": parse_trace,
+                "parse_quality": parse_quality,
+            }
+        except Exception as ex:  # noqa: BLE001
+            self.web.rag_upload_asset_set_runtime(
+                upload_id=upload_id,
+                job_status="failed",
+                current_stage="failed",
+                error_code="upload_failed",
+                error_message=str(ex)[:240],
+            )
+            self.web.rag_upload_stage_log_add(
+                upload_id=upload_id,
+                doc_id=doc_id,
+                stage="failed",
+                status="failed",
+                detail={"error": str(ex)[:240]},
+            )
+            raise
 
     @staticmethod
     def _rag_preview_trim(text: str, max_len: int = 140) -> str:
@@ -6218,21 +6752,20 @@ class AShareAgentService:
         """Business entrypoint: upload then index immediately and return timeline for frontend progress."""
         req = dict(payload or {})
         req["auto_index"] = True
-        started = datetime.now(timezone.utc)
         result = self.rag_upload_from_payload(token, req)
-        timeline = [
-            {"phase": "upload_received", "status": "done", "at": started.isoformat()},
-            {
-                "phase": "indexing",
-                "status": "done" if bool(result.get("index_result")) else "skipped",
-                "at": datetime.now(timezone.utc).isoformat(),
-            },
-            {
-                "phase": "asset_recorded",
-                "status": "done",
-                "at": datetime.now(timezone.utc).isoformat(),
-            },
-        ]
+        upload_id = str(result.get("upload_id", "")).strip()
+        timeline: list[dict[str, Any]] = []
+        if upload_id:
+            stage_rows = self.web.rag_upload_stage_log_list(token, upload_id=upload_id, limit=120)
+            timeline = [
+                {
+                    "phase": str(row.get("stage", "")),
+                    "status": str(row.get("status", "")),
+                    "at": str(row.get("created_at", "")),
+                    "detail": row.get("detail", {}),
+                }
+                for row in stage_rows
+            ]
         preview_doc_id = str(result.get("doc_id", "")).strip()
         retrieval_preview: dict[str, Any] = {
             "doc_id": preview_doc_id,
@@ -6244,11 +6777,21 @@ class AShareAgentService:
             "target_hit_rate": 0.0,
             "items": [],
         }
-        if preview_doc_id:
+        if preview_doc_id and bool(result.get("dedupe_hit", False)) and upload_id:
+            retrieval_preview = self.rag_upload_verification(token, upload_id=upload_id)
+        elif preview_doc_id:
             try:
                 asset = result.get("asset", {}) if isinstance(result.get("asset"), dict) else {}
                 hint_codes = [str(x).strip().upper() for x in asset.get("stock_codes", []) if str(x).strip()]
                 hint_tags = [str(x).strip() for x in asset.get("tags", []) if str(x).strip()]
+                if upload_id:
+                    self.web.rag_upload_stage_log_add(
+                        upload_id=upload_id,
+                        doc_id=preview_doc_id,
+                        stage="verifying",
+                        status="running",
+                        detail={"max_queries": 2, "top_k": 4},
+                    )
                 retrieval_preview = self.rag_retrieval_preview(
                     token,
                     doc_id=preview_doc_id,
@@ -6257,6 +6800,32 @@ class AShareAgentService:
                     hint_stock_codes=hint_codes,
                     hint_tags=hint_tags,
                 )
+                if upload_id:
+                    self.web.rag_upload_verification_replace(
+                        upload_id=upload_id,
+                        doc_id=preview_doc_id,
+                        items=list(retrieval_preview.get("items", [])),
+                    )
+                    self.web.rag_upload_asset_set_runtime(
+                        upload_id=upload_id,
+                        job_status="completed",
+                        current_stage="completed",
+                        verification_passed=bool(retrieval_preview.get("passed", False)),
+                        vector_ready=bool(retrieval_preview.get("ready", False)),
+                        error_code="",
+                        error_message="",
+                    )
+                    self.web.rag_upload_stage_log_add(
+                        upload_id=upload_id,
+                        doc_id=preview_doc_id,
+                        stage="verifying",
+                        status="done",
+                        detail={
+                            "query_count": int(retrieval_preview.get("query_count", 0) or 0),
+                            "matched_query_count": int(retrieval_preview.get("matched_query_count", 0) or 0),
+                            "target_hit_rate": float(retrieval_preview.get("target_hit_rate", 0.0) or 0.0),
+                        },
+                    )
             except Exception as ex:  # noqa: BLE001
                 retrieval_preview = {
                     "doc_id": preview_doc_id,
@@ -6269,6 +6838,33 @@ class AShareAgentService:
                     "target_hit_rate": 0.0,
                     "items": [],
                 }
+                if upload_id:
+                    self.web.rag_upload_asset_set_runtime(
+                        upload_id=upload_id,
+                        job_status="partial",
+                        current_stage="verifying",
+                        error_code="preview_failed",
+                        error_message=str(ex)[:240],
+                        verification_passed=False,
+                    )
+                    self.web.rag_upload_stage_log_add(
+                        upload_id=upload_id,
+                        doc_id=preview_doc_id,
+                        stage="verifying",
+                        status="failed",
+                        detail={"error": str(ex)[:240]},
+                    )
+        if upload_id:
+            stage_rows = self.web.rag_upload_stage_log_list(token, upload_id=upload_id, limit=120)
+            timeline = [
+                {
+                    "phase": str(row.get("stage", "")),
+                    "status": str(row.get("status", "")),
+                    "at": str(row.get("created_at", "")),
+                    "detail": row.get("detail", {}),
+                }
+                for row in stage_rows
+            ]
         return {
             "status": "ok",
             "result": result,
@@ -6308,6 +6904,192 @@ class AShareAgentService:
             limit=limit,
             offset=offset,
         )
+
+    def rag_upload_status(self, token: str, *, upload_id: str) -> dict[str, Any]:
+        asset = self.web.rag_upload_asset_get(token, upload_id=upload_id)
+        if "error" in asset:
+            return asset
+        stage_rows = self.web.rag_upload_stage_log_list(token, upload_id=upload_id, limit=240)
+        verification_rows = self.web.rag_upload_verification_list(token, upload_id=upload_id, limit=240)
+        query_count = len(verification_rows)
+        matched_query_count = sum(1 for row in verification_rows if bool(row.get("target_hit", False)))
+        target_hit_rate = round((matched_query_count / query_count), 4) if query_count > 0 else 0.0
+        return {
+            "upload_id": str(upload_id),
+            "doc_id": str(asset.get("doc_id", "")),
+            "asset": asset,
+            "timeline": [
+                {
+                    "phase": str(row.get("stage", "")),
+                    "status": str(row.get("status", "")),
+                    "at": str(row.get("created_at", "")),
+                    "detail": row.get("detail", {}),
+                }
+                for row in stage_rows
+            ],
+            "verification_summary": {
+                "query_count": query_count,
+                "matched_query_count": matched_query_count,
+                "target_hit_rate": target_hit_rate,
+            },
+        }
+
+    def rag_upload_verification(self, token: str, *, upload_id: str) -> dict[str, Any]:
+        asset = self.web.rag_upload_asset_get(token, upload_id=upload_id)
+        if "error" in asset:
+            return asset
+        rows = self.web.rag_upload_verification_list(token, upload_id=upload_id, limit=240)
+        query_count = len(rows)
+        matched_query_count = sum(1 for row in rows if bool(row.get("target_hit", False)))
+        target_hit_rate = round((matched_query_count / query_count), 4) if query_count > 0 else 0.0
+        return {
+            "upload_id": str(upload_id),
+            "doc_id": str(asset.get("doc_id", "")),
+            "ready": bool(asset.get("vector_ready", False)),
+            "passed": bool(asset.get("verification_passed", False) or matched_query_count > 0),
+            "reason": "",
+            "query_count": query_count,
+            "matched_query_count": matched_query_count,
+            "target_hit_rate": target_hit_rate,
+            "items": [
+                {
+                    "query": str(row.get("query_text", "")),
+                    "latency_ms": int(row.get("latency_ms", 0) or 0),
+                    "target_hit": bool(row.get("target_hit", False)),
+                    "target_hit_rank": (
+                        int(row.get("target_hit_rank")) if row.get("target_hit_rank") is not None else None
+                    ),
+                    "top_hits": list(row.get("top_hits", [])),
+                }
+                for row in rows
+            ],
+        }
+
+    def rag_upload_delete(self, token: str, *, upload_id: str) -> dict[str, Any]:
+        deleted = self.web.rag_upload_asset_delete_hard(token, upload_id=upload_id)
+        if "error" in deleted:
+            return deleted
+        doc_id = str(deleted.get("doc_id", "")).strip()
+        if doc_id and doc_id in self.ingestion.store.docs:
+            self.ingestion.store.docs.pop(doc_id, None)
+        reindex_result: dict[str, Any]
+        try:
+            reindex_result = self._refresh_summary_vector_index([], force=True)
+        except Exception as ex:  # noqa: BLE001
+            reindex_result = {"status": "failed", "error": str(ex)[:240]}
+        return {
+            **deleted,
+            "vector_reindex": reindex_result,
+        }
+
+    def rag_doc_preview(self, token: str, *, doc_id: str, page: int = 1) -> dict[str, Any]:
+        _ = self.web.require_role(token, {"admin", "ops"})
+        normalized_doc_id = str(doc_id or "").strip()
+        if not normalized_doc_id:
+            raise ValueError("doc_id is required")
+        quality = self.docs_quality_report(normalized_doc_id)
+        if "error" in quality:
+            return quality
+        safe_page = max(1, int(page))
+        page_size = 6
+        chunks = self.web.rag_doc_chunk_list_internal(doc_id=normalized_doc_id, limit=600)
+        total_chunks = len(chunks)
+        total_pages = max(1, (total_chunks + page_size - 1) // page_size) if total_chunks else 1
+        safe_page = min(safe_page, total_pages)
+        start = (safe_page - 1) * page_size
+        selected = chunks[start : start + page_size]
+        stage_logs: list[dict[str, Any]] = []
+        parse_stage_detail: dict[str, Any] = {}
+        upload_row = self.web.store.query_one(
+            """
+            SELECT upload_id, parser_name, ocr_used, quality_score, parse_note, job_status, current_stage,
+                   verification_passed, vector_ready, updated_at
+            FROM rag_upload_asset
+            WHERE doc_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (normalized_doc_id,),
+        )
+        if upload_row and str(upload_row.get("upload_id", "")).strip():
+            upload_id = str(upload_row.get("upload_id", ""))
+            stage_logs = self.web.rag_upload_stage_log_list(token, upload_id=upload_id, limit=120)
+            for row in reversed(stage_logs):
+                if str(row.get("stage", "")) == "parsing":
+                    parse_stage_detail = row.get("detail", {}) if isinstance(row.get("detail"), dict) else {}
+                    break
+            upload_meta = {
+                "upload_id": upload_id,
+                "parser_name": str(upload_row.get("parser_name", "")),
+                "ocr_used": bool(int(upload_row.get("ocr_used", 0) or 0)),
+                "quality_score": float(upload_row.get("quality_score", 0.0) or 0.0),
+                "parse_note": str(upload_row.get("parse_note", "")),
+                "job_status": str(upload_row.get("job_status", "")),
+                "current_stage": str(upload_row.get("current_stage", "")),
+                "verification_passed": bool(int(upload_row.get("verification_passed", 0) or 0)),
+                "vector_ready": bool(int(upload_row.get("vector_ready", 0) or 0)),
+            }
+        else:
+            upload_meta = {}
+
+        preview_items = [
+            {
+                "chunk_id": str(row.get("chunk_id", "")),
+                "chunk_no": int(row.get("chunk_no", 0) or 0),
+                "source": str(row.get("source", "")),
+                "status": str(row.get("effective_status", "")),
+                "quality_score": round(float(row.get("quality_score", 0.0) or 0.0), 4),
+                "excerpt": self._rag_preview_trim(
+                    str(row.get("chunk_text_redacted") or row.get("chunk_text") or ""),
+                    max_len=260,
+                ),
+            }
+            for row in selected
+        ]
+        parse_verdict = {"status": "ok", "message": "Parsed text looks readable"}
+        parse_note_lower = str(upload_meta.get("parse_note", "")).lower()
+        if "pdf_binary_stream_detected" in parse_note_lower:
+            parse_verdict = {
+                "status": "failed",
+                "message": "PDF parse failed: detected compressed binary stream instead of document text",
+            }
+        elif "pdf_ascii_fallback" in parse_note_lower and (
+            ("pdf_parser_unavailable" in parse_note_lower) or not parse_stage_detail
+        ):
+            parse_verdict = {
+                "status": "warning",
+                "message": "PDF parser unavailable, fallback text may be unreliable",
+            }
+        elif preview_items and sum(1 for x in preview_items if "Filter/FlateDecode" in str(x.get("excerpt", ""))) >= max(
+            1,
+            len(preview_items) // 2,
+        ):
+            parse_verdict = {
+                "status": "failed",
+                "message": "Preview shows PDF internals, not human-readable content",
+            }
+        return {
+            "doc_id": normalized_doc_id,
+            "page": safe_page,
+            "page_size": page_size,
+            "total_chunks": total_chunks,
+            "total_pages": total_pages,
+            "items": preview_items,
+            "quality_report": quality,
+            "upload": upload_meta,
+            "parse_verdict": parse_verdict,
+            "parse_trace": parse_stage_detail.get("trace", {}),
+            "parse_quality": parse_stage_detail.get("quality", {}),
+            "stage_logs": [
+                {
+                    "phase": str(row.get("stage", "")),
+                    "status": str(row.get("status", "")),
+                    "at": str(row.get("created_at", "")),
+                    "detail": row.get("detail", {}),
+                }
+                for row in stage_logs
+            ],
+        }
 
     def rag_dashboard(self, token: str) -> dict[str, Any]:
         return self.web.rag_dashboard_summary(token)
@@ -6509,9 +7291,12 @@ class AShareAgentService:
                 )
             )
             result["degrade_reasons"] = merged_reasons
-            # When upstream data pack has hard gaps, mark predict output degraded explicitly.
-            result["data_quality"] = "degraded"
-            quality["data_quality"] = "degraded"
+            # Only hard-gap reasons should force degraded quality.
+            # Watch-level gaps (for example research_insufficient) keep the run usable.
+            has_hard_gap = any(self._predict_reason_severity(code) == "degraded" for code in merged_reasons)
+            if has_hard_gap:
+                result["data_quality"] = "degraded"
+                quality["data_quality"] = "degraded"
             quality["degrade_reasons"] = merged_reasons
         result["input_data_packs"] = [
             {
@@ -6528,12 +7313,66 @@ class AShareAgentService:
         metric_mode = str(latest_eval.get("metric_mode", "simulated")).strip() or "simulated"
         result["metric_mode"] = metric_mode
         result["metrics_note"] = str(latest_eval.get("metrics_note", ""))
-        if quality.get("data_quality") == "real" and metric_mode == "live":
-            result["metrics_live"] = dict(latest_eval.get("metrics", {}) or {})
-            result["metrics_simulated"] = {}
-        else:
-            result["metrics_live"] = {}
-            result["metrics_simulated"] = dict(latest_eval.get("metrics", {}) or {})
+        latest_metrics = dict(latest_eval.get("metrics", {}) or {})
+        # Keep metric sources explicit so frontend can avoid mixed-confidence rendering.
+        result["metrics_live"] = latest_metrics if metric_mode == "live" else {}
+        result["metrics_backtest"] = latest_metrics if metric_mode == "backtest_proxy" else {}
+        result["metrics_simulated"] = latest_metrics if metric_mode == "simulated" else {}
+        result["eval_provenance"] = {
+            "coverage_rows": int(latest_metrics.get("coverage", 0) or 0),
+            "evaluated_stocks": int(latest_eval.get("evaluated_stocks", 0) or 0),
+            "skipped_stocks": list(latest_eval.get("skipped_stocks", []) or []),
+            "history_modes": dict(latest_eval.get("history_modes", {}) or {}),
+            "fallback_reason": str(latest_eval.get("fallback_reason", "")),
+            "run_data_quality": str(quality.get("data_quality", "unknown")),
+        }
+        result["quality_gate"] = self._predict_build_quality_gate(result, latest_eval)
+        result["quality_gate_summary"] = self._predict_build_quality_gate_summary(result["quality_gate"])
+
+        # Multi-role arbitration is now a first-class output for predict.
+        # We cap per-run debate fan-out to keep latency bounded for large pools.
+        pack_by_code = {str(pack.get("stock_code", "")).strip().upper(): pack for pack in data_packs}
+        debate_cap = min(8, len(list(result.get("results", []))))
+        debate_rows: list[dict[str, Any]] = []
+        for item in list(result.get("results", []))[:debate_cap]:
+            code = str(item.get("stock_code", "")).strip().upper()
+            quote = self._latest_quote(code) or {}
+            bars = self._history_bars(code, limit=160)
+            trend = self._trend_metrics(bars) if len(bars) >= 30 else {}
+            horizons_rows = list(item.get("horizons", []) or [])
+            quant_20 = next(
+                (x for x in horizons_rows if str(x.get("horizon", "")).strip().lower() == "20d"),
+                horizons_rows[0] if horizons_rows else {},
+            )
+            debate_rows.append(
+                self._predict_run_multi_role_debate(
+                    stock_code=code,
+                    question=str(payload.get("question", "")).strip() or f"predict:{code}",
+                    quote=quote,
+                    trend=trend,
+                    quant_20=quant_20,
+                    quality_gate=dict(result.get("quality_gate", {}) or {}),
+                    input_pack=pack_by_code.get(code),
+                )
+            )
+
+        primary_debate = debate_rows[0] if debate_rows else {}
+        result["multi_role_enabled"] = True
+        result["multi_role_trace_id"] = str(primary_debate.get("trace_id", ""))
+        result["multi_role_truncated"] = len(list(result.get("results", []))) > debate_cap
+        result["multi_role_debate"] = debate_rows
+        # Keep compatibility with existing frontend by exposing a top-level primary view.
+        result["role_opinions"] = list(primary_debate.get("opinions", []))
+        result["judge_summary"] = str(primary_debate.get("judge_summary", ""))
+        result["conflict_sources"] = list(primary_debate.get("conflict_sources", []))
+        result["consensus_signal"] = str(primary_debate.get("consensus_signal", "hold"))
+        result["consensus_confidence"] = float(primary_debate.get("consensus_confidence", 0.5) or 0.5)
+        result["engine_profile"] = {
+            "prediction_engine": "quant_rule_v1",
+            "llm_used_in_scoring": False,
+            "llm_used_in_explain": bool(self.settings.llm_external_enabled and self.llm_gateway.providers),
+            "latency_mode": "fast_local_compute",
+        }
         return result
 
     def _predict_attach_quality(self, result: dict[str, Any]) -> dict[str, Any]:
@@ -6643,6 +7482,550 @@ class AShareAgentService:
             out[key] = rows_out
         return out
 
+    @staticmethod
+    def _predict_reason_dimension(reason: str) -> str:
+        raw = str(reason or "").strip().lower()
+        if raw.startswith("input_pack:"):
+            return "evidence_quality"
+        if raw.startswith("history_") or raw.startswith("quote_") or raw in {"empty_prediction_result"}:
+            return "history_quality"
+        if raw.startswith("metrics_") or raw.startswith("eval:") or raw in {"insufficient_backtest_rows"}:
+            return "metric_quality"
+        return "evidence_quality"
+
+    @staticmethod
+    def _predict_merge_status(current: str, incoming: str) -> str:
+        rank = {"pass": 0, "watch": 1, "degraded": 2}
+        left = str(current or "pass").strip().lower()
+        right = str(incoming or "pass").strip().lower()
+        if left not in rank:
+            left = "pass"
+        if right not in rank:
+            right = "degraded"
+        return left if rank[left] >= rank[right] else right
+
+    def _predict_reason_severity(self, reason: str) -> str:
+        severity = str(self._predict_reason_detail(reason).get("severity", "degraded")).strip().lower()
+        if severity not in {"pass", "watch", "degraded"}:
+            return "degraded"
+        return severity
+
+    def _predict_reason_detail(self, reason: str) -> dict[str, str]:
+        raw = str(reason or "").strip()
+        key = raw.lower()
+        dimension = self._predict_reason_dimension(raw)
+        if key == "history_not_real":
+            return {
+                "code": raw,
+                "dimension": dimension,
+                "title": "历史行情非真实样本",
+                "impact": "预测可靠性下降，适合做方向性参考，不宜用于高置信结论。",
+                "action": "补齐真实历史K线后重新运行。",
+                "severity": "degraded",
+            }
+        if key == "history_sample_insufficient":
+            return {
+                "code": raw,
+                "dimension": dimension,
+                "title": "历史样本量不足",
+                "impact": "周期统计不稳定，短中期信号波动会放大。",
+                "action": "扩充历史窗口并重跑预测。",
+                "severity": "degraded",
+            }
+        if key == "history_fetch_degraded":
+            return {
+                "code": raw,
+                "dimension": dimension,
+                "title": "历史数据抓取发生降级",
+                "impact": "部分关键因子可能使用兜底序列。",
+                "action": "检查数据源连通性后重跑。",
+                "severity": "degraded",
+            }
+        if key == "quote_source_mock":
+            return {
+                "code": raw,
+                "dimension": dimension,
+                "title": "实时行情来源为兜底源",
+                "impact": "价格与成交强度可能存在偏差。",
+                "action": "确认实时行情源状态后再决策。",
+                "severity": "degraded",
+            }
+        if key == "metrics_simulated":
+            return {
+                "code": raw,
+                "dimension": dimension,
+                "title": "评测为模拟模式",
+                "impact": "指标仅能做相对排序，不代表真实收益能力。",
+                "action": "补齐真实回测样本后复核。",
+                "severity": "watch",
+            }
+        if key.startswith("eval:"):
+            return {
+                "code": raw,
+                "dimension": dimension,
+                "title": "评测链路已降级",
+                "impact": f"回退原因: {raw.split(':', 1)[1] if ':' in raw else 'unknown'}",
+                "action": "补齐评测样本并重新触发评测。",
+                "severity": "watch",
+            }
+        if key.startswith("input_pack:"):
+            missing_code = key.split(":", 1)[1] if ":" in key else ""
+            missing_map: dict[str, tuple[str, str, str, str]] = {
+                "quote_missing": ("实时行情缺失", "缺少最新价格上下文，信号时效性下降。", "检查行情抓取链路并补抓。", "degraded"),
+                "history_insufficient": ("历史行情不足", "趋势因子样本不足，稳定性变弱。", "补齐历史K线后重跑。", "degraded"),
+                "history_30d_insufficient": ("近30日样本不足", "短周期研判依据不充分。", "补齐近30日样本。", "degraded"),
+                "financial_missing": ("财务快照缺失", "估值与盈利验证链路不完整。", "补齐财务数据后重跑。", "degraded"),
+                "announcement_missing": ("公告样本缺失", "公司事件影响难以校验。", "补抓公告并刷新。", "watch"),
+                "news_insufficient": ("新闻样本不足", "事件驱动信息覆盖不足。", "补抓新闻数据。", "watch"),
+                # Business decision: research shortage should not hard-block predict outputs.
+                "research_insufficient": ("研报证据不足", "机构观点与一致预期覆盖不足。", "补齐研报摘要后重跑。", "watch"),
+                "fund_missing": ("资金面样本缺失", "资金流驱动判断弱化。", "补抓资金面数据。", "watch"),
+                "macro_insufficient": ("宏观样本不足", "宏观扰动未充分纳入解释。", "补齐宏观数据。", "watch"),
+            }
+            title, impact, action, severity = missing_map.get(
+                missing_code,
+                ("输入数据包存在缺口", f"缺失项: {missing_code or 'unknown'}。", "补齐缺失数据后复核。", "watch"),
+            )
+            return {
+                "code": raw,
+                "dimension": dimension,
+                "title": title,
+                "impact": impact,
+                "action": action,
+                "severity": severity,
+            }
+        return {
+            "code": raw,
+            "dimension": dimension,
+            "title": "存在待处理降级项",
+            "impact": f"降级代码: {raw or 'unknown'}",
+            "action": "建议复核数据覆盖并重新运行。",
+            "severity": "watch",
+        }
+
+    def _predict_build_quality_gate(self, result: dict[str, Any], latest_eval: dict[str, Any]) -> dict[str, Any]:
+        reasons = [str(x).strip() for x in list(result.get("degrade_reasons", []) or []) if str(x).strip()]
+        metric_mode = str(result.get("metric_mode", latest_eval.get("metric_mode", "simulated"))).strip() or "simulated"
+        fallback_reason = str((result.get("eval_provenance", {}) or {}).get("fallback_reason", latest_eval.get("fallback_reason", ""))).strip()
+        coverage_rows = int((result.get("eval_provenance", {}) or {}).get("coverage_rows", (latest_eval.get("metrics", {}) or {}).get("coverage", 0)) or 0)
+        evaluated_stocks = int((result.get("eval_provenance", {}) or {}).get("evaluated_stocks", latest_eval.get("evaluated_stocks", 0)) or 0)
+        if metric_mode == "simulated":
+            reasons.append("metrics_simulated")
+        if fallback_reason:
+            reasons.append(f"eval:{fallback_reason}")
+        dedup_reasons = list(dict.fromkeys(reasons))
+
+        dims: dict[str, dict[str, Any]] = {
+            "history_quality": {"status": "pass", "reasons": []},
+            "evidence_quality": {"status": "pass", "reasons": []},
+            "metric_quality": {"status": "pass", "reasons": []},
+        }
+        reason_details: list[dict[str, str]] = []
+        actions: list[str] = []
+        for reason in dedup_reasons:
+            detail = self._predict_reason_detail(reason)
+            dim_key = str(detail.get("dimension", "evidence_quality"))
+            if dim_key not in dims:
+                dim_key = "evidence_quality"
+            dims[dim_key]["reasons"].append(str(detail.get("code", reason)))
+            dims[dim_key]["status"] = self._predict_merge_status(
+                str(dims[dim_key].get("status", "pass")),
+                str(detail.get("severity", "degraded")),
+            )
+            reason_details.append(detail)
+            action = str(detail.get("action", "")).strip()
+            if action:
+                actions.append(action)
+
+        # backtest_proxy can be used for research, but low sample coverage should be treated as watch.
+        if dims["metric_quality"]["status"] == "pass" and metric_mode == "backtest_proxy":
+            if coverage_rows < 80 or evaluated_stocks < 2:
+                dims["metric_quality"]["status"] = "watch"
+                actions.append("扩大真实回测样本后复核关键信号。")
+
+        statuses = [str(dims[k]["status"]) for k in ("history_quality", "evidence_quality", "metric_quality")]
+        if "degraded" in statuses:
+            overall_status = "degraded"
+        elif "watch" in statuses:
+            overall_status = "watch"
+        else:
+            overall_status = "pass"
+
+        rank = {"pass": 0, "watch": 1, "degraded": 2}
+        sorted_details = sorted(
+            reason_details,
+            key=lambda item: rank.get(str(item.get("severity", "degraded")).strip().lower(), 2),
+            reverse=True,
+        )
+
+        if overall_status == "degraded":
+            primary = sorted_details[0] if sorted_details else {
+                "title": "存在降级项",
+                "impact": "当前结果可信度下降。",
+                "action": "建议补齐样本后重跑。",
+            }
+            user_message = f"当前预测处于降级模式：{primary['title']}。{primary['impact']} 建议：{primary['action']}"
+        elif overall_status == "watch":
+            user_message = "当前结果可用于研究参考，但评测覆盖偏低，建议补齐样本后再使用高置信结论。"
+        else:
+            user_message = "数据与评测门禁通过，可用于研究参考（不构成投资建议）。"
+
+        return {
+            "overall_status": overall_status,
+            "dimensions": {
+                key: {
+                    "status": str(val.get("status", "pass")),
+                    "reason_count": len(list(val.get("reasons", []))),
+                    "reasons": list(val.get("reasons", [])),
+                }
+                for key, val in dims.items()
+            },
+            "reasons": dedup_reasons,
+            "reason_details": reason_details,
+            "user_message": user_message,
+            "actions": list(dict.fromkeys([x for x in actions if str(x).strip()])),
+        }
+
+    def _predict_build_quality_gate_summary(self, quality_gate: dict[str, Any]) -> dict[str, Any]:
+        details = list(quality_gate.get("reason_details", []) or [])
+        primary = details[0] if details else {}
+        return {
+            "status": str(quality_gate.get("overall_status", "pass")),
+            "headline": str(primary.get("title", "质量门禁通过")),
+            "impact": str(primary.get("impact", "当前结果可用于研究参考。")),
+            "action": str(primary.get("action", "")),
+            "reason_count": len(list(quality_gate.get("reasons", []) or [])),
+        }
+
+    def _predict_run_multi_role_debate(
+        self,
+        *,
+        stock_code: str,
+        question: str,
+        quote: dict[str, Any],
+        trend: dict[str, Any],
+        quant_20: dict[str, Any],
+        quality_gate: dict[str, Any],
+        input_pack: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run one predictable multi-role arbitration for predict/report/deepthink shared usage."""
+        trace_id = self.traces.new_trace()
+        rule_defaults = self._build_rule_based_debate_opinions(question, trend, quote, quant_20)
+        base_opinions = list(rule_defaults)
+        debate_mode = "rule_fallback"
+        # Predict module prioritizes deterministic low-latency responses.
+        # Keep LLM debate as a future opt-in, not the default request path.
+        if False and self.settings.llm_external_enabled and self.llm_gateway.providers:
+            llm_rows = self._build_llm_debate_opinions(question, stock_code, trend, quote, quant_20, rule_defaults)
+            if llm_rows:
+                base_opinions = llm_rows
+                debate_mode = "llm_parallel"
+
+        core_map = {str(row.get("agent", "")): row for row in base_opinions}
+        # `predict` uses `overall_status`, while `report` currently uses `status`.
+        # Accept both keys so the same arbitration helper can be reused cross-module.
+        quality_status = str(quality_gate.get("overall_status", quality_gate.get("status", "pass"))).strip().lower() or "pass"
+        quality_reasons = [str(x).strip() for x in list(quality_gate.get("reasons", []) or []) if str(x).strip()]
+        missing_data_rows = list((input_pack or {}).get("missing_data", []))
+        missing_data = [str(x).strip() for x in missing_data_rows if str(x).strip()]
+
+        pm = self._normalize_deep_opinion(
+            agent="pm_agent",
+            signal=str(core_map.get("pm_agent", {}).get("signal", "hold")),
+            confidence=float(core_map.get("pm_agent", {}).get("confidence", 0.62) or 0.62),
+            reason=str(core_map.get("pm_agent", {}).get("reason", "Theme narrative view from PM role.")),
+            evidence_ids=[],
+            risk_tags=[],
+        )
+        quant = self._normalize_deep_opinion(
+            agent="quant_agent",
+            signal=str(core_map.get("quant_agent", {}).get("signal", "hold")),
+            confidence=float(core_map.get("quant_agent", {}).get("confidence", 0.64) or 0.64),
+            reason=str(core_map.get("quant_agent", {}).get("reason", "Quant factor and probability signal.")),
+            evidence_ids=[],
+            risk_tags=[],
+        )
+        risk = self._normalize_deep_opinion(
+            agent="risk_agent",
+            signal=str(core_map.get("risk_agent", {}).get("signal", "hold")),
+            confidence=float(core_map.get("risk_agent", {}).get("confidence", 0.68) or 0.68),
+            reason=str(core_map.get("risk_agent", {}).get("reason", "Drawdown and volatility constraints.")),
+            evidence_ids=[],
+            risk_tags=[],
+        )
+
+        momentum_20 = float(trend.get("momentum_20", 0.0) or 0.0)
+        macro_signal = "hold"
+        if momentum_20 > 0.03:
+            macro_signal = "buy"
+        elif momentum_20 < -0.03:
+            macro_signal = "reduce"
+        macro = self._normalize_deep_opinion(
+            agent="macro_agent",
+            signal=macro_signal,
+            confidence=0.60,
+            reason=(
+                "Macro role reviewed regime proxy from trend and data freshness; "
+                f"momentum_20={momentum_20:.4f}, quality_status={quality_status}."
+            ),
+            evidence_ids=[],
+            risk_tags=(["macro_data_gap"] if "input_pack:macro_insufficient" in quality_reasons else []),
+        )
+
+        execution_signal = "hold" if str(risk.get("signal")) == "hold" else str(risk.get("signal"))
+        execution = self._normalize_deep_opinion(
+            agent="execution_agent",
+            signal=execution_signal,
+            confidence=0.61,
+            reason=(
+                "Execution role converts risk posture into sizing cadence. "
+                f"risk_signal={risk.get('signal')}, quality_status={quality_status}."
+            ),
+            evidence_ids=[],
+            risk_tags=[],
+        )
+
+        compliance_signal = "reduce" if quality_status == "degraded" else "hold"
+        compliance = self._normalize_deep_opinion(
+            agent="compliance_agent",
+            signal=compliance_signal,
+            confidence=0.72 if compliance_signal == "reduce" else 0.58,
+            reason=(
+                "Compliance role enforces conservative output under quality stress. "
+                f"quality_reasons={','.join(quality_reasons) or 'none'}."
+            ),
+            evidence_ids=[],
+            risk_tags=(["quality_block"] if compliance_signal == "reduce" else []),
+        )
+
+        critic_signal = "hold" if quality_status in {"pass", "watch"} else "reduce"
+        critic = self._normalize_deep_opinion(
+            agent="critic_agent",
+            signal=critic_signal,
+            confidence=0.66,
+            reason=(
+                "Critic role checks evidence coverage and logic consistency. "
+                f"missing_data={','.join(missing_data) or 'none'}."
+            ),
+            evidence_ids=[],
+            risk_tags=(["evidence_gap"] if missing_data else []),
+        )
+
+        opinions = [pm, quant, risk, macro, execution, compliance, critic]
+        arbitration = self._arbitrate_opinions(opinions)
+        consensus_conf = max(
+            0.3,
+            min(
+                0.92,
+                (1.0 - float(arbitration.get("disagreement_score", 0.0) or 0.0)) * 0.7
+                + float(sum(float(x.get("confidence", 0.0)) for x in opinions) / max(1, len(opinions))) * 0.3,
+            ),
+        )
+        supervisor = self._normalize_deep_opinion(
+            agent="supervisor_agent",
+            signal=str(arbitration.get("consensus_signal", "hold")),
+            confidence=consensus_conf,
+            reason=(
+                "Supervisor arbitration merged role conflicts into one actionable stance; "
+                f"conflicts={','.join(list(arbitration.get('conflict_sources', []))[:4]) or 'none'}."
+            ),
+            evidence_ids=[],
+            risk_tags=[],
+        )
+        final_opinions = opinions + [supervisor]
+        final_arb = self._arbitrate_opinions(final_opinions)
+        final_arb["consensus_confidence"] = round(float(supervisor.get("confidence", 0.5) or 0.5), 4)
+
+        judge_summary = (
+            f"{stock_code} 多角色裁决：{final_arb['consensus_signal']}，"
+            f"置信度 {final_arb['consensus_confidence']:.2f}，"
+            f"冲突源 {','.join(final_arb['conflict_sources']) or 'none'}。"
+        )
+        self.traces.emit(
+            trace_id,
+            "predict_multi_role_done",
+            {
+                "stock_code": stock_code,
+                "debate_mode": debate_mode,
+                "consensus_signal": final_arb["consensus_signal"],
+                "consensus_confidence": final_arb["consensus_confidence"],
+                "conflict_sources": final_arb["conflict_sources"],
+            },
+        )
+        return {
+            "trace_id": trace_id,
+            "stock_code": stock_code,
+            "debate_mode": debate_mode,
+            "opinions": final_opinions,
+            "consensus_signal": str(final_arb.get("consensus_signal", "hold")),
+            "consensus_confidence": float(final_arb.get("consensus_confidence", 0.5) or 0.5),
+            "disagreement_score": float(final_arb.get("disagreement_score", 0.0) or 0.0),
+            "conflict_sources": list(final_arb.get("conflict_sources", [])),
+            "counter_view": str(final_arb.get("counter_view", "")),
+            "judge_summary": judge_summary,
+        }
+
+    def predict_explain(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Build prediction explanation with optional LLM overlay (scoring remains quant-only)."""
+        run_id = str(payload.get("run_id", "")).strip()
+        if not run_id:
+            raise ValueError("run_id is required")
+
+        run = self.predict_get(run_id)
+        if "error" in run:
+            raise ValueError(f"predict run not found: {run_id}")
+
+        items = list(run.get("results", []) or [])
+        if not items:
+            raise ValueError("prediction result is empty")
+
+        target_code = str(payload.get("stock_code", "")).strip().upper().replace(".", "")
+        target_item = next((x for x in items if str(x.get("stock_code", "")).upper() == target_code), None) if target_code else items[0]
+        if not target_item:
+            raise ValueError(f"stock_code not found in run: {target_code}")
+
+        target_code = str(target_item.get("stock_code", "")).strip().upper()
+        horizon = str(payload.get("horizon", "20d")).strip().lower()
+        horizons = list(target_item.get("horizons", []) or [])
+        target_h = next((x for x in horizons if str(x.get("horizon", "")).strip().lower() == horizon), None)
+        if not target_h:
+            target_h = next((x for x in horizons if str(x.get("horizon", "")).strip().lower() == "20d"), horizons[0] if horizons else None)
+        if not target_h:
+            raise ValueError("horizon result not found")
+
+        latest_eval = self.prediction.eval_latest()
+        quality_gate = dict(run.get("quality_gate", {}) or self._predict_build_quality_gate(run, latest_eval))
+
+        signal = str(target_h.get("signal", "hold")).strip().lower()
+        risk_tier = str(target_h.get("risk_tier", "medium")).strip().lower()
+        up_prob = float(target_h.get("up_probability", 0.0) or 0.0)
+        expected_excess = float(target_h.get("expected_excess_return", 0.0) or 0.0)
+        horizon_name = str(target_h.get("horizon", horizon)).strip() or "20d"
+
+        signal_label = {
+            "strong_buy": "强增配",
+            "buy": "增配",
+            "hold": "持有",
+            "reduce": "减配",
+            "strong_reduce": "强减配",
+        }.get(signal, signal or "持有")
+        risk_label = {"low": "低", "medium": "中", "high": "高"}.get(risk_tier, risk_tier or "中")
+
+        base_payload = {
+            "summary": (
+                f"{target_code} 在 {horizon_name} 维度给出「{signal_label}」信号，"
+                f"上涨概率约 {up_prob * 100:.1f}% ，预期超额收益约 {expected_excess * 100:.2f}% 。"
+            ),
+            "drivers": [],
+            "risks": [],
+            "actions": [],
+        }
+        rationale = str(target_h.get("rationale", "")).strip()
+        if rationale:
+            base_payload["drivers"].append(f"量化因子依据：{rationale[:180]}")
+        base_payload["drivers"].append(f"概率信号：up_probability={up_prob * 100:.1f}%")
+        base_payload["drivers"].append(f"收益信号：expected_excess_return={expected_excess * 100:.2f}%")
+
+        base_payload["risks"].append(f"风险分层：{risk_label}风险。")
+        for detail in list(quality_gate.get("reason_details", []) or [])[:2]:
+            title = str((detail or {}).get("title", "")).strip()
+            impact = str((detail or {}).get("impact", "")).strip()
+            if title or impact:
+                base_payload["risks"].append(f"{title}：{impact}".strip("："))
+        if not base_payload["risks"]:
+            base_payload["risks"].append("当前未发现显著数据降级风险。")
+
+        signal_action = {
+            "strong_buy": "优先关注回调后的分批增配节奏，避免一次性重仓。",
+            "buy": "可考虑小步增配，并设置触发复核条件。",
+            "hold": "维持观察，等待新证据或更强信号。",
+            "reduce": "优先控制仓位，关注风险释放节奏。",
+            "strong_reduce": "降低敞口并优先防守，等待风险信号缓解。",
+        }.get(signal, "先做小仓位试探，再根据新数据复核。")
+        base_payload["actions"].append(signal_action)
+        for action in list(quality_gate.get("actions", []) or [])[:3]:
+            if str(action).strip():
+                base_payload["actions"].append(str(action).strip())
+        base_payload["actions"] = list(dict.fromkeys(base_payload["actions"]))[:4]
+
+        llm_used = False
+        provider = ""
+        model = ""
+        degraded_reason = ""
+        trace_id = self.traces.new_trace()
+        if not self.settings.llm_external_enabled:
+            degraded_reason = "external_llm_disabled"
+        elif not self.llm_gateway.providers:
+            degraded_reason = "llm_provider_not_configured"
+        else:
+            prompt_payload = {
+                "stock_code": target_code,
+                "horizon": horizon_name,
+                "signal": signal,
+                "signal_label": signal_label,
+                "risk_tier": risk_tier,
+                "up_probability": round(up_prob, 6),
+                "expected_excess_return": round(expected_excess, 6),
+                "quality_gate": quality_gate,
+                "rationale": rationale,
+            }
+            prompt_text = (
+                "你是A股研究助手。请基于输入生成简洁、可执行的研究解释。\n"
+                "要求：\n"
+                "1) 不得承诺收益，不得给确定性结论；\n"
+                "2) 必须体现数据质量限制；\n"
+                "3) 输出严格 JSON 对象，字段仅包含 summary, drivers, risks, actions；\n"
+                "4) drivers/risks/actions 各输出 2-4 条短句。\n\n"
+                f"输入:\n{json.dumps(prompt_payload, ensure_ascii=False)}"
+            )
+            state = AgentState(
+                user_id="predict-explainer",
+                question=f"predict explain {target_code}",
+                stock_codes=[target_code],
+                trace_id=trace_id,
+                mode="predict_explain",
+            )
+            try:
+                raw = self.llm_gateway.generate(state, prompt_text)
+                parsed = self._deep_safe_json_loads(raw)
+                summary = str(parsed.get("summary", "")).strip()
+                drivers = [str(x).strip() for x in list(parsed.get("drivers", []) or []) if str(x).strip()][:4]
+                risks = [str(x).strip() for x in list(parsed.get("risks", []) or []) if str(x).strip()][:4]
+                actions = [str(x).strip() for x in list(parsed.get("actions", []) or []) if str(x).strip()][:4]
+                if summary:
+                    base_payload["summary"] = summary[:260]
+                if drivers:
+                    base_payload["drivers"] = drivers
+                if risks:
+                    base_payload["risks"] = risks
+                if actions:
+                    base_payload["actions"] = actions
+                llm_used = True
+                provider = str(state.analysis.get("llm_provider", ""))
+                model = str(state.analysis.get("llm_model", ""))
+            except Exception as ex:  # noqa: BLE001
+                degraded_reason = f"llm_provider_failed:{str(ex)[:160]}"
+
+        return {
+            "run_id": run_id,
+            "trace_id": trace_id,
+            "stock_code": target_code,
+            "horizon": horizon_name,
+            "signal": signal,
+            "risk_tier": risk_tier,
+            "expected_excess_return": expected_excess,
+            "up_probability": up_prob,
+            "summary": str(base_payload.get("summary", "")),
+            "drivers": list(base_payload.get("drivers", [])),
+            "risks": list(base_payload.get("risks", [])),
+            "actions": list(base_payload.get("actions", [])),
+            "llm_used": llm_used,
+            "provider": provider,
+            "model": model,
+            "degraded_reason": degraded_reason,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
     def predict_get(self, run_id: str) -> dict[str, Any]:
         """Get prediction task details."""
         return self.prediction.get_prediction(run_id)
@@ -6654,6 +8037,76 @@ class AShareAgentService:
     def predict_eval_latest(self) -> dict[str, Any]:
         """Get latest prediction evaluation summary."""
         return self.prediction.eval_latest()
+
+    def predict_self_test(self, *, stock_code: str = "SH600000", question: str = "") -> dict[str, Any]:
+        """Run one predict chain self-test and return traceable diagnostics."""
+        code = str(stock_code or "SH600000").strip().upper().replace(".", "")
+        probe_question = str(question or "").strip() or f"predict self-test for {code}"
+
+        if self._needs_quote_refresh(code):
+            self.ingest_market_daily([code])
+        if self._needs_history_refresh(code):
+            self.ingestion.ingest_history_daily([code], limit=260)
+        if self._needs_financial_refresh(code):
+            self.ingest_financials([code])
+        if self._needs_news_refresh(code):
+            self.ingest_news([code], limit=8)
+        if self._needs_research_refresh(code):
+            self.ingest_research_reports([code], limit=6)
+        if self._needs_fund_refresh(code):
+            self.ingest_fund_snapshots([code])
+        if self._needs_macro_refresh():
+            self.ingest_macro_indicators(limit=8)
+
+        started = time.perf_counter()
+        run_payload = {
+            "stock_codes": [code],
+            "horizons": ["5d", "20d"],
+            "question": probe_question,
+        }
+        run = self.predict_run(run_payload)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+
+        run_id = str(run.get("run_id", "")).strip()
+        explain_payload: dict[str, Any] = {}
+        explain_error = ""
+        if run_id:
+            try:
+                explain_payload = self.predict_explain({"run_id": run_id, "stock_code": code, "horizon": "20d"})
+            except Exception as ex:  # noqa: BLE001
+                explain_error = str(ex)[:220]
+
+        trace_id = str(run.get("multi_role_trace_id", run.get("trace_id", ""))).strip()
+        trace_rows = self.multi_role_trace_events(trace_id, limit=120).get("events", []) if trace_id else []
+        quality_gate = dict(run.get("quality_gate", {}) or {})
+        return {
+            "ok": True,
+            "stock_code": code,
+            "question": probe_question,
+            "latency_ms": latency_ms,
+            "run_id": run_id,
+            "quality_gate": quality_gate,
+            "quality_gate_summary": dict(run.get("quality_gate_summary", {}) or {}),
+            "degrade_reasons": list(run.get("degrade_reasons", []) or []),
+            "multi_role_trace_id": trace_id,
+            "multi_role_enabled": bool(run.get("multi_role_enabled", False)),
+            "consensus_signal": str(run.get("consensus_signal", "hold")),
+            "consensus_confidence": float(run.get("consensus_confidence", 0.5) or 0.5),
+            "conflict_sources": list(run.get("conflict_sources", []) or []),
+            "judge_summary": str(run.get("judge_summary", "")),
+            "trace_events": trace_rows,
+            "explain_status": "ok" if explain_payload else "failed",
+            "explain_error": explain_error,
+            "explain_preview": {
+                "llm_used": bool(explain_payload.get("llm_used", False)) if explain_payload else False,
+                "degraded_reason": str(explain_payload.get("degraded_reason", "")) if explain_payload else "",
+                "summary": str(explain_payload.get("summary", "")) if explain_payload else "",
+            },
+        }
+
+    def multi_role_trace_events(self, trace_id: str, *, limit: int = 120) -> dict[str, Any]:
+        """Return predict multi-role trace rows. Reuses common trace store formatter."""
+        return self.deep_think_trace_events(trace_id, limit=limit)
 
     def market_overview(self, stock_code: str) -> dict[str, Any]:
         """Return structured market overview: realtime, history, announcements, and trends."""
@@ -7504,7 +8957,109 @@ class AShareAgentService:
             related_portfolio_id=body.get("related_portfolio_id"),
             tags=tags,
             sentiment=str(body.get("sentiment", "")),
+            source_type=str(body.get("source_type", "manual")),
+            source_ref_id=str(body.get("source_ref_id", "")),
+            status=str(body.get("status", "open")),
+            review_due_at=str(body.get("review_due_at", "")),
+            executed_as_planned=body.get("executed_as_planned", False),
+            outcome_rating=str(body.get("outcome_rating", "")),
+            outcome_note=str(body.get("outcome_note", "")),
+            deviation_reason=str(body.get("deviation_reason", "")),
+            closed_at=str(body.get("closed_at", "")),
         )
+
+    def journal_create_quick(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        body = dict(payload or {})
+        stock_code = str(body.get("stock_code", "")).strip().upper()
+        if not stock_code:
+            raise ValueError("stock_code is required")
+        event_type = str(body.get("event_type", "watch")).strip().lower() or "watch"
+        if event_type not in {"buy", "sell", "rebalance", "watch"}:
+            raise ValueError("event_type must be one of buy/sell/rebalance/watch")
+        review_days = max(1, min(365, int(body.get("review_days", 5) or 5)))
+        thesis = str(body.get("thesis", "")).strip()
+        custom_tags = body.get("tags", [])
+        tags = [event_type, "quick_log", stock_code]
+        if isinstance(custom_tags, list):
+            tags.extend([str(x).strip() for x in custom_tags if str(x).strip()])
+        tags = list(dict.fromkeys(tags))[:12]
+
+        event_label = {
+            "buy": "买入",
+            "sell": "卖出",
+            "rebalance": "调仓",
+            "watch": "观察",
+        }.get(event_type, event_type)
+        decision_type = "buy" if event_type == "buy" else "reduce" if event_type == "sell" else "hold"
+        due_at = (datetime.now() + timedelta(days=review_days)).strftime("%Y-%m-%d %H:%M:%S")
+        content = "\n".join(
+            [
+                f"事件类型: {event_type}",
+                f"标的: {stock_code}",
+                f"观点: {thesis or '（可选，后补）'}",
+                "执行记录: （后续补充）",
+                "偏差原因: （后续补充）",
+                "改进动作: （后续补充）",
+            ]
+        )
+        return self.web.journal_create(
+            token,
+            journal_type="decision",
+            title=f"{event_label}记录 {stock_code}",
+            content=content,
+            stock_code=stock_code,
+            decision_type=decision_type,
+            tags=tags,
+            sentiment="neutral",
+            source_type="manual",
+            source_ref_id="",
+            status="open",
+            review_due_at=due_at,
+        )
+
+    def journal_create_from_transaction(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        portfolio_id = int(payload.get("portfolio_id", 0) or 0)
+        transaction_id = int(payload.get("transaction_id", 0) or 0)
+        review_days = int(payload.get("review_days", 5) or 5)
+        if portfolio_id <= 0:
+            raise ValueError("portfolio_id must be > 0")
+        if transaction_id <= 0:
+            raise ValueError("transaction_id must be > 0")
+        return self.web.journal_create_from_transaction(
+            token,
+            portfolio_id=portfolio_id,
+            transaction_id=transaction_id,
+            review_days=review_days,
+        )
+
+    def journal_review_queue(
+        self,
+        token: str,
+        *,
+        status: str = "",
+        stock_code: str = "",
+        limit: int = 60,
+    ) -> list[dict[str, Any]]:
+        return self.web.journal_review_queue(
+            token,
+            status=status,
+            stock_code=stock_code,
+            limit=limit,
+        )
+
+    def journal_outcome_update(self, token: str, journal_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.web.journal_outcome_update(
+            token,
+            journal_id=journal_id,
+            executed_as_planned=payload.get("executed_as_planned"),
+            outcome_rating=payload.get("outcome_rating"),
+            outcome_note=payload.get("outcome_note"),
+            deviation_reason=payload.get("deviation_reason"),
+            close=payload.get("close"),
+        )
+
+    def journal_execution_board(self, token: str, *, window_days: int = 30) -> dict[str, Any]:
+        return self.web.journal_execution_board(token, window_days=window_days)
 
     def journal_list(
         self,

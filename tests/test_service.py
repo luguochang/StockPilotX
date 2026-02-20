@@ -112,6 +112,14 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("metric_snapshot", generated)
         self.assertIn("analysis_nodes", generated)
         self.assertIn("quality_dashboard", generated)
+        self.assertIn("multi_role_enabled", generated)
+        self.assertIn("multi_role_trace_id", generated)
+        self.assertIn("multi_role_decision", generated)
+        self.assertIn("role_opinions", generated)
+        self.assertIn("judge_summary", generated)
+        self.assertIn("conflict_sources", generated)
+        self.assertIn("consensus_signal", generated)
+        self.assertIn("consensus_confidence", generated)
         self.assertIn("schema_version", generated)
         modules = generated.get("report_modules", [])
         if isinstance(modules, list) and modules:
@@ -128,6 +136,10 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("committee", loaded)
         self.assertIn("metric_snapshot", loaded)
         self.assertIn("quality_dashboard", loaded)
+        self.assertIn("multi_role_enabled", loaded)
+        self.assertIn("multi_role_trace_id", loaded)
+        self.assertIn("consensus_signal", loaded)
+        self.assertIn("consensus_confidence", loaded)
         evidence_refs = generated.get("evidence_refs", [])
         if isinstance(evidence_refs, list) and evidence_refs:
             self.assertIn("freshness_score", evidence_refs[0])
@@ -171,6 +183,19 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(str((diff.get("diff", {}) or {}).get("base_version", "")), str(min(v.get("version", 0) for v in versions)))
         self.assertEqual(str((diff.get("diff", {}) or {}).get("candidate_version", "")), str(max(v.get("version", 0) for v in versions)))
         self.assertIn("module_deltas", diff.get("diff", {}))
+
+    def test_report_self_test(self) -> None:
+        result = self.svc.report_self_test(stock_code="SH600000", report_type="research", period="1y")
+        self.assertTrue(bool(result.get("ok", False)))
+        self.assertEqual(str(result.get("stock_code", "")), "SH600000")
+        sync = result.get("sync", {})
+        self.assertTrue(isinstance(sync, dict))
+        self.assertIn("multi_role_enabled", sync)
+        self.assertIn("multi_role_trace_id", sync)
+        self.assertIn("consensus_signal", sync)
+        async_part = result.get("async", {})
+        self.assertTrue(isinstance(async_part, dict))
+        self.assertIn(str(async_part.get("final_status", "")), {"completed", "partial_ready", "failed"})
 
     def test_report_task_lifecycle(self) -> None:
         task = self.svc.report_task_create(
@@ -402,6 +427,10 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("retrieval_preview", workflow)
         result = workflow.get("result", {})
         self.assertTrue(str(result.get("doc_id", "")).startswith("ragdoc-"))
+        self.assertIn("parse_trace", result)
+        self.assertIn("parse_quality", result)
+        upload_id = str(result.get("upload_id", ""))
+        self.assertTrue(upload_id)
         self.assertEqual(str((result.get("asset") or {}).get("status", "")), "active")
         preview = workflow.get("retrieval_preview", {})
         self.assertTrue(bool(preview.get("ready")))
@@ -409,14 +438,82 @@ class ServiceTestCase(unittest.TestCase):
         self.assertTrue(isinstance(preview.get("items", []), list))
         self.assertTrue(any(bool(x.get("target_hit")) for x in preview.get("items", [])))
 
+        upload_status = self.svc.rag_upload_status("", upload_id=upload_id)
+        self.assertEqual(str(upload_status.get("upload_id", "")), upload_id)
+        self.assertIn("asset", upload_status)
+        self.assertTrue(isinstance(upload_status.get("timeline", []), list))
+        self.assertGreaterEqual(len(upload_status.get("timeline", [])), 3)
+
+        verification = self.svc.rag_upload_verification("", upload_id=upload_id)
+        self.assertEqual(str(verification.get("upload_id", "")), upload_id)
+        self.assertGreaterEqual(int(verification.get("query_count", 0)), 1)
+        self.assertTrue(isinstance(verification.get("items", []), list))
+
+        preview_doc = self.svc.rag_doc_preview("", doc_id=str(result.get("doc_id", "")), page=1)
+        self.assertEqual(str(preview_doc.get("doc_id", "")), str(result.get("doc_id", "")))
+        self.assertIn("quality_report", preview_doc)
+        self.assertIn("parse_verdict", preview_doc)
+        self.assertIn(str((preview_doc.get("parse_verdict") or {}).get("status", "")), {"ok", "warning", "failed"})
+        self.assertTrue(isinstance(preview_doc.get("items", []), list))
+
         uploads = self.svc.rag_uploads_list("", limit=20)
         self.assertGreater(len(uploads), 0)
         self.assertTrue(any(str(x.get("filename", "")) == "upload-demo.txt" for x in uploads))
+
+        deleted = self.svc.rag_upload_delete("", upload_id=upload_id)
+        self.assertEqual(str(deleted.get("status", "")), "ok")
+        self.assertEqual(str(deleted.get("upload_id", "")), upload_id)
+
+        uploads_after_delete = self.svc.rag_uploads_list("", limit=20)
+        self.assertFalse(any(str(x.get("upload_id", "")) == upload_id for x in uploads_after_delete))
 
         dashboard = self.svc.rag_dashboard("")
         self.assertIn("doc_total", dashboard)
         self.assertIn("active_chunks", dashboard)
         self.assertIn("retrieval_hit_rate_7d", dashboard)
+
+    def test_rag_upload_rejects_pdf_binary_stream_payload(self) -> None:
+        fake_pdf_body = (
+            "%PDF-1.4\n"
+            + ("Filter/FlateDecode /Length 2484 stream endstream obj endobj Subtype/Type1C " * 60)
+            + "\n%%EOF"
+        ).encode("latin1", errors="ignore")
+        encoded = base64.b64encode(fake_pdf_body).decode("ascii")
+        upload_id = f"ragu-test-{uuid.uuid4().hex[:10]}"
+
+        with self.assertRaises(ValueError) as ctx:
+            self.svc.rag_upload_from_payload(
+                "",
+                {
+                    "upload_id": upload_id,
+                    "filename": "broken-preview.pdf",
+                    "content_type": "application/pdf",
+                    "content_base64": encoded,
+                    "source": "user_upload",
+                    "force_reupload": True,
+                },
+            )
+        self.assertIn("PDF parsing failed: binary stream detected", str(ctx.exception))
+
+        status_payload = self.svc.rag_upload_status("", upload_id=upload_id)
+        self.assertEqual(str(status_payload.get("upload_id", "")), upload_id)
+        asset = status_payload.get("asset", {})
+        self.assertEqual(str(asset.get("job_status", "")), "failed")
+        self.assertEqual(str(asset.get("current_stage", "")), "failed")
+        self.assertEqual(str(asset.get("error_code", "")), "upload_failed")
+        self.assertIn("PDF parsing failed: binary stream detected", str(asset.get("error_message", "")))
+
+    def test_rag_doc_preview_marks_binary_like_excerpt_failed(self) -> None:
+        noisy_text = " ".join(
+            ["Filter/FlateDecode", "/Length", "stream", "endstream", "obj", "endobj", "Subtype/Type1C"] * 240
+        )
+        _ = self.svc.docs_upload("rag-binary-preview-doc", "binary-preview.pdf", noisy_text, "user_upload")
+        _ = self.svc.docs_index("rag-binary-preview-doc")
+
+        preview_doc = self.svc.rag_doc_preview("", doc_id="rag-binary-preview-doc", page=1)
+        verdict = preview_doc.get("parse_verdict", {})
+        self.assertEqual(str(verdict.get("status", "")), "failed")
+        self.assertIn("pdf internals", str(verdict.get("message", "")).lower())
 
     def test_rag_retrieval_preview_api_wrapper(self) -> None:
         _ = self.svc.docs_upload("rag-preview-doc", "preview.txt", "SH600000 营收增长且现金流改善" * 140, "user_upload")
@@ -461,7 +558,27 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("degrade_reasons", run)
         self.assertIn("source_coverage", run)
         self.assertIn("metric_mode", run)
+        self.assertIn("metrics_backtest", run)
         self.assertIn("metrics_simulated", run)
+        self.assertIn("eval_provenance", run)
+        self.assertIn("quality_gate", run)
+        self.assertIn("engine_profile", run)
+        self.assertIn(str((run.get("quality_gate") or {}).get("overall_status", "")), {"pass", "watch", "degraded"})
+        self.assertTrue(str((run.get("quality_gate") or {}).get("user_message", "")).strip())
+        self.assertIn("llm_used_in_scoring", run.get("engine_profile", {}))
+        explain = self.svc.predict_explain(
+            {
+                "run_id": str(run["run_id"]),
+                "stock_code": str(run["results"][0]["stock_code"]),
+                "horizon": "20d",
+            }
+        )
+        self.assertEqual(str(explain.get("run_id", "")), str(run["run_id"]))
+        self.assertTrue(str(explain.get("summary", "")).strip())
+        self.assertTrue(isinstance(explain.get("drivers", []), list))
+        self.assertTrue(isinstance(explain.get("risks", []), list))
+        self.assertTrue(isinstance(explain.get("actions", []), list))
+        self.assertIn("llm_used", explain)
         latest = self.svc.predict_eval_latest()
         self.assertEqual(latest["status"], "ok")
         self.assertIn("ic", latest["metrics"])
@@ -669,6 +786,134 @@ class ServiceTestCase(unittest.TestCase):
         self.assertTrue(str(created.get("title", "")).strip())
         self.assertTrue(str(created.get("content", "")).strip())
         self.assertIn("核心观点", str(created.get("content", "")))
+
+    def test_journal_quick_create_review_queue_and_outcome(self) -> None:
+        quick = self.svc.journal_create_quick(
+            "",
+            {
+                "stock_code": "SH600000",
+                "event_type": "buy",
+                "review_days": 3,
+                "thesis": "quick thesis",
+            },
+        )
+        journal_id = int(quick.get("journal_id", 0))
+        self.assertGreater(journal_id, 0)
+        self.assertEqual(str(quick.get("source_type", "")), "manual")
+        self.assertEqual(str(quick.get("status", "")), "open")
+        self.assertTrue(str(quick.get("review_due_at", "")).strip())
+
+        due = self.svc.journal_create(
+            "",
+            {
+                "journal_type": "decision",
+                "title": "due item",
+                "content": "due item for queue",
+                "stock_code": "SH600000",
+                "review_due_at": "2000-01-01 00:00:00",
+                "status": "open",
+            },
+        )
+        due_id = int(due.get("journal_id", 0))
+        self.assertGreater(due_id, 0)
+
+        queue = self.svc.journal_review_queue("", limit=50)
+        queue_item = next((x for x in queue if int(x.get("journal_id", 0)) == due_id), {})
+        self.assertTrue(queue_item)
+        self.assertEqual(str(queue_item.get("status", "")), "review_due")
+        self.assertTrue(bool(queue_item.get("is_overdue", False)))
+
+        closed = self.svc.journal_outcome_update(
+            "",
+            journal_id,
+            {
+                "executed_as_planned": True,
+                "outcome_rating": "good",
+                "outcome_note": "executed on plan",
+                "deviation_reason": "",
+                "close": True,
+            },
+        )
+        self.assertEqual(str(closed.get("status", "")), "closed")
+        self.assertTrue(str(closed.get("closed_at", "")).strip())
+        self.assertTrue(bool(closed.get("executed_as_planned", False)))
+
+        reopened = self.svc.journal_outcome_update("", journal_id, {"close": False})
+        self.assertEqual(str(reopened.get("status", "")), "open")
+        self.assertFalse(str(reopened.get("closed_at", "")).strip())
+
+    def test_journal_create_from_transaction_is_idempotent(self) -> None:
+        portfolio = self.svc.portfolio_create(
+            "",
+            {"portfolio_name": "journal-tx-idempotent", "initial_capital": 50000, "description": "journal test"},
+        )
+        portfolio_id = int(portfolio.get("portfolio_id", 0))
+        self.assertGreater(portfolio_id, 0)
+        tx = self.svc.portfolio_add_transaction(
+            "",
+            portfolio_id,
+            {"stock_code": "SH600000", "transaction_type": "buy", "quantity": 80, "price": 10.2, "fee": 1.2},
+        )
+        transaction_id = int(tx.get("transaction_id", 0))
+        self.assertGreater(transaction_id, 0)
+
+        first = self.svc.journal_create_from_transaction(
+            "",
+            {"portfolio_id": portfolio_id, "transaction_id": transaction_id, "review_days": 5},
+        )
+        self.assertEqual(str(first.get("action", "")), "created")
+        first_id = int(first.get("journal_id", 0))
+        self.assertGreater(first_id, 0)
+        self.assertEqual(str(first.get("source_type", "")), "transaction")
+        self.assertEqual(str(first.get("source_ref_id", "")), f"{portfolio_id}:{transaction_id}")
+
+        second = self.svc.journal_create_from_transaction(
+            "",
+            {"portfolio_id": portfolio_id, "transaction_id": transaction_id, "review_days": 5},
+        )
+        self.assertEqual(str(second.get("action", "")), "reused")
+        self.assertEqual(int(second.get("journal_id", 0)), first_id)
+
+    def test_journal_execution_board_metrics(self) -> None:
+        created = self.svc.journal_create_quick(
+            "",
+            {
+                "stock_code": "SZ000001",
+                "event_type": "watch",
+                "review_days": 2,
+            },
+        )
+        journal_id = int(created.get("journal_id", 0))
+        self.assertGreater(journal_id, 0)
+        _ = self.svc.journal_outcome_update(
+            "",
+            journal_id,
+            {
+                "executed_as_planned": True,
+                "outcome_rating": "good",
+                "outcome_note": "board metric close",
+                "close": True,
+            },
+        )
+        _ = self.svc.journal_create(
+            "",
+            {
+                "journal_type": "decision",
+                "title": "board due item",
+                "content": "board due item content",
+                "stock_code": "SZ000001",
+                "review_due_at": "2000-01-01 00:00:00",
+                "status": "open",
+            },
+        )
+
+        board = self.svc.journal_execution_board("", window_days=365)
+        self.assertEqual(str(board.get("status", "")), "ok")
+        self.assertGreaterEqual(int(board.get("closed_count_30d", 0)), 1)
+        self.assertGreaterEqual(int(board.get("review_due_count", 0)), 1)
+        self.assertGreaterEqual(float(board.get("execution_rate", 0.0)), 0.0)
+        self.assertLessEqual(float(board.get("execution_rate", 0.0)), 1.0)
+        self.assertTrue(isinstance(board.get("top_deviation_reasons", []), list))
 
     def test_journal_insights(self) -> None:
         created = self.svc.journal_create(

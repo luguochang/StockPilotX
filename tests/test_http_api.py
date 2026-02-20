@@ -13,6 +13,7 @@ from pathlib import Path
 
 class HttpApiTestCase(unittest.TestCase):
     """API 契约测试：通过真实 uvicorn 进程覆盖全部 `/v1/*` 接口。"""
+    REQUEST_TIMEOUT = 15
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -68,7 +69,7 @@ class HttpApiTestCase(unittest.TestCase):
             method="POST",
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        with urllib.request.urlopen(req, timeout=self.REQUEST_TIMEOUT) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8"))
 
     def _post_error(self, path: str, payload: dict) -> tuple[int, dict]:
@@ -80,13 +81,24 @@ class HttpApiTestCase(unittest.TestCase):
             headers={"Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=self.REQUEST_TIMEOUT) as resp:
                 return resp.status, json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as ex:
             return ex.code, json.loads(ex.read().decode("utf-8"))
 
+    def _patch(self, path: str, payload: dict) -> tuple[int, dict]:
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            self.base_url + path,
+            data=body,
+            method="PATCH",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=self.REQUEST_TIMEOUT) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+
     def _get(self, path: str) -> tuple[int, dict]:
-        with urllib.request.urlopen(self.base_url + path, timeout=8) as resp:  # noqa: S310 - local smoke url
+        with urllib.request.urlopen(self.base_url + path, timeout=self.REQUEST_TIMEOUT) as resp:  # noqa: S310 - local smoke url
             return resp.status, json.loads(resp.read().decode("utf-8"))
 
     def test_query(self) -> None:
@@ -271,6 +283,14 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("metric_snapshot", report)
         self.assertIn("analysis_nodes", report)
         self.assertIn("quality_dashboard", report)
+        self.assertIn("multi_role_enabled", report)
+        self.assertIn("multi_role_trace_id", report)
+        self.assertIn("multi_role_decision", report)
+        self.assertIn("role_opinions", report)
+        self.assertIn("judge_summary", report)
+        self.assertIn("conflict_sources", report)
+        self.assertIn("consensus_signal", report)
+        self.assertIn("consensus_confidence", report)
         self.assertIn("schema_version", report)
         modules = report.get("report_modules", [])
         if isinstance(modules, list) and modules:
@@ -292,6 +312,21 @@ class HttpApiTestCase(unittest.TestCase):
         diff_code, diff_body = self._get(f"/v1/reports/{report_id}/versions/diff")
         self.assertEqual(diff_code, 200)
         self.assertIn("diff", diff_body)
+
+    def test_report_self_test_endpoint(self) -> None:
+        code, body = self._get("/v1/report/self-test?stock_code=SH600000&report_type=research&period=1y")
+        self.assertEqual(code, 200)
+        self.assertTrue(bool(body.get("ok", False)))
+        self.assertEqual(str(body.get("stock_code", "")), "SH600000")
+        self.assertIn("sync", body)
+        self.assertIn("async", body)
+        sync = body.get("sync", {})
+        if isinstance(sync, dict):
+            self.assertIn("multi_role_enabled", sync)
+            self.assertIn("multi_role_trace_id", sync)
+        async_part = body.get("async", {})
+        if isinstance(async_part, dict):
+            self.assertIn(str(async_part.get("final_status", "")), {"completed", "partial_ready", "failed"})
 
     def test_report_task_endpoints(self) -> None:
         code, created = self._post(
@@ -518,11 +553,34 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertTrue(bool(preview.get("ready")))
         self.assertGreaterEqual(int(preview.get("query_count", 0)), 1)
 
+        upload_id = str((uploaded.get("result") or {}).get("upload_id", ""))
         doc_id = str((uploaded.get("result") or {}).get("doc_id", ""))
+        self.assertTrue(upload_id)
+        self.assertTrue(doc_id)
         c8b, preview_api = self._get(f"/v1/rag/retrieval-preview?doc_id={urllib.parse.quote(doc_id)}&max_queries=2&top_k=4")
         self.assertEqual(c8b, 200)
         self.assertEqual(str(preview_api.get("doc_id", "")), doc_id)
         self.assertIn("items", preview_api)
+
+        c8c, status_payload = self._get(f"/v1/rag/uploads/{urllib.parse.quote(upload_id)}/status")
+        self.assertEqual(c8c, 200)
+        self.assertEqual(str(status_payload.get("upload_id", "")), upload_id)
+        self.assertIn("asset", status_payload)
+        self.assertTrue(isinstance(status_payload.get("timeline", []), list))
+
+        c8d, verification_payload = self._get(f"/v1/rag/uploads/{urllib.parse.quote(upload_id)}/verification")
+        self.assertEqual(c8d, 200)
+        self.assertEqual(str(verification_payload.get("upload_id", "")), upload_id)
+        self.assertGreaterEqual(int(verification_payload.get("query_count", 0)), 1)
+        self.assertTrue(isinstance(verification_payload.get("items", []), list))
+
+        c8e, doc_preview = self._get(f"/v1/rag/docs/{urllib.parse.quote(doc_id)}/preview?page=1")
+        self.assertEqual(c8e, 200)
+        self.assertEqual(str(doc_preview.get("doc_id", "")), doc_id)
+        self.assertIn("quality_report", doc_preview)
+        self.assertIn("parse_verdict", doc_preview)
+        self.assertIn(str((doc_preview.get("parse_verdict") or {}).get("status", "")), {"ok", "warning", "failed"})
+        self.assertTrue(isinstance(doc_preview.get("items", []), list))
 
         c9, dashboard = self._get("/v1/rag/dashboard")
         self.assertEqual(c9, 200)
@@ -533,6 +591,52 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c10, 200)
         self.assertTrue(isinstance(upload_rows, list))
         self.assertTrue(any(str(x.get("filename", "")) == "api-upload.txt" for x in upload_rows))
+
+        req = urllib.request.Request(
+            self.base_url + f"/v1/rag/uploads/{urllib.parse.quote(upload_id)}",
+            method="DELETE",
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            self.assertEqual(resp.status, 200)
+            body = json.loads(resp.read().decode("utf-8"))
+            self.assertEqual(str(body.get("status", "")), "ok")
+            self.assertEqual(str(body.get("upload_id", "")), upload_id)
+
+        c10b, upload_rows_after = self._get("/v1/rag/uploads?limit=10")
+        self.assertEqual(c10b, 200)
+        self.assertFalse(any(str(x.get("upload_id", "")) == upload_id for x in upload_rows_after))
+
+    def test_rag_upload_rejects_pdf_binary_stream_payload(self) -> None:
+        fake_pdf_body = (
+            "%PDF-1.4\n"
+            + ("Filter/FlateDecode /Length 2484 stream endstream obj endobj Subtype/Type1C " * 60)
+            + "\n%%EOF"
+        ).encode("latin1", errors="ignore")
+        encoded = base64.b64encode(fake_pdf_body).decode("ascii")
+        upload_id = f"api-rag-bad-{int(time.time() * 1000)}"
+
+        code, body = self._post_error(
+            "/v1/rag/uploads",
+            {
+                "upload_id": upload_id,
+                "filename": "api-broken-preview.pdf",
+                "content_type": "application/pdf",
+                "content_base64": encoded,
+                "source": "user_upload",
+                "force_reupload": True,
+            },
+        )
+        self.assertEqual(code, 400)
+        self.assertIn("detail", body)
+        self.assertIn("PDF parsing failed: binary stream detected", str(body.get("detail", "")))
+
+        c2, status_payload = self._get(f"/v1/rag/uploads/{urllib.parse.quote(upload_id)}/status")
+        self.assertEqual(c2, 200)
+        self.assertEqual(str(status_payload.get("upload_id", "")), upload_id)
+        asset = status_payload.get("asset", {})
+        self.assertEqual(str(asset.get("job_status", "")), "failed")
+        self.assertEqual(str(asset.get("current_stage", "")), "failed")
+        self.assertEqual(str(asset.get("error_code", "")), "upload_failed")
 
     def test_evals_run_and_get(self) -> None:
         code, run = self._post(
@@ -575,11 +679,32 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("degrade_reasons", run)
         self.assertIn("source_coverage", run)
         self.assertIn("metric_mode", run)
+        self.assertIn("metrics_backtest", run)
         self.assertIn("metrics_simulated", run)
+        self.assertIn("eval_provenance", run)
+        self.assertIn("quality_gate", run)
+        self.assertIn("engine_profile", run)
+        self.assertIn(str((run.get("quality_gate") or {}).get("overall_status", "")), {"pass", "watch", "degraded"})
 
         get_code, loaded = self._get(f"/v1/predict/{run['run_id']}")
         self.assertEqual(get_code, 200)
         self.assertEqual(loaded["run_id"], run["run_id"])
+
+        explain_code, explain = self._post(
+            "/v1/predict/explain",
+            {
+                "run_id": run["run_id"],
+                "stock_code": run["results"][0]["stock_code"],
+                "horizon": "20d",
+            },
+        )
+        self.assertEqual(explain_code, 200)
+        self.assertEqual(str(explain.get("run_id", "")), str(run["run_id"]))
+        self.assertTrue(str(explain.get("summary", "")).strip())
+        self.assertTrue(isinstance(explain.get("drivers", []), list))
+        self.assertTrue(isinstance(explain.get("risks", []), list))
+        self.assertTrue(isinstance(explain.get("actions", []), list))
+        self.assertIn("llm_used", explain)
 
         factor_code, factor = self._get("/v1/factors/SH600000")
         self.assertEqual(factor_code, 200)
@@ -808,6 +933,96 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertGreater(int(created.get("journal_id", 0)), 0)
         self.assertTrue(str(created.get("title", "")).strip())
         self.assertTrue(str(created.get("content", "")).strip())
+
+    def test_journal_quick_review_outcome_and_execution_board_endpoints(self) -> None:
+        c1, quick = self._post(
+            "/v1/journal/quick",
+            {"stock_code": "SH600000", "event_type": "buy", "review_days": 3, "thesis": "api quick thesis"},
+        )
+        self.assertEqual(c1, 200)
+        journal_id = int(quick.get("journal_id", 0))
+        self.assertGreater(journal_id, 0)
+        self.assertEqual(str(quick.get("status", "")), "open")
+        self.assertEqual(str(quick.get("source_type", "")), "manual")
+
+        c2, due = self._post(
+            "/v1/journal",
+            {
+                "journal_type": "decision",
+                "title": "api due queue item",
+                "content": "api due queue item content",
+                "stock_code": "SH600000",
+                "review_due_at": "2000-01-01 00:00:00",
+                "status": "open",
+            },
+        )
+        self.assertEqual(c2, 200)
+        due_id = int(due.get("journal_id", 0))
+        self.assertGreater(due_id, 0)
+
+        c3, queue = self._get("/v1/journal/review-queue?status=review_due&stock_code=SH600000&limit=100")
+        self.assertEqual(c3, 200)
+        self.assertTrue(isinstance(queue, list))
+        due_item = next((x for x in queue if int(x.get("journal_id", 0)) == due_id), {})
+        self.assertTrue(due_item)
+        self.assertEqual(str(due_item.get("status", "")), "review_due")
+        self.assertTrue(bool(due_item.get("is_overdue", False)))
+
+        c4, closed = self._patch(
+            f"/v1/journal/{journal_id}/outcome",
+            {
+                "executed_as_planned": True,
+                "outcome_rating": "good",
+                "outcome_note": "api close",
+                "close": True,
+            },
+        )
+        self.assertEqual(c4, 200)
+        self.assertEqual(str(closed.get("status", "")), "closed")
+        self.assertTrue(str(closed.get("closed_at", "")).strip())
+
+        c5, board = self._get("/v1/journal/execution-board?window_days=365")
+        self.assertEqual(c5, 200)
+        self.assertEqual(str(board.get("status", "")), "ok")
+        self.assertGreaterEqual(int(board.get("closed_count_30d", 0)), 1)
+        self.assertGreaterEqual(int(board.get("review_due_count", 0)), 1)
+        self.assertTrue(isinstance(board.get("top_deviation_reasons", []), list))
+
+    def test_journal_from_transaction_endpoint_idempotent(self) -> None:
+        c1, portfolio = self._post(
+            "/v1/portfolio",
+            {"portfolio_name": "api-journal-tx", "initial_capital": 60000, "description": "journal tx"},
+        )
+        self.assertEqual(c1, 200)
+        portfolio_id = int(portfolio.get("portfolio_id", 0))
+        self.assertGreater(portfolio_id, 0)
+
+        c2, tx = self._post(
+            f"/v1/portfolio/{portfolio_id}/transactions",
+            {"stock_code": "SH600000", "transaction_type": "buy", "quantity": 100, "price": 10.0, "fee": 1.0},
+        )
+        self.assertEqual(c2, 200)
+        transaction_id = int(tx.get("transaction_id", 0))
+        self.assertGreater(transaction_id, 0)
+
+        c3, first = self._post(
+            "/v1/journal/from-transaction",
+            {"portfolio_id": portfolio_id, "transaction_id": transaction_id, "review_days": 5},
+        )
+        self.assertEqual(c3, 200)
+        first_id = int(first.get("journal_id", 0))
+        self.assertGreater(first_id, 0)
+        self.assertEqual(str(first.get("action", "")), "created")
+        self.assertEqual(str(first.get("source_type", "")), "transaction")
+        self.assertEqual(str(first.get("source_ref_id", "")), f"{portfolio_id}:{transaction_id}")
+
+        c4, second = self._post(
+            "/v1/journal/from-transaction",
+            {"portfolio_id": portfolio_id, "transaction_id": transaction_id, "review_days": 5},
+        )
+        self.assertEqual(c4, 200)
+        self.assertEqual(str(second.get("action", "")), "reused")
+        self.assertEqual(int(second.get("journal_id", 0)), first_id)
 
     def test_journal_insights_endpoint(self) -> None:
         c1, created = self._post(

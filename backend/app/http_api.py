@@ -356,6 +356,10 @@ def create_app() -> FastAPI:
         except ValueError as ex:
             raise HTTPException(status_code=400, detail=str(ex)) from ex
 
+    @app.get("/v1/report/self-test")
+    def report_self_test(stock_code: str = "SH600000", report_type: str = "research", period: str = "1y"):
+        return svc.report_self_test(stock_code=stock_code, report_type=report_type, period=period)
+
     @app.get("/v1/report/tasks/{task_id}")
     def report_task_get(task_id: str):
         result = svc.report_task_get(task_id)
@@ -496,6 +500,21 @@ def create_app() -> FastAPI:
     @app.get("/v1/predict/evals/latest")
     def predict_eval_latest():
         return svc.predict_eval_latest()
+
+    @app.get("/v1/predict/self-test")
+    def predict_self_test(stock_code: str = "SH600000", question: str = ""):
+        return svc.predict_self_test(stock_code=stock_code, question=question)
+
+    @app.post("/v1/predict/explain")
+    def predict_explain(payload: dict):
+        try:
+            return svc.predict_explain(payload)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+
+    @app.get("/v1/multi-role/traces/{trace_id}")
+    def multi_role_trace_events(trace_id: str, limit: int = 120):
+        return svc.multi_role_trace_events(trace_id, limit=limit)
 
     @app.get("/v1/factors/{stock_code}")
     def factor_snapshot(stock_code: str):
@@ -700,6 +719,22 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    @app.post("/v1/journal/quick")
+    def journal_create_quick(payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.journal_create_quick(token, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.post("/v1/journal/from-transaction")
+    def journal_create_from_transaction(payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.journal_create_from_transaction(token, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     @app.get("/v1/journal")
     def journal_list(
         journal_type: str = "",
@@ -717,6 +752,40 @@ def create_app() -> FastAPI:
                 limit=limit,
                 offset=offset,
             )
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/journal/review-queue")
+    def journal_review_queue(
+        status: str = "",
+        stock_code: str = "",
+        limit: int = 60,
+        authorization: str | None = Header(default=None),
+    ):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.journal_review_queue(
+                token,
+                status=status,
+                stock_code=stock_code,
+                limit=limit,
+            )
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.patch("/v1/journal/{journal_id}/outcome")
+    def journal_outcome_update(journal_id: int, payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.journal_outcome_update(token, journal_id, payload)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/journal/execution-board")
+    def journal_execution_board(window_days: int = 30, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.journal_execution_board(token, window_days=window_days)
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
@@ -1022,6 +1091,30 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    @app.get("/v1/rag/uploads/{upload_id}/status")
+    def rag_upload_status(upload_id: str, authorization: str | None = Header(default=None)):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_upload_status(token, upload_id=upload_id)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/rag/uploads/{upload_id}/verification")
+    def rag_upload_verification(upload_id: str, authorization: str | None = Header(default=None)):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_upload_verification(token, upload_id=upload_id)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.delete("/v1/rag/uploads/{upload_id}")
+    def rag_upload_delete(upload_id: str, authorization: str | None = Header(default=None)):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_upload_delete(token, upload_id=upload_id)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     @app.post("/v1/rag/uploads")
     def rag_upload(payload: dict, authorization: str | None = Header(default=None)):
         token = _extract_bearer_token(authorization)
@@ -1053,6 +1146,14 @@ def create_app() -> FastAPI:
                 max_queries=max_queries,
                 top_k=top_k,
             )
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/rag/docs/{doc_id}/preview")
+    def rag_doc_preview(doc_id: str, page: int = 1, authorization: str | None = Header(default=None)):
+        token = _extract_bearer_token(authorization)
+        try:
+            return svc.rag_doc_preview(token, doc_id=doc_id, page=page)
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
