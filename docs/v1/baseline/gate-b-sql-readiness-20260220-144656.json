@@ -1,0 +1,169 @@
+{
+  "generated_at": "2026-02-20T14:46:56.528275+00:00",
+  "sample_count": 20,
+  "pass_rate": 1.0,
+  "high_risk_count": 0,
+  "gate_b_ready": true,
+  "rows": [
+    {
+      "sql": "SELECT question, trace_id FROM query_history LIMIT 20",
+      "expected_ok": true,
+      "actual_ok": true,
+      "success": true,
+      "reason": "ok",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT stock_code, created_at FROM watchlist_items LIMIT 50",
+      "expected_ok": true,
+      "actual_ok": true,
+      "success": true,
+      "reason": "ok",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT report_id, stock_code FROM reports LIMIT 30",
+      "expected_ok": true,
+      "actual_ok": true,
+      "success": true,
+      "reason": "ok",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT query_text, query_type FROM rag_retrieval_trace LIMIT 10",
+      "expected_ok": true,
+      "actual_ok": true,
+      "success": true,
+      "reason": "ok",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT id, score FROM rag_eval_cases LIMIT 20",
+      "expected_ok": true,
+      "actual_ok": true,
+      "success": true,
+      "reason": "ok",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT intent, latency_ms FROM query_history LIMIT 100",
+      "expected_ok": true,
+      "actual_ok": true,
+      "success": true,
+      "reason": "ok",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT summary FROM reports LIMIT 5",
+      "expected_ok": true,
+      "actual_ok": true,
+      "success": true,
+      "reason": "ok",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT stock_code FROM watchlist_items LIMIT 1",
+      "expected_ok": true,
+      "actual_ok": true,
+      "success": true,
+      "reason": "ok",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT trace_id FROM query_history LIMIT 500",
+      "expected_ok": true,
+      "actual_ok": true,
+      "success": true,
+      "reason": "ok",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT report_type FROM reports LIMIT 200",
+      "expected_ok": true,
+      "actual_ok": true,
+      "success": true,
+      "reason": "ok",
+      "high_risk": false
+    },
+    {
+      "sql": "DELETE FROM query_history",
+      "expected_ok": false,
+      "actual_ok": false,
+      "success": true,
+      "reason": "only_select_allowed",
+      "high_risk": false
+    },
+    {
+      "sql": "UPDATE reports SET stock_code='SH600000' WHERE 1=1",
+      "expected_ok": false,
+      "actual_ok": false,
+      "success": true,
+      "reason": "only_select_allowed",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT * FROM unknown_table LIMIT 10",
+      "expected_ok": false,
+      "actual_ok": false,
+      "success": true,
+      "reason": "table_not_allowed",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT question FROM query_history",
+      "expected_ok": false,
+      "actual_ok": false,
+      "success": true,
+      "reason": "limit_required",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT question FROM query_history LIMIT 1001",
+      "expected_ok": false,
+      "actual_ok": false,
+      "success": true,
+      "reason": "limit_exceeded",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT load_file('/etc/passwd') FROM query_history LIMIT 1",
+      "expected_ok": false,
+      "actual_ok": false,
+      "success": true,
+      "reason": "forbidden_sql_pattern",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT question FROM query_history LIMIT 10; DROP TABLE reports",
+      "expected_ok": false,
+      "actual_ok": false,
+      "success": true,
+      "reason": "forbidden_sql_pattern",
+      "high_risk": false
+    },
+    {
+      "sql": "INSERT INTO query_history(question) VALUES('x')",
+      "expected_ok": false,
+      "actual_ok": false,
+      "success": true,
+      "reason": "only_select_allowed",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT hidden_column FROM reports LIMIT 5",
+      "expected_ok": false,
+      "actual_ok": false,
+      "success": true,
+      "reason": "column_not_allowed",
+      "high_risk": false
+    },
+    {
+      "sql": "SELECT question FROM query_history -- comment LIMIT 10",
+      "expected_ok": false,
+      "actual_ok": false,
+      "success": true,
+      "reason": "forbidden_sql_pattern",
+      "high_risk": false
+    }
+  ]
+}

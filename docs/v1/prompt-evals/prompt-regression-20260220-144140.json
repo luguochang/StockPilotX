@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-02-20T14:41:40.247046+00:00",
+  "result": {
+    "prompt_total_pass_rate": 1.0,
+    "prompt_redteam_pass_rate": 1.0,
+    "prompt_freshness_timestamp_rate": 1.0,
+    "prompt_pass_gate": true,
+    "prompt_failed_case_count": 0,
+    "prompt_failed_case_ids": [],
+    "prompt_group_stats": {
+      "golden": {
+        "total": 10,
+        "passed": 10,
+        "pass_rate": 1.0
+      },
+      "boundary": {
+        "total": 8,
+        "passed": 8,
+        "pass_rate": 1.0
+      },
+      "redteam": {
+        "total": 8,
+        "passed": 8,
+        "pass_rate": 1.0
+      },
+      "freshness": {
+        "total": 4,
+        "passed": 4,
+        "pass_rate": 1.0
+      }
+    }
+  }
+}

@@ -395,3 +395,47 @@ $env:PYTHONPATH='.'; .\.venv\Scripts\python scripts\run_prompt_regression_report
 - [x] 全链路回归通过
 - [x] 计划项完成度核对
 - [x] 收官状态判定
+
+---
+
+## Batch 10（2026-02-20）
+
+### 对应用户要求
+
+- 按最新 `docs/self/StockPilotX-优化计划-2026-02-20.md` 与 checklist 完整执行并复核。
+- 重新生成 baseline / gate / prompt 报告，确保收官证据是最新状态。
+
+### 本批执行
+
+1. 重新生成报告
+- `scripts/collect_phase0_baseline.py`
+- `scripts/generate_gate_decision_report.py`
+- `scripts/run_prompt_regression_report.py`
+- 新增 SQL Gate B 20 样本评估脚本：`scripts/eval_sql_gate_b_samples.py`
+
+2. 全量回归
+- `python -m pytest -q tests -k "web or api or query or docs or portfolio or alert or backtest or phase0_optimization_v11 or eval_gate_decision or sql_guard or middleware_extensions or prompt_engineering"`
+- 结果：`81 passed, 107 deselected`
+
+3. 文档收口
+- 更新 checklist：`docs/self/StockPilotX-优化计划-2026-02-20-checklist.md`
+- 所有 Phase 项目均标记完成，并补证据路径。
+
+### 新增/更新证据
+
+- `docs/v1/baseline/phase0-baseline-20260220-144156.json`
+- `docs/v1/baseline/phase0-baseline-20260220-144156.md`
+- `docs/v1/baseline/gate-decision-20260220-144202.md`
+- `docs/v1/baseline/gate-b-sql-readiness-20260220-144517.json`
+- `docs/v1/baseline/gate-b-sql-readiness-20260220-144517.md`
+- `docs/v1/baseline/gate-b-sql-readiness-20260220-144656.json`
+- `docs/v1/baseline/gate-b-sql-readiness-20260220-144656.md`
+- `docs/v1/prompt-evals/prompt-regression-20260220-144140.json`
+- `docs/v1/prompt-evals/prompt-regression-20260220-144140.md`
+
+### Checklist
+
+- [x] 最新计划复核完成
+- [x] 最新报告生成完成
+- [x] 全量回归通过
+- [x] 收官 checklist 完成

@@ -1,0 +1,140 @@
+{
+  "generated_at": "2026-02-20T14:41:56.490492+00:00",
+  "intent_baseline": {
+    "sample_size": 6,
+    "accuracy": 1.0,
+    "rows": [
+      {
+        "question": "对比 SH600000 和 SZ000001 的盈利质量",
+        "expected": "compare",
+        "predicted": "compare",
+        "confidence": 0.8,
+        "ok": true
+      },
+      {
+        "question": "解读这份年报PDF的关键风险",
+        "expected": "doc_qa",
+        "predicted": "doc_qa",
+        "confidence": 0.7168,
+        "ok": true
+      },
+      {
+        "question": "做一个深度归因分析，看行业景气变化",
+        "expected": "deep",
+        "predicted": "deep",
+        "confidence": 0.9008,
+        "ok": true
+      },
+      {
+        "question": "浦发银行今天走势如何",
+        "expected": "fact",
+        "predicted": "fact",
+        "confidence": 0.58,
+        "ok": true
+      },
+      {
+        "question": "compare two stocks by valuation and growth",
+        "expected": "compare",
+        "predicted": "compare",
+        "confidence": 0.8,
+        "ok": true
+      },
+      {
+        "question": "帮我看下这个doc里的财务摘要",
+        "expected": "doc_qa",
+        "predicted": "doc_qa",
+        "confidence": 0.7872,
+        "ok": true
+      }
+    ]
+  },
+  "query_baseline": {
+    "sample_size": 4,
+    "failure_rate": 0.0,
+    "latency_p95_ms": 4748,
+    "latency_avg_ms": 3727,
+    "model_call_count_avg": 1.0,
+    "timeout_reason_count": 0,
+    "by_mode_latency_ms": {
+      "fact": 4916,
+      "deep": 3056,
+      "doc_qa": 3801,
+      "compare": 3138
+    },
+    "rows": [
+      {
+        "question": "SH600000 今天的基本面结论是什么",
+        "mode": "fact",
+        "latency_ms": 4916,
+        "intent": "fact",
+        "intent_confidence": 0.58,
+        "model_call_count": 1,
+        "retrieval_track": {
+          "unknown_track": 4,
+          "quote_snapshot": 1,
+          "history_daily": 1,
+          "history_3m_window": 1
+        },
+        "timeout_reason": "",
+        "failed": false
+      },
+      {
+        "question": "请做深度归因和风险拆解",
+        "mode": "deep",
+        "latency_ms": 3056,
+        "intent": "deep",
+        "intent_confidence": 0.9712,
+        "model_call_count": 1,
+        "retrieval_track": {
+          "unknown_track": 3,
+          "origin_backfill": 1,
+          "quote_snapshot": 1,
+          "history_daily": 1,
+          "history_3m_window": 1
+        },
+        "timeout_reason": "",
+        "failed": false
+      },
+      {
+        "question": "请按报告口径总结这个文档内容",
+        "mode": "doc_qa",
+        "latency_ms": 3801,
+        "intent": "doc_qa",
+        "intent_confidence": 0.9072,
+        "model_call_count": 1,
+        "retrieval_track": {
+          "unknown_track": 4,
+          "quote_snapshot": 1,
+          "history_daily": 1,
+          "history_3m_window": 1
+        },
+        "timeout_reason": "",
+        "failed": false
+      },
+      {
+        "question": "对比 SH600000 与 SZ000001 的趋势",
+        "mode": "compare",
+        "latency_ms": 3138,
+        "intent": "compare",
+        "intent_confidence": 0.8,
+        "model_call_count": 1,
+        "retrieval_track": {
+          "unknown_track": 3,
+          "origin_backfill": 2,
+          "quote_snapshot": 2,
+          "history_daily": 2,
+          "history_3m_window": 1
+        },
+        "timeout_reason": "",
+        "failed": false
+      }
+    ]
+  },
+  "memory_stats": {
+    "similarity_queries": 4,
+    "similarity_hit_queries": 4,
+    "similarity_hit_rate": 1.0,
+    "cleanup_runs": 0,
+    "cleanup_deleted_rows": 0
+  }
+}
