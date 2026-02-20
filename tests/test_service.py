@@ -5,7 +5,7 @@ import json
 import time
 import unittest
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from backend.app.data.sources import NeteaseAdapter, QuoteService, SinaAdapter, TencentAdapter
@@ -218,6 +218,54 @@ class ServiceTestCase(unittest.TestCase):
         self.assertGreaterEqual(int(deepthink_profile.get("history_min", 0) or 0), 252)
         self.assertGreaterEqual(int(report_profile.get("history_fetch_limit", 0) or 0), 520)
         self.assertGreaterEqual(int(deepthink_profile.get("history_fetch_limit", 0) or 0), 520)
+
+    def test_report_task_runtime_guard_returns_failed_fallback(self) -> None:
+        task_id = f"rpt-timeout-{uuid.uuid4().hex[:8]}"
+        past_iso = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+        with self.svc._report_task_lock:  # type: ignore[attr-defined]
+            self.svc._report_tasks[task_id] = {  # type: ignore[attr-defined]
+                "task_id": task_id,
+                "status": "running",
+                "progress": 0.3,
+                "current_stage": "full_report",
+                "stage_message": "Generating full report",
+                "created_at": past_iso,
+                "updated_at": past_iso,
+                "heartbeat_at": past_iso,
+                "deadline_at": past_iso,
+                "stage_started_at": past_iso,
+                "started_at": past_iso,
+                "completed_at": "",
+                "error_code": "",
+                "error_message": "",
+                "cancel_requested": False,
+                "payload": {
+                    "user_id": "u-timeout",
+                    "stock_code": "SH600000",
+                    "period": "1y",
+                    "report_type": "research",
+                    "template_id": "default",
+                },
+                "result_partial": None,
+                "result_full": None,
+            }
+
+        snapshot = self.svc.report_task_get(task_id)
+        self.assertEqual(str(snapshot.get("status", "")), "failed")
+        self.assertEqual(str(snapshot.get("result_level", "")), "partial")
+        self.assertEqual(bool(snapshot.get("display_ready", False)), True)
+        self.assertEqual(str(snapshot.get("partial_reason", "")), "failed_fallback")
+
+        result = self.svc.report_task_result(task_id)
+        self.assertEqual(str(result.get("status", "")), "failed")
+        self.assertEqual(str(result.get("result_level", "")), "partial")
+        self.assertEqual(bool(result.get("display_ready", False)), True)
+        payload = result.get("result", {})
+        self.assertTrue(isinstance(payload, dict))
+        if isinstance(payload, dict):
+            degrade = payload.get("degrade", {})
+            self.assertTrue(isinstance(degrade, dict))
+            self.assertEqual(str((degrade or {}).get("code", "")), "report_task_timeout")
 
     def test_ingest_endpoints(self) -> None:
         daily = self.svc.ingest_market_daily(["SH600000", "SZ000001"])

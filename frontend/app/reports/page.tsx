@@ -137,6 +137,33 @@ function taskRunning(status: string): boolean {
   return ["queued", "running", "partial_ready", "cancelling"].includes(status);
 }
 
+function taskStageLabel(stage: string, status: string): string {
+  const normalizedStage = String(stage || "").trim().toLowerCase();
+  const normalizedStatus = String(status || "").trim().toLowerCase();
+  if (normalizedStatus === "queued") return "排队中";
+  if (normalizedStatus === "cancelling") return "取消中";
+  if (normalizedStatus === "cancelled") return "已取消";
+  if (normalizedStatus === "failed") return "执行失败";
+  if (normalizedStatus === "completed") return "已完成";
+  if (normalizedStage === "partial") return "生成临时结果";
+  if (normalizedStage === "full_report") return "生成完整报告";
+  if (normalizedStage === "done") return "结果封装";
+  if (normalizedStage === "queued") return "排队中";
+  return normalizedStage || "处理中";
+}
+
+function taskStageHint(stage: string, status: string): string {
+  const normalizedStage = String(stage || "").trim().toLowerCase();
+  const normalizedStatus = String(status || "").trim().toLowerCase();
+  if (normalizedStatus === "queued") return "任务已进入队列，等待执行。";
+  if (normalizedStatus === "running" && normalizedStage === "partial") return "正在生成最小可用结果，优先保证可见反馈。";
+  if (normalizedStatus === "partial_ready") return "临时结果已完成，系统正在补齐完整报告。";
+  if (normalizedStatus === "running" && normalizedStage === "full_report") return "正在生成完整报告与模块化结论。";
+  if (normalizedStatus === "failed") return "任务异常结束，若有降级结果将优先展示。";
+  if (normalizedStatus === "completed") return "完整报告已生成。";
+  return "";
+}
+
 export default function ReportsPage() {
   const [items, setItems] = useState<ReportItem[]>([]);
   const [selectedMarkdown, setSelectedMarkdown] = useState("");
@@ -308,7 +335,8 @@ export default function ReportsPage() {
     const body = (await fetchJson(`/v1/report/tasks/${taskId}/result`)) as TaskResult;
     if (body.result && typeof body.result === "object") {
       const isPartial = body.result_level === "partial";
-      const canDisplay = body.result_level === "full" || (isPartial && allowPartialPreviewRef.current);
+      const isFailedFallback = isPartial && String(body.status || "").toLowerCase() === "failed";
+      const canDisplay = body.result_level === "full" || isFailedFallback || (isPartial && allowPartialPreviewRef.current);
       if (canDisplay) {
         applyReportResult(body.result);
       }
@@ -513,8 +541,8 @@ export default function ReportsPage() {
           <Space direction="vertical" style={{ width: "100%" }}>
             <Text>任务ID: <Text code>{task.task_id}</Text></Text>
             <Text>状态: <Tag color={statusColor(task.status)}>{task.status}</Tag></Text>
-            <Text>阶段: {task.current_stage || "-"}</Text>
-            <Text type="secondary">{task.stage_message || "等待中"}</Text>
+            <Text>阶段: {taskStageLabel(task.current_stage, task.status)}</Text>
+            <Text type="secondary">{task.stage_message || taskStageHint(task.current_stage, task.status) || "等待中"}</Text>
             {typeof task.stage_elapsed_seconds === "number" ? (
               <Text type="secondary">阶段耗时: {Math.max(0, Number(task.stage_elapsed_seconds || 0))}s</Text>
             ) : null}
@@ -562,14 +590,21 @@ export default function ReportsPage() {
                 }}
               />
             </Space>
-            {task.result_level === "partial" && !allowPartialPreview ? (
+            {task.status === "failed" && task.result_level === "partial" ? (
+              <Alert
+                type="error"
+                showIcon
+                message="任务执行失败，已自动展示降级结果用于排障与复核。"
+              />
+            ) : null}
+            {task.result_level === "partial" && !allowPartialPreview && task.status !== "failed" ? (
               <Alert
                 type="info"
                 showIcon
                 message="系统正在生成完整报告，临时结果已隐藏（可手动开启预览）。"
               />
             ) : null}
-            {task.result_level === "partial" && allowPartialPreview ? (
+            {task.result_level === "partial" && allowPartialPreview && task.status !== "failed" ? (
               <Alert type="warning" showIcon message="当前展示的是临时结果，完整报告生成后会自动替换。" />
             ) : null}
             {String(task.partial_reason ?? "").trim() ? (

@@ -813,6 +813,7 @@ class AShareAgentService:
         regime_context: dict[str, Any] | None,
         replan_triggered: bool,
         stop_reason: str,
+        data_gap_reasons: list[str] | None = None,
     ) -> dict[str, Any]:
         """Merge arbitration result and intel layer into business summary output."""
         decision = intel.get("decision_adjustment", {}) if isinstance(intel, dict) else {}
@@ -830,6 +831,13 @@ class AShareAgentService:
         calendar = intel.get("calendar_watchlist", []) if isinstance(intel, dict) else []
         next_event = calendar[0] if isinstance(calendar, list) and calendar else {}
         dimensions = self._deep_build_analysis_dimensions(opinions=opinions, regime=regime, intel=intel)
+        gap_reasons = [str(x).strip() for x in list(data_gap_reasons or []) if str(x).strip()]
+        quality_status = "degraded" if gap_reasons else "pass"
+        quality_explain = self._build_quality_explain(
+            reasons=gap_reasons,
+            quality_status=quality_status,
+            context="deepthink",
+        )
         return {
             "stock_code": stock_code,
             "question": question[:200],
@@ -859,6 +867,7 @@ class AShareAgentService:
             "intel_trace_id": str(intel.get("trace_id", "")) if isinstance(intel, dict) else "",
             "intel_citation_count": len(citations),
             "analysis_dimensions": dimensions,
+            "quality_explain": quality_explain,
         }
     def _deep_build_analysis_dimensions(
         self,
@@ -4018,6 +4027,11 @@ class AShareAgentService:
             "reasons": quality_reasons,
             "penalty": round(quality_penalty, 4),
         }
+        quality_explain = self._build_quality_explain(
+            reasons=quality_reasons,
+            quality_status=quality_status,
+            context="report",
+        )
         report_data_pack_summary = {
             "as_of": datetime.now(timezone.utc).isoformat(),
             "history_sample_size": history_sample_size,
@@ -4038,6 +4052,7 @@ class AShareAgentService:
             "time_horizon_coverage": dict(report_input_pack.get("time_horizon_coverage", {}) or {}),
             "refresh_action_count": int(len(refresh_actions)),
             "refresh_failed_count": int(refresh_failed_count),
+            "quality_explain_summary": str(quality_explain.get("summary", "")),
             "missing_data": list(report_input_pack.get("missing_data", []) or []),
             "data_quality": str(report_input_pack.get("data_quality", "ready")),
         }
@@ -4574,13 +4589,8 @@ class AShareAgentService:
             "reasons": list(dict.fromkeys(quality_reasons)),
             "missing_data": list(dict.fromkeys(quality_reasons)),
             "confidence_penalty": round(min(0.7, 0.15 * float(len(quality_reasons))), 4),
-            "user_message": (
-                "Report has watch-level gaps; conclusions remain usable but should be rechecked with fresher evidence."
-                if quality_gate["status"] == "watch"
-                else "Report contains degraded segments; please review quality gate and evidence coverage."
-            )
-            if quality_reasons
-            else "Report quality is normal.",
+            "user_message": str(quality_explain.get("summary", "")),
+            "explain": quality_explain,
         }
         sanitized = self._sanitize_report_payload(resp)
         self._reports[report_id] = dict(sanitized)
@@ -4662,6 +4672,72 @@ class AShareAgentService:
         for bad, good in replacements.items():
             text = text.replace(bad, good)
         return text
+
+    def _build_quality_explain(
+        self,
+        *,
+        reasons: list[str],
+        quality_status: str,
+        context: str = "report",
+    ) -> dict[str, Any]:
+        """Build reusable quality explanation cards for report/deep-think degraded paths."""
+        profiles: dict[str, dict[str, str]] = {
+            "quote_missing": {"title": "实时行情缺失", "impact": "价格与波动判断不完整", "action": "刷新行情源并校验最近交易时刻。"},
+            "history_insufficient": {"title": "历史日线不足", "impact": "趋势与回撤判断不稳定", "action": "补齐至少252交易日日线样本。"},
+            "history_sample_insufficient": {"title": "历史样本偏少", "impact": "统计稳定性下降", "action": "补齐连续交易日序列后重算指标。"},
+            "history_30d_insufficient": {"title": "近30日样本不足", "impact": "短期节奏判断偏弱", "action": "补齐近30日连续日线。"},
+            "financial_missing": {"title": "财报快照缺失", "impact": "估值与盈利归因不足", "action": "补齐最新季度财务指标（营收、利润、ROE）。"},
+            "announcement_missing": {"title": "公告事件不足", "impact": "事件冲击解释不完整", "action": "补拉最近公告与关键事项。"},
+            "news_insufficient": {"title": "新闻样本不足", "impact": "情绪与催化识别偏弱", "action": "补齐近30天有效新闻样本。"},
+            "research_insufficient": {"title": "研报样本不足", "impact": "机构观点覆盖不足", "action": "补齐近季度研报摘要与评级变化。"},
+            "macro_insufficient": {"title": "宏观指标不足", "impact": "政策/宏观冲击分析受限", "action": "补齐GDP/CPI/PMI等核心指标。"},
+            "fund_missing": {"title": "资金面样本不足", "impact": "资金行为判断不完整", "action": "补齐基金/资金流向快照。"},
+            "predict_degraded": {"title": "预测模块降级", "impact": "预测信号可信度下降", "action": "补数后重新触发预测模块。"},
+            "citations_insufficient": {"title": "证据引用不足", "impact": "结论可核验性下降", "action": "增加可追溯引用并复核来源时效。"},
+            "auto_refresh_failed": {"title": "自动补数失败", "impact": "数据缺口未被自动修复", "action": "检查数据源健康并重试补数。"},
+            "partial_result": {"title": "仅返回临时结果", "impact": "报告模块尚未完整", "action": "等待 full 报告完成后再决策。"},
+            "report_task_timeout": {"title": "任务执行超时", "impact": "完整报告未生成", "action": "缩小输入范围后重试（减少标的/缩短问题）。"},
+            "report_task_stalled": {"title": "任务心跳停滞", "impact": "后台执行中断", "action": "重试任务并检查后端运行状态。"},
+            "report_task_failed": {"title": "任务执行失败", "impact": "报告流程提前结束", "action": "查看错误信息并重试。"},
+        }
+        normalized = [str(x).strip() for x in reasons if str(x).strip()]
+        dedup = list(dict.fromkeys(normalized))
+        items: list[dict[str, str]] = []
+        actions: list[str] = []
+        for reason in dedup[:10]:
+            profile = profiles.get(reason) or {
+                "title": "未知质量缺口",
+                "impact": "可核验性下降",
+                "action": "补齐相关数据后重试。",
+            }
+            items.append(
+                {
+                    "reason": reason,
+                    "title": str(profile.get("title", "")),
+                    "impact": str(profile.get("impact", "")),
+                    "action": str(profile.get("action", "")),
+                }
+            )
+            action = str(profile.get("action", "")).strip()
+            if action and action not in actions:
+                actions.append(action)
+
+        status = str(quality_status or "pass").strip().lower() or "pass"
+        if not dedup:
+            summary = "质量门控正常，证据覆盖满足当前输出要求。"
+        elif status == "watch":
+            summary = "存在可恢复的数据缺口，当前结论可用但应在补数后复核。"
+        else:
+            summary = "存在关键数据缺口，当前结果已降级，建议先补数再执行交易决策。"
+        if context == "report_task" and dedup:
+            summary = "任务未完成完整报告，已返回降级结果供快速参考；请按建议补数后重试。"
+
+        return {
+            "status": status,
+            "summary": summary,
+            "items": items,
+            "actions": actions[:6],
+        }
 
     def _sanitize_report_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Ensure report payload is readable and contains degrade metadata."""
@@ -4754,6 +4830,11 @@ class AShareAgentService:
                 degrade_code = "quality_degraded"
             elif quality_status == "watch":
                 degrade_code = "quality_watch"
+            quality_explain = self._build_quality_explain(
+                reasons=[str(x) for x in reasons],
+                quality_status=quality_status,
+                context="report",
+            )
             degrade = {
                 "active": bool(reasons),
                 "code": degrade_code if reasons else "",
@@ -4761,10 +4842,21 @@ class AShareAgentService:
                 "reasons": reasons,
                 "missing_data": reasons,
                 "confidence_penalty": round(min(0.7, 0.15 * float(len(reasons))), 4),
-                "user_message": "Report contains degraded segments; please review quality gate and evidence coverage."
-                if reasons
-                else "Report quality is normal.",
+                "user_message": str(quality_explain.get("summary", "")),
+                "explain": quality_explain,
             }
+        else:
+            quality_status = str((body.get("quality_gate", {}) or {}).get("status", degrade.get("severity", "pass"))).strip().lower() or "pass"
+            reason_rows = [str(x) for x in list(degrade.get("reasons", []) or []) if str(x).strip()]
+            quality_explain = degrade.get("explain")
+            if not isinstance(quality_explain, dict):
+                quality_explain = self._build_quality_explain(
+                    reasons=reason_rows,
+                    quality_status=quality_status,
+                    context="report",
+                )
+            degrade["explain"] = quality_explain
+            degrade["user_message"] = str(degrade.get("user_message", "")).strip() or str(quality_explain.get("summary", ""))
         body["degrade"] = degrade
         body["quality_dashboard"] = self._build_report_quality_dashboard(
             report_modules=list(body.get("report_modules", []) or []),
@@ -4939,14 +5031,163 @@ class AShareAgentService:
                 "missing_data": ["full_report_pending"],
                 "confidence_penalty": 0.45,
                 "user_message": "Minimum viable report returned. Full report is still being generated.",
+                "explain": self._build_quality_explain(
+                    reasons=["partial_result"],
+                    quality_status="degraded",
+                    context="report_task",
+                ),
             },
             "result_level": "partial",
             "stage_progress": {"stage": "partial_ready", "progress": 0.45},
         }
         return self._sanitize_report_payload(result)
 
+    def _build_report_task_failed_result(self, payload: dict[str, Any], *, error_code: str, error_message: str) -> dict[str, Any]:
+        """Build a lightweight fallback result when async task terminates before full report."""
+        stock_code = str(payload.get("stock_code", "")).strip().upper() or "UNKNOWN"
+        report_type = str(payload.get("report_type", "research")).strip() or "research"
+        reason_code = str(error_code or "report_task_failed").strip() or "report_task_failed"
+        quality_explain = self._build_quality_explain(
+            reasons=[reason_code],
+            quality_status="degraded",
+            context="report_task",
+        )
+        next_actions = list(quality_explain.get("actions", []) or [])
+        markdown = (
+            f"# {stock_code} Analysis Report (Task Failed)\n\n"
+            "## Status\n"
+            f"- error_code: {reason_code}\n"
+            f"- message: {str(error_message or 'report task failed')[:260]}\n\n"
+            "## Recovery Actions\n"
+            + ("\n".join(f"- {line}" for line in next_actions[:5]) if next_actions else "- Retry task after checking backend health.")
+        )
+        result = {
+            "report_id": f"failed-{uuid.uuid4().hex[:10]}",
+            "schema_version": self._report_bundle_schema_version,
+            "trace_id": "",
+            "stock_code": stock_code,
+            "report_type": report_type,
+            "markdown": markdown,
+            "citations": [],
+            "evidence_refs": [],
+            "report_modules": [
+                {
+                    "module_id": "executive_summary",
+                    "title": "执行摘要（失败降级）",
+                    "content": f"任务执行失败，已返回降级结果。错误码：{reason_code}。",
+                    "evidence_refs": [],
+                    "coverage": {"status": "partial", "data_points": 0},
+                    "confidence": 0.25,
+                    "degrade_reason": [reason_code],
+                },
+                {
+                    "module_id": "execution_plan",
+                    "title": "补救策略",
+                    "content": "\n".join(f"- {line}" for line in next_actions[:6]) or "- 检查后端状态并重试任务。",
+                    "evidence_refs": [],
+                    "coverage": {"status": "partial", "data_points": int(len(next_actions))},
+                    "confidence": 0.22,
+                    "degrade_reason": [reason_code],
+                },
+            ],
+            "committee": {
+                "research_note": "研究汇总：任务失败，当前为降级结果，仅用于快速定位问题。",
+                "risk_note": "风险仲裁：不建议依据该结果直接执行仓位动作。",
+            },
+            "final_decision": {
+                "signal": "hold",
+                "confidence": 0.2,
+                "rationale": f"任务失败（{reason_code}），完整报告未生成。",
+                "invalidation_conditions": ["task_failed", "full_report_missing"],
+                "execution_plan": [
+                    "检查任务错误与后端状态",
+                    "缩小输入范围后重试",
+                    "等待完整报告后再决策",
+                ],
+            },
+            "analysis_nodes": [
+                {
+                    "node_id": "task_guard",
+                    "title": "任务守卫",
+                    "status": "degraded",
+                    "signal": "hold",
+                    "confidence": 0.25,
+                    "summary": f"任务因 {reason_code} 终止，返回降级结果。",
+                    "highlights": [str(error_message or "")[:180]],
+                    "evidence_refs": [],
+                    "coverage": {"status": "partial"},
+                    "degrade_reason": [reason_code],
+                    "guardrails": ["仅作排障参考，不用于执行交易。"],
+                    "veto": True,
+                }
+            ],
+            "metric_snapshot": {
+                "history_sample_size": 0,
+                "news_count": 0,
+                "research_count": 0,
+                "macro_count": 0,
+                "quality_score": 0.2,
+                "citation_count": 0,
+                "predict_quality": "failed",
+            },
+            "quality_gate": {
+                "status": "degraded",
+                "score": 0.2,
+                "reasons": [reason_code],
+            },
+            "quality_dashboard": {
+                "status": "degraded",
+                "overall_score": 0.2,
+                "module_count": 2,
+                "avg_module_quality": 0.22,
+                "min_module_quality": 0.2,
+                "coverage_ratio": 0.0,
+                "evidence_ref_count": 0,
+                "evidence_density": 0.0,
+                "consistency_score": 0.5,
+                "low_quality_modules": ["executive_summary", "execution_plan"],
+                "reasons": [reason_code],
+                "node_veto": True,
+            },
+            "report_data_pack_summary": {
+                "as_of": datetime.now(timezone.utc).isoformat(),
+                "history_sample_size": 0,
+                "predict_quality": "failed",
+                "predict_degrade_reasons": [reason_code],
+                "intel_signal": "pending",
+                "intel_confidence": 0.0,
+                "news_count": 0,
+                "research_count": 0,
+                "macro_count": 0,
+                "missing_data": [reason_code],
+                "quality_explain_summary": str(quality_explain.get("summary", "")),
+            },
+            "generation_mode": "failed_fallback",
+            "generation_error": str(error_message or "")[:260],
+            "degrade": {
+                "active": True,
+                "code": reason_code,
+                "severity": "high",
+                "reasons": [reason_code],
+                "missing_data": [reason_code],
+                "confidence_penalty": 0.7,
+                "user_message": str(quality_explain.get("summary", "")),
+                "explain": quality_explain,
+            },
+            "result_level": "partial",
+            "stage_progress": {"stage": "failed_fallback", "progress": 1.0},
+        }
+        return self._sanitize_report_payload(result)
+
     def _report_task_mark_failed(self, task: dict[str, Any], *, error_code: str, error_message: str) -> None:
         """Mark one report task as failed with a normalized error payload."""
+        if not isinstance(task.get("result_partial"), dict):
+            payload = dict(task.get("payload", {}) or {})
+            task["result_partial"] = self._build_report_task_failed_result(
+                payload,
+                error_code=error_code,
+                error_message=error_message,
+            )
         now_iso = datetime.now(timezone.utc).isoformat()
         task["status"] = "failed"
         task["current_stage"] = "failed"
@@ -5008,11 +5249,13 @@ class AShareAgentService:
         self._report_task_apply_runtime_guard(task)
         has_full = bool(task.get("result_full"))
         has_partial = bool(task.get("result_partial"))
+        task_status = str(task.get("status", "queued"))
         level = "full" if has_full else "partial" if has_partial else "none"
-        display_ready = bool(has_full)
+        # Failed task with fallback partial result should still be display-ready.
+        display_ready = bool(has_full or (task_status == "failed" and has_partial))
         partial_reason = ""
         if has_partial and not has_full:
-            partial_reason = "warming_up"
+            partial_reason = "failed_fallback" if task_status == "failed" else "warming_up"
         best_result = task.get("result_full") if has_full else task.get("result_partial") if has_partial else {}
         best_result = best_result if isinstance(best_result, dict) else {}
         pack_summary = dict(best_result.get("report_data_pack_summary", {}) or {})
@@ -5033,7 +5276,7 @@ class AShareAgentService:
             heartbeat_age_seconds = max(0, int((now - self._parse_time(heartbeat_at)).total_seconds()))
         return {
             "task_id": str(task.get("task_id", "")),
-            "status": str(task.get("status", "queued")),
+            "status": task_status,
             "progress": round(max(0.0, min(1.0, float(task.get("progress", 0.0) or 0.0))), 4),
             "current_stage": str(task.get("current_stage", "")),
             "stage_message": str(task.get("stage_message", "")),
@@ -5262,12 +5505,13 @@ class AShareAgentService:
                     "result": full,
                 }
             if isinstance(partial, dict):
+                failed_fallback = str(task.get("status", "")) == "failed"
                 return {
                     "task_id": key,
                     "status": str(task.get("status", "")),
                     "result_level": "partial",
-                    "display_ready": False,
-                    "partial_reason": "warming_up",
+                    "display_ready": bool(failed_fallback),
+                    "partial_reason": "failed_fallback" if failed_fallback else "warming_up",
                     "deadline_at": str(task.get("deadline_at", "")),
                     "heartbeat_at": str(task.get("heartbeat_at", "")),
                     "result": partial,
@@ -8649,6 +8893,7 @@ class AShareAgentService:
                 regime_context=regime_context,
                 replan_triggered=replan_triggered,
                 stop_reason=stop_reason,
+                data_gap_reasons=[str(x) for x in list(deep_pack.get("missing_data", []) or []) if str(x).strip()],
             )
             yield emit("business_summary", dict(business_summary))
             # DeepThink -> Journal 鑷姩钀藉簱锛歳ound_id 浣滀负骞傜瓑閿紝閬垮厤閲嶅鍐欏叆銆?
