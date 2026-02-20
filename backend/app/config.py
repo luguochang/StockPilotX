@@ -59,6 +59,8 @@ class Settings:
     # DeepThink runtime guard: cap one round wall-clock latency and emit warning before timeout.
     deep_round_timeout_seconds: float = 45.0
     deep_round_stage_soft_timeout_seconds: float = 28.0
+    # Deep retrieval fanout timeout per subtask to keep deep mode responsive.
+    deep_subtask_timeout_seconds: float = 2.5
     rag_vector_enabled: bool = True
     rag_vector_index_dir: str = str(_DATA_DIR / "vector")
     rag_vector_top_k: int = 8
@@ -128,6 +130,7 @@ class Settings:
             deep_round_stage_soft_timeout_seconds=max(
                 0.05, float(os.getenv("DEEP_ROUND_STAGE_SOFT_TIMEOUT_SECONDS", "28"))
             ),
+            deep_subtask_timeout_seconds=max(0.1, float(os.getenv("DEEP_SUBTASK_TIMEOUT_SECONDS", "2.5"))),
             rag_vector_enabled=_to_bool(os.getenv("RAG_VECTOR_ENABLED"), True),
             rag_vector_index_dir=os.getenv("RAG_VECTOR_INDEX_DIR", str(_DATA_DIR / "vector")),
             rag_vector_top_k=max(1, int(os.getenv("RAG_VECTOR_TOP_K", "8"))),

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from typing import Any, Iterator
@@ -19,19 +21,74 @@ from backend.app.rag.retriever import HybridRetriever, RetrievalItem
 from backend.app.state import AgentState
 
 
+@dataclass(slots=True)
+class IntentRoutingResult:
+    """Rule-route result with confidence and explainable keyword hits."""
+
+    intent: str
+    confidence: float
+    matched: dict[str, list[str]]
+    conflict: bool
+
+
 def route_intent(question: str) -> str:
-    q = question.lower()
-    if any(k in q for k in ("对比", "比较")):
-        return "compare"
-    if any(k in q for k in ("文档", "pdf", "报告")):
-        return "doc_qa"
-    if any(k in q for k in ("深入", "深度", "归因", "风险")):
-        return "deep"
-    return "fact"
+    """Backward-compatible helper used by legacy callers."""
+    return route_intent_with_confidence(question).intent
+
+
+def route_intent_with_confidence(question: str) -> IntentRoutingResult:
+    """Route intent via keyword rules and expose confidence for runtime telemetry."""
+    q = str(question or "").strip().lower()
+    compare_keywords = (
+        "\u5bf9\u6bd4",
+        "\u6bd4\u8f83",
+        "vs",
+        "versus",
+        "compare",
+    )
+    doc_keywords = (
+        "\u6587\u6863",
+        "\u6587\u4ef6",
+        "pdf",
+        "\u62a5\u544a",
+        "doc",
+        "docx",
+    )
+    deep_keywords = (
+        "\u6df1\u5165",
+        "\u6df1\u5ea6",
+        "\u5f52\u56e0",
+        "\u98ce\u9669",
+        "deep",
+        "analysis",
+    )
+    matched = {
+        "compare": [k for k in compare_keywords if k in q],
+        "doc_qa": [k for k in doc_keywords if k in q],
+        "deep": [k for k in deep_keywords if k in q],
+    }
+    # Priority is explicit: compare > doc_qa > deep > fact.
+    # Score weights keep compare fast path robust for "A vs B" phrasing.
+    weighted = {
+        "compare": len(matched["compare"]) * 1.0,
+        "doc_qa": len(matched["doc_qa"]) * 0.92,
+        "deep": len(matched["deep"]) * 0.88,
+    }
+    ranked = sorted(weighted.items(), key=lambda x: x[1], reverse=True)
+    top_intent, top_score = ranked[0]
+    second_score = ranked[1][1]
+    if top_score <= 0:
+        return IntentRoutingResult(intent="fact", confidence=0.58, matched=matched, conflict=False)
+
+    conflict = second_score > 0 and abs(top_score - second_score) <= 0.2
+    # Confidence grows with hit count + margin; clamp keeps trace values stable.
+    margin = max(0.0, top_score - second_score)
+    confidence = min(0.98, max(0.62, 0.64 + min(0.22, top_score * 0.08) + min(0.12, margin * 0.08)))
+    return IntentRoutingResult(intent=top_intent, confidence=round(confidence, 4), matched=matched, conflict=conflict)
 
 
 class AgentWorkflow:
-    """多 Agent 工作流（含 Deep Agents 与工具 ACL）。"""
+    """Multi-agent workflow with Deep Agents and tool ACL."""
 
     def __init__(
         self,
@@ -65,11 +122,11 @@ class AgentWorkflow:
         return self.finalize_with_output(state, output)
 
     def run_stream(self, state: AgentState, memory_hint: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
-        """流式执行：优先透传上游LLM增量。"""
+        """Streaming execution that forwards upstream LLM deltas."""
         prompt = self.prepare_prompt(state, memory_hint=memory_hint)
         prompt = self.apply_before_model(state, prompt)
         yield {"event": "meta", "data": {"trace_id": state.trace_id, "intent": state.intent, "mode": state.mode}}
-        # 关键：必须边收边吐，不能先 collect 完整事件列表再返回，否则前端会“假流式”。
+        # Must emit while consuming; collecting all events first causes fake streaming in the UI.
         stream_iter = self.stream_model_iter(state, prompt)
         output = ""
         while True:
@@ -87,29 +144,29 @@ class AgentWorkflow:
 
     # ---------------- Public stage methods ----------------
     def prepare_prompt(self, state: AgentState, memory_hint: list[dict[str, Any]] | None = None) -> str:
-        """阶段1：准备状态与证据并构造 prompt。"""
+        """Stage 1: prepare state/evidence and construct the prompt."""
         return self._prepare_state(state, memory_hint=memory_hint)
 
     def apply_before_model(self, state: AgentState, prompt: str) -> str:
-        """阶段2：执行模型前中间件。"""
+        """Stage 2: run before-model middleware."""
         return self.middleware.run_before_model(state, prompt)
 
     def invoke_model(self, state: AgentState, prompt: str) -> str:
-        """阶段3：执行模型调用（含回退链）。"""
+        """Stage 3: invoke model with fallback chain."""
         return self.middleware.call_model(state, prompt, self._model_call_with_fallback)
 
     def apply_after_model(self, state: AgentState, output: str) -> str:
-        """阶段4：执行模型后中间件。"""
+        """Stage 4: run after-model middleware."""
         return self.middleware.run_after_model(state, output)
 
     def finalize_with_output(self, state: AgentState, output: str) -> AgentState:
-        """阶段5：写入报告并执行引用与收尾。"""
+        """Stage 5: store report, generate citations, and finalize state."""
         state.report = output
         return self._finalize_state(state)
 
     def stream_model_collect(self, state: AgentState, prompt: str, chunk_size: int = 80) -> tuple[str, list[dict[str, Any]]]:
-        """阶段3(流式)：收集模型增量并返回完整输出及事件列表。"""
-        # 保留 collect 版本用于测试与非实时场景；实时链路应走 stream_model_iter。
+        """Stage 3 (streaming): collect deltas and return full output plus events."""
+        # Keep collect mode for tests and non-realtime flows. Realtime should use stream_model_iter.
         events: list[dict[str, Any]] = []
         stream_iter = self.stream_model_iter(state, prompt, chunk_size=chunk_size)
         output = ""
@@ -122,11 +179,11 @@ class AgentWorkflow:
         return output, events
 
     def stream_model_iter(self, state: AgentState, prompt: str, chunk_size: int = 80) -> Iterator[dict[str, Any]]:
-        """阶段3(真流式)：边接收模型增量边产出 answer_delta 事件，并在结束时返回完整输出。"""
-        # 先触发预算中间件模型调用计数与阈值检查。
+        """Stage 3 (true streaming): emit answer deltas and return final output on completion."""
+        # Trigger budget middleware model-call counting and threshold checks up front.
         self.middleware.call_model(state, prompt, lambda s, p: "")
         output = ""
-        # 先触发预算中间件模型调用计数与阈值检查。
+        # Trigger budget middleware model-call counting and threshold checks up front.
         try:
             if self.external_model_stream_call is None:
                 raise RuntimeError("external stream model is not configured")
@@ -139,7 +196,7 @@ class AgentWorkflow:
             output = "".join(chunks)
             if not output.strip():
                 raise RuntimeError("external stream returned empty output")
-            # 上游流结束后，gateway 会写入 provider/model 信息，此时再透传来源信息。
+            # Gateway writes provider/model after upstream stream ends, then we emit source metadata.
             yield (
                 {
                     "event": "stream_source",
@@ -175,8 +232,19 @@ class AgentWorkflow:
     def _prepare_state(self, state: AgentState, memory_hint: list[dict[str, Any]] | None = None) -> str:
         self.middleware.run_before_agent(state)
         self.trace_emit(state.trace_id, "before_agent", {"question": state.question})
-        state.intent = route_intent(state.question)
-        self.trace_emit(state.trace_id, "router", {"intent": state.intent})
+        intent_result = route_intent_with_confidence(state.question)
+        state.intent = intent_result.intent
+        state.analysis["intent_confidence"] = intent_result.confidence
+        self.trace_emit(
+            state.trace_id,
+            "router",
+            {
+                "intent": state.intent,
+                "intent_confidence": intent_result.confidence,
+                "intent_rule_conflict": intent_result.conflict,
+                "intent_matched_keywords": intent_result.matched,
+            },
+        )
         # Preserve caller-side metadata and only fill retrieval defaults when absent.
         plan = dict(state.retrieval_plan or {})
         plan.setdefault("top_k_vector", 12)
@@ -191,7 +259,7 @@ class AgentWorkflow:
         if state.stock_codes:
             question = f"{question} {' '.join(state.stock_codes)}"
         if memory_hint:
-            question = f"{question}\n历史记忆摘要:{memory_hint[0]['content']}"
+            question = f"{question}\nMemory summary: {memory_hint[0]['content']}"
 
         if self._should_use_graphrag(state):
             state.mode = "graph_rag"
@@ -247,7 +315,11 @@ class AgentWorkflow:
                 for i in items
             ]
         self.trace_emit(state.trace_id, "retrieval", {"mode": state.mode, "evidence": len(state.evidence_pack)})
-        state.analysis = self._analyze(state)
+        # Preserve pre-analysis telemetry fields (intent confidence/timeout metadata)
+        # and merge structured analysis snapshot afterwards.
+        preserved_analysis = dict(state.analysis)
+        preserved_analysis.update(self._analyze(state))
+        state.analysis = preserved_analysis
         self.trace_emit(state.trace_id, "analysis", state.analysis)
         return self._build_prompt(state)
 
@@ -265,28 +337,74 @@ class AgentWorkflow:
         return state
 
     def _should_use_graphrag(self, state: AgentState) -> bool:
-        return any(k in state.question for k in ("关系", "演化", "关联", "产业链", "股权"))
+        question = str(state.question or "").lower()
+        graph_keywords = (
+            "\u5173\u7cfb",
+            "\u6f14\u5316",
+            "\u5173\u8054",
+            "\u4ea7\u4e1a\u94fe",
+            "\u80a1\u6743",
+            "graph",
+            "network",
+        )
+        return any(k in question for k in graph_keywords)
 
     def _should_use_deep_agents(self, state: AgentState) -> bool:
-        return state.intent in ("deep", "compare") or any(k in state.question for k in ("多维", "并行", "长期", "对比"))
+        question = str(state.question or "").lower()
+        deep_keywords = (
+            "\u591a\u7ef4",
+            "\u5e76\u884c",
+            "\u957f\u671f",
+            "\u5bf9\u6bd4",
+            "deep",
+            "multi-step",
+        )
+        return state.intent in ("deep", "compare") or any(k in question for k in deep_keywords)
 
     def _plan_subtasks(self, question: str) -> list[str]:
-        return [f"{question}：财务维度", f"{question}：行业维度", f"{question}：风险维度"]
+        base = str(question or "").strip()
+        return [
+            f"{base}: financial dimension",
+            f"{base}: industry dimension",
+            f"{base}: risk dimension",
+        ]
 
     def _deep_retrieve(self, question: str, state: AgentState) -> list[RetrievalItem]:
         subtasks = self._plan_subtasks(question)
         state.analysis["deep_subtasks"] = subtasks
+        subtask_timeout_seconds = max(0.2, float(getattr(self.middleware.ctx.settings, "deep_subtask_timeout_seconds", 2.5)))
+        timeout_subtasks: list[str] = []
+        failed_subtasks: list[dict[str, str]] = []
         merged: list[RetrievalItem] = []
         with ThreadPoolExecutor(max_workers=3) as pool:
-            futures = {pool.submit(self.retriever.retrieve, q, 8, 12, 5): q for q in subtasks}
-            for fut in as_completed(futures):
-                merged.extend(fut.result())
+            futures = {q: pool.submit(self.retriever.retrieve, q, 8, 12, 5) for q in subtasks}
+            for subtask, fut in futures.items():
+                try:
+                    merged.extend(fut.result(timeout=subtask_timeout_seconds))
+                except FuturesTimeoutError:
+                    timeout_subtasks.append(subtask)
+                    fut.cancel()
+                except Exception as ex:  # noqa: BLE001
+                    failed_subtasks.append({"subtask": subtask, "error": str(ex)[:200]})
         uniq: dict[tuple[str, str], RetrievalItem] = {}
         for item in merged:
             uniq[(item.source_id, item.text)] = item
         items = list(uniq.values())
         items.sort(key=lambda x: x.score, reverse=True)
-        self.trace_emit(state.trace_id, "deep_agents", {"subtask_count": len(subtasks), "merged_items": len(items)})
+        state.analysis["timeout_subtasks"] = timeout_subtasks
+        if failed_subtasks:
+            state.analysis["failed_subtasks"] = failed_subtasks
+        self.trace_emit(
+            state.trace_id,
+            "deep_agents",
+            {
+                "subtask_count": len(subtasks),
+                "merged_items": len(items),
+                "timeout_subtasks": timeout_subtasks,
+                "failed_subtasks": len(failed_subtasks),
+                "subtask_timeout_seconds": subtask_timeout_seconds,
+            },
+        )
         return items[: state.retrieval_plan["rerank_top_n"]]
 
     def _analyze(self, state: AgentState) -> dict[str, Any]:
@@ -297,7 +415,7 @@ class AgentWorkflow:
             "fact_count": len(state.evidence_pack),
             "high_confidence_count": len(positives),
             "low_confidence_count": len(risks),
-            "summary": "证据显示公司存在业绩改善线索，但仍需关注行业波动风险。",
+            "summary": "Evidence suggests possible earnings improvement, but sector volatility remains a key risk.",
             "deep_subtasks": state.analysis.get("deep_subtasks", []),
             "market_regime": {
                 "label": str(regime_ctx.get("regime_label", "")),
@@ -330,40 +448,40 @@ class AgentWorkflow:
             self.trace_emit(state.trace_id, "prompt_meta", prompt_meta)
             return rendered
         return (
-            "你是A股分析助手。\n"
-            f"问题：{state.question}\n"
-            f"模式：{state.mode}\n"
-            f"分析摘要：{state.analysis.get('summary', '')}\n"
-            f"证据：\n{evidence}\n"
-            "请输出简明结论并附免责声明。"
+            "You are an A-share analysis assistant.\n"
+            f"Question: {state.question}\n"
+            f"Mode: {state.mode}\n"
+            f"Analysis summary: {state.analysis.get('summary', '')}\n"
+            f"Evidence:\n{evidence}\n"
+            "Return a concise conclusion and include a disclaimer."
         )
 
     def _synthesize_model_output(self, state: AgentState, prompt: str) -> str:
         _ = prompt
-        symbols = ",".join(state.stock_codes) if state.stock_codes else "该标的"
+        symbols = ",".join(state.stock_codes) if state.stock_codes else "the target symbol"
         high = state.analysis.get("high_confidence_count", 0)
         low = state.analysis.get("low_confidence_count", 0)
         fact_count = state.analysis.get("fact_count", 0)
         top_facts = [e["text"] for e in state.evidence_pack[:2] if e.get("text")]
-        top_fact_text = "；".join(top_facts) if top_facts else "暂无高质量事实片段"
+        top_fact_text = "; ".join(top_facts) if top_facts else "No high-quality evidence snippets available"
 
         if high >= max(1, low):
-            stance = "证据一致性较好，短期可跟踪结构性机会"
+            stance = "evidence consistency is strong and near-term structural opportunities can be tracked"
         elif low > high:
-            stance = "证据分歧偏高，建议先观察并等待更多披露"
+            stance = "evidence divergence is elevated, so observation is advised until more disclosures arrive"
         else:
-            stance = "当前证据有限，建议保持中性观察"
+            stance = "current evidence is limited and a neutral stance is recommended"
 
-        risk_line = "；".join(state.risk_flags) if state.risk_flags else "未触发高风险风控词"
+        risk_line = "; ".join(state.risk_flags) if state.risk_flags else "No high-risk control flags triggered"
         return (
-            f"结论：{symbols} 当前共采集 {fact_count} 条证据，{stance}。\n"
-            f"关键事实：{top_fact_text}。\n"
-            f"风险提示：{risk_line}。\n"
-            "仅供研究参考，不构成投资建议。"
+            f"Conclusion: {symbols} currently has {fact_count} evidence items; {stance}.\n"
+            f"Key facts: {top_fact_text}.\n"
+            f"Risk notes: {risk_line}.\n"
+            "For research reference only. This is not investment advice."
         )
 
     def _model_call_with_fallback(self, state: AgentState, prompt: str) -> str:
-        """优先调用外部LLM，失败时回退本地模型。"""
+        """Prefer external LLM and fall back to local synthesis on failure."""
         if self.external_model_call is None:
             return self._synthesize_model_output(state, prompt)
         try:
