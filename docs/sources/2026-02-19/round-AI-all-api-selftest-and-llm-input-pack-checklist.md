@@ -14,8 +14,9 @@
 - [x] 新增并增强全接口自测脚本 `scripts/full_api_selftest.py`
 - [x] 单测通过：`tests/test_service.py` + `tests/test_http_api.py`（82 passed）
 - [x] 前端类型检查通过：`npx tsc --noEmit`
-- [ ] 前端生产构建通过：`npm run build`（当前环境 `.next/trace` 文件锁，待释放后复验）
+- [x] 前端生产构建通过：`npm run build`（2026-02-20 复验通过，Next.js 构建成功）
 
 ## 本轮结果摘要
 - API 路由 smoke：`129` 路由，`0` 个 5xx。
 - 轻量模式跳过重型路由 `29` 个（状态码 `299` 标识），用于提高本地回归稳定性。
+- 前端生产构建复验完成：`19/19` 静态页面生成成功，`/reports` 等核心页面可产物化。
