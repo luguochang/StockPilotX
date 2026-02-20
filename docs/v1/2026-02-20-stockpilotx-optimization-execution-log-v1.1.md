@@ -243,3 +243,80 @@ $env:PYTHONPATH='.'; .\.venv\Scripts\python scripts\generate_gate_decision_repor
 - [x] 字段白名单约束
 - [x] LIMIT 上限约束
 - [x] 安全回归用例
+
+---
+
+## Batch 6（2026-02-20）
+
+### 对应计划项
+
+- Phase 2 / 6.3：SQL Agent PoC 落地到可调用 API（默认只读、可审计）
+
+### 本批代码改动
+
+1. `backend/app/service_modules/runtime_core_mixin.py`
+- 新增 `_sql_agent_poc_allowed_schema`：
+  - 从 `web.db` 中动态发现存在的白名单表和字段。
+- 新增 `sql_agent_poc_query(payload)`：
+  - 使用 `SQLSafetyValidator` 进行只读安全校验；
+  - 校验通过后执行查询并限制返回行数；
+  - 统一返回 `ok/error/reason/validation/rows/trace_id`；
+  - 通过 trace 记录审计事件。
+
+2. `backend/app/http_api.py`
+- 新增接口：`POST /v1/sql-agent/poc/query`
+
+3. `backend/app/service_modules/shared.py`
+- 引入 `SQLSafetyValidator` 供 mixin 使用。
+
+4. 测试补充
+- `tests/test_service.py`：新增 `test_sql_agent_poc_query`
+- `tests/test_http_api.py`：新增 `test_sql_agent_poc_query`
+
+### 自测记录
+
+```powershell
+.\.venv\Scripts\python -m pytest -q tests\test_sql_guard.py tests\test_service.py::ServiceTestCase::test_sql_agent_poc_query tests\test_http_api.py::HttpApiTestCase::test_sql_agent_poc_query
+```
+
+结果：`7 passed`
+
+### Checklist
+
+- [x] SQL PoC 服务方法
+- [x] SQL PoC HTTP 接口
+- [x] 只读校验接入执行链路
+- [x] 接口级自测通过
+
+---
+
+## Batch 7（2026-02-20）
+
+### 对应计划项
+
+- Phase 3 / 8.2：中间件扩展（RateLimit / Cache / PII）
+
+### 本批代码改动
+
+1. `backend/app/middleware/hooks.py`
+- 新增 `RateLimitMiddleware`：按 `user_id` 做窗口限流，超过阈值抛错。
+- 新增 `CacheMiddleware`：按 `user_id+prompt` 做模型输出 TTL 缓存，命中减少重复调用。
+- 新增 `PIIMiddleware`：对 prompt/output 做邮箱/手机号/证件号脱敏。
+
+2. 新增 `tests/test_middleware_extensions.py`
+- 覆盖限流、缓存命中、PII 脱敏三类行为。
+
+### 自测记录
+
+```powershell
+.\.venv\Scripts\python -m pytest -q tests\test_middleware_extensions.py tests\test_phase0_optimization_v11.py::Phase0OptimizationV11Tests::test_workflow_prepare_state_preserves_intent_confidence
+```
+
+结果：`4 passed`
+
+### Checklist
+
+- [x] RateLimitMiddleware
+- [x] CacheMiddleware
+- [x] PIIMiddleware
+- [x] 中间件行为单测

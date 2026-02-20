@@ -2,6 +2,8 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+import re
+import time
 from typing import Any
 
 from backend.app.config import Settings
@@ -117,6 +119,76 @@ class BudgetMiddleware(Middleware):
             raise RuntimeError("tool call limit exceeded")
         ctx.tool_call_count += 1
         return call_next(tool_name, payload)
+
+
+class RateLimitMiddleware(Middleware):
+    """Simple in-process rate limiter for user-level throttling."""
+
+    name = "rate_limit"
+
+    def __init__(self, max_requests: int = 30, window_seconds: int = 60) -> None:
+        self.max_requests = max(1, int(max_requests))
+        self.window_seconds = max(1, int(window_seconds))
+        self._hits: dict[str, list[float]] = {}
+
+    def before_agent(self, state: AgentState, ctx: MiddlewareContext) -> None:
+        now = time.time()
+        key = str(state.user_id or "anonymous")
+        bucket = [ts for ts in self._hits.get(key, []) if (now - ts) <= self.window_seconds]
+        if len(bucket) >= self.max_requests:
+            raise RuntimeError("rate limit exceeded")
+        bucket.append(now)
+        self._hits[key] = bucket
+        ctx.logs.append("before_agent:rate_limit")
+
+
+class CacheMiddleware(Middleware):
+    """Prompt-level response cache to reduce repeated model calls."""
+
+    name = "cache"
+
+    def __init__(self, ttl_seconds: int = 45, max_entries: int = 200) -> None:
+        self.ttl_seconds = max(1, int(ttl_seconds))
+        self.max_entries = max(10, int(max_entries))
+        self._cache: dict[tuple[str, str], tuple[float, str]] = {}
+
+    def wrap_model_call(self, state: AgentState, prompt: str, call_next: ModelCall, ctx: MiddlewareContext) -> str:
+        now = time.time()
+        key = (str(state.user_id), str(prompt))
+        cached = self._cache.get(key)
+        if cached and (now - cached[0]) <= self.ttl_seconds:
+            ctx.logs.append("model_call:cache_hit")
+            return cached[1]
+        output = call_next(state, prompt)
+        self._cache[key] = (now, output)
+        # Drop oldest item when cache is full.
+        if len(self._cache) > self.max_entries:
+            oldest = min(self._cache.items(), key=lambda x: x[1][0])[0]
+            self._cache.pop(oldest, None)
+        ctx.logs.append("model_call:cache_miss")
+        return output
+
+
+class PIIMiddleware(Middleware):
+    """Redact high-risk PII patterns in prompt/output snapshots."""
+
+    name = "pii"
+
+    @staticmethod
+    def _redact(value: str) -> str:
+        redacted = str(value or "")
+        redacted = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[REDACTED_EMAIL]", redacted)
+        redacted = re.sub(r"\b1\d{10}\b", "[REDACTED_PHONE]", redacted)
+        redacted = re.sub(r"\b\d{15,18}[0-9Xx]?\b", "[REDACTED_ID]", redacted)
+        return redacted
+
+    def before_model(self, state: AgentState, prompt: str, ctx: MiddlewareContext) -> str:
+        ctx.logs.append("before_model:pii")
+        return self._redact(prompt)
+
+    def after_model(self, state: AgentState, output: str, ctx: MiddlewareContext) -> str:
+        ctx.logs.append("after_model:pii")
+        return self._redact(output)
 
 
 class MiddlewareStack:
