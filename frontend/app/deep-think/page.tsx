@@ -1190,7 +1190,7 @@ export default function DeepThinkPage() {
       const autoCreateSession = !deepSession;
       const session = deepSession ?? (await createDeepThinkSessionRequest());
       if (autoCreateSession) {
-        // 明确告诉用户：执行下一轮可自动建会话，不依赖先做高级分析。
+        // 明确告诉用户：执行下一轮可自动建会话，不依赖先做市场快析。
         setDeepProgressText("未检测到会话，已自动创建并开始执行...");
       }
       setDeepSession(session);
@@ -1979,7 +1979,7 @@ export default function DeepThinkPage() {
                   ))}
                 </Space>
                 <Button type="primary" size="large" loading={loading} onClick={() => runAnalysis(resolveComposedQuestion())}>
-                  开始高级分析
+                  开始分析
                 </Button>
                 {streaming ? <Text style={{ color: "#2563eb" }}>流式输出中...</Text> : null}
                 {streaming && queryProgressText ? <Text style={{ color: "#475569" }}>阶段：{queryProgressText}</Text> : null}
@@ -2057,7 +2057,7 @@ export default function DeepThinkPage() {
                   </Text>
                 </Space>
               ) : (
-                <Text style={{ color: "#64748b" }}>连续样本不足，建议先执行一次高级分析以刷新历史数据。</Text>
+                <Text style={{ color: "#64748b" }}>连续样本不足，建议先在“市场快析”执行一次分析以刷新历史数据。</Text>
               )}
             </Card>
 
@@ -2460,7 +2460,7 @@ export default function DeepThinkPage() {
                     </Card>
                   </>
                 ) : (
-                  <Text style={{ color: "#64748b" }}>暂无业务卡片，请点击“刷新业务卡片”或执行高级分析后查看。</Text>
+                  <Text style={{ color: "#64748b" }}>暂无业务卡片，请点击“刷新业务卡片”或先完成一次分析后查看。</Text>
                 )}
               </Space>
             </Card>
@@ -2519,7 +2519,7 @@ export default function DeepThinkPage() {
                       </Button>
                     </Space>
                     <Text style={{ color: "#64748b" }}>
-                      提示：无需先执行高级分析，直接点击“执行下一轮”会自动创建会话并开始分析。
+                      提示：无需先执行上方流式分析，直接点击“执行下一轮”会自动创建会话并开始分析。
                     </Text>
                     {deepStockSwitchNotice ? (
                       <Alert
@@ -2874,7 +2874,7 @@ export default function DeepThinkPage() {
                       </Button>
                     </Space>
                     <Text style={{ color: "#64748b" }}>
-                      提示：无需先执行高级分析，直接点击“执行下一轮”会自动创建会话并开始分析。
+                      提示：无需先执行上方流式分析，直接点击“执行下一轮”会自动创建会话并开始分析。
                     </Text>
                     {deepStockSwitchNotice ? (
                       <Alert
