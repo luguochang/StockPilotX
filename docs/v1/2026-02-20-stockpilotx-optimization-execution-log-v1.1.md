@@ -65,3 +65,55 @@ $env:PYTHONPATH='.'; .\.venv\Scripts\python scripts\collect_phase0_baseline.py
 - [x] 意图路由规则增强（含置信度）
 - [x] 针对性回归自测
 - [x] 执行日志记录
+
+---
+
+## Batch 2（2026-02-20）
+
+### 对应计划项
+
+- Phase 0 / 3.1：将 Gate A / Gate B 决策条件代码化，避免主观判断偏差
+- Gate A/B：形成可自动产出的评审报告模板化流程
+
+### 本批代码改动
+
+1. `backend/app/evals/service.py`
+- `run_eval` 新增 `gate_assessment` 输出。
+- 新增 `assess_gate_a(intent_f1)`：
+  - `<0.85` => `hold`（建议引入轻量意图模型）
+  - `>=0.85` => `go`（继续规则优先）
+- 新增 `assess_gate_b(sql_pass_rate, high_risk_count, observability_ready)`：
+  - 三条件全部满足才 `go`，否则 `hold`
+- 新增 `assess_gate_readiness(...)` 统一输出。
+
+2. 新增脚本
+- `scripts/generate_gate_decision_report.py`
+- 输入 Phase0 baseline JSON，输出 Gate A/B 决策报告 Markdown。
+
+3. 新增测试
+- `tests/test_eval_gate_decision.py`
+
+4. 产物
+- `docs/v1/baseline/gate-decision-20260220-133350.md`
+
+### 自测记录
+
+1. 命令：
+```powershell
+.\.venv\Scripts\python -m pytest -q tests\test_eval_gate_decision.py tests\test_service.py::ServiceTestCase::test_eval_gate tests\test_http_api.py::HttpApiTestCase::test_evals_run_and_get
+```
+结果：`6 passed`
+
+2. 命令：
+```powershell
+$env:PYTHONPATH='.'; .\.venv\Scripts\python scripts\generate_gate_decision_report.py --baseline-json docs\v1\baseline\phase0-baseline-20260220-131645.json
+```
+结果：成功产出 Gate 决策报告。
+
+### Checklist
+
+- [x] Gate A 规则代码化
+- [x] Gate B 规则代码化
+- [x] Gate 决策报告脚本化
+- [x] 回归自测
+- [x] 执行日志更新
