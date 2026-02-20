@@ -29,6 +29,15 @@ npm run build
 - 静态页面生成 `19/19` 完成。
 - `/reports`、`/deep-think`、`/predict` 等关键页面构建成功。
 
+### 2.1) 全接口回归复验（收口提交前）
+执行命令：
+```bash
+.venv\\Scripts\\python scripts/full_api_selftest.py
+```
+结果：
+- `total=130, failed=0`
+- 状态分布：`{"200":81,"299":29,"400":4,"401":1,"404":15}`（与历史基线一致）
+
 ### 3) Checklist 回写
 已更新：
 - `docs/sources/2026-02-19/round-AI-all-api-selftest-and-llm-input-pack-checklist.md`
