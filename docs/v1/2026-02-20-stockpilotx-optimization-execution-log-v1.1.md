@@ -369,3 +369,29 @@ $env:PYTHONPATH='.'; .\.venv\Scripts\python scripts\run_prompt_regression_report
 - [x] 分组 pass-rate 统计
 - [x] 报告脚本化导出
 - [x] 自测通过
+
+---
+
+## Batch 9（2026-02-20）
+
+### 收官回归
+
+执行命令：
+
+```powershell
+.\.venv\Scripts\python -m pytest -q tests -k "web or api or query or docs or portfolio or alert or backtest or phase0_optimization_v11 or eval_gate_decision or sql_guard or middleware_extensions or prompt_engineering"
+```
+
+结果：`81 passed, 107 deselected`
+
+### 结果判定
+
+- v1.1 计划中的 Phase0/Phase1/Phase2/Phase3 目标项均已有对应实现、测试与文档证据。
+- Gate A 已可由脚本自动判定（基于 intent 指标）；Gate B 已具备 SQL PoC 安全校验、灰度开关、审计基础。
+- 当前版本达成 `ready-for-acceptance` 状态。
+
+### Checklist
+
+- [x] 全链路回归通过
+- [x] 计划项完成度核对
+- [x] 收官状态判定
