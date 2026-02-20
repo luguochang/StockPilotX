@@ -117,3 +117,46 @@ $env:PYTHONPATH='.'; .\.venv\Scripts\python scripts\generate_gate_decision_repor
 - [x] Gate 决策报告脚本化
 - [x] 回归自测
 - [x] 执行日志更新
+
+---
+
+## Batch 3（2026-02-20）
+
+### 对应计划项
+
+- Phase 2 / 6.2：Corrective RAG 闭环（低相关检索触发 query rewrite，二次检索并合并证据）
+- Phase 2 灰度要求：新增能力可开关、可回退
+
+### 本批代码改动
+
+1. `backend/app/config.py`
+- 新增 `corrective_rag_enabled`（默认 `true`）。
+- 新增 `corrective_rag_rewrite_threshold`（默认 `0.42`）。
+
+2. `backend/app/agents/workflow.py`
+- `_deep_retrieve` 增加低分触发二次检索逻辑：
+  - 当首轮 top score < 阈值时，执行 `_rewrite_query_for_corrective_rag`。
+  - 二次召回后与首轮结果去重合并、重排。
+- 新增追踪字段：
+  - `corrective_rag_applied`
+  - `corrective_rag_rewritten_query`
+- trace 事件补充 `rewrite_threshold` 与是否触发闭环。
+
+3. `tests/test_phase0_optimization_v11.py`
+- 新增 `test_corrective_rag_rewrite_applies_on_low_score`，覆盖低相关触发闭环路径。
+
+### 自测记录
+
+```powershell
+.\.venv\Scripts\python -m pytest -q tests\test_phase0_optimization_v11.py tests\test_eval_gate_decision.py tests\test_service.py::ServiceTestCase::test_eval_gate tests\test_http_api.py::HttpApiTestCase::test_evals_run_and_get
+```
+
+结果：`11 passed`
+
+### Checklist
+
+- [x] Corrective RAG 开关与阈值配置
+- [x] 低相关触发 rewrite
+- [x] 二次检索合并证据
+- [x] 路径级测试覆盖
+- [x] 回归自测与记录

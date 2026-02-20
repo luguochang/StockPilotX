@@ -31,6 +31,26 @@ class _SlowRetriever:
         ]
 
 
+class _LowScoreThenRewriteRetriever:
+    def retrieve(self, query: str, *_args, **_kwargs):  # noqa: ANN001
+        score = 0.15
+        text = "low-score-evidence"
+        if "company fundamentals" in query:
+            score = 0.91
+            text = "rewritten-query-evidence"
+        return [
+            RetrievalItem(
+                text=text,
+                source_id="c",
+                source_url="u",
+                score=score,
+                event_time=datetime.now(timezone.utc),
+                reliability_score=0.9,
+                metadata={"retrieval_track": "unit_test"},
+            )
+        ]
+
+
 class Phase0OptimizationV11Tests(unittest.TestCase):
     def test_route_intent_with_confidence(self) -> None:
         result = route_intent_with_confidence("对比 SH600000 vs SZ000001 的估值")
@@ -93,6 +113,24 @@ class Phase0OptimizationV11Tests(unittest.TestCase):
         _ = workflow.prepare_prompt(state, memory_hint=[])
         self.assertGreater(float(state.analysis.get("intent_confidence", 0.0)), 0.0)
         self.assertIn("fact_count", state.analysis)
+
+    def test_corrective_rag_rewrite_applies_on_low_score(self) -> None:
+        settings = Settings(corrective_rag_enabled=True, corrective_rag_rewrite_threshold=0.4)
+        middleware = MiddlewareStack([GuardrailMiddleware(), BudgetMiddleware()], settings=settings)
+        workflow = AgentWorkflow(
+            retriever=_LowScoreThenRewriteRetriever(),  # type: ignore[arg-type]
+            graph_rag=GraphRAGService(),
+            middleware_stack=middleware,
+            trace_emit=lambda _trace_id, _name, _payload: None,
+            external_model_call=None,
+            external_model_stream_call=None,
+            enable_local_fallback=True,
+        )
+        state = AgentState(user_id="u", question="q", trace_id="t")
+        state.retrieval_plan = {"rerank_top_n": 5}
+        items = workflow._deep_retrieve("test question", state)
+        self.assertTrue(bool(state.analysis.get("corrective_rag_applied", False)))
+        self.assertTrue(any("rewritten-query-evidence" in x.text for x in items))
 
 
 if __name__ == "__main__":

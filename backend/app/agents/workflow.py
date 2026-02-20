@@ -391,7 +391,28 @@ class AgentWorkflow:
             uniq[(item.source_id, item.text)] = item
         items = list(uniq.values())
         items.sort(key=lambda x: x.score, reverse=True)
+        rewrite_applied = False
+        rewritten_query = ""
+        rewrite_threshold = float(getattr(self.middleware.ctx.settings, "corrective_rag_rewrite_threshold", 0.42))
+        if bool(getattr(self.middleware.ctx.settings, "corrective_rag_enabled", True)):
+            top_score = float(items[0].score) if items else 0.0
+            if top_score < rewrite_threshold:
+                rewrite_applied = True
+                rewritten_query = self._rewrite_query_for_corrective_rag(question)
+                rewrite_items = self.retriever.retrieve(
+                    rewritten_query,
+                    top_k_vector=10,
+                    top_k_bm25=14,
+                    rerank_top_n=8,
+                )
+                for item in rewrite_items:
+                    uniq[(item.source_id, item.text)] = item
+                items = list(uniq.values())
+                items.sort(key=lambda x: x.score, reverse=True)
         state.analysis["timeout_subtasks"] = timeout_subtasks
+        state.analysis["corrective_rag_applied"] = rewrite_applied
+        if rewrite_applied:
+            state.analysis["corrective_rag_rewritten_query"] = rewritten_query
         if failed_subtasks:
             state.analysis["failed_subtasks"] = failed_subtasks
         self.trace_emit(
@@ -403,9 +424,23 @@ class AgentWorkflow:
                 "timeout_subtasks": timeout_subtasks,
                 "failed_subtasks": len(failed_subtasks),
                 "subtask_timeout_seconds": subtask_timeout_seconds,
+                "corrective_rag_applied": rewrite_applied,
+                "rewrite_threshold": rewrite_threshold,
             },
         )
         return items[: state.retrieval_plan["rerank_top_n"]]
+
+    def _rewrite_query_for_corrective_rag(self, question: str) -> str:
+        """Rule-based rewrite used when first-pass retrieval confidence is low."""
+        q = str(question or "").strip()
+        # Keep rewrite deterministic and local-only (no external dependency).
+        enrich = [
+            "company fundamentals",
+            "industry chain",
+            "risk factors",
+            "financial trend",
+        ]
+        return f"{q} | {' | '.join(enrich)}"
 
     def _analyze(self, state: AgentState) -> dict[str, Any]:
         positives = [e for e in state.evidence_pack if e.get("reliability_score", 0) >= 0.9]

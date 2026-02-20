@@ -61,6 +61,9 @@ class Settings:
     deep_round_stage_soft_timeout_seconds: float = 28.0
     # Deep retrieval fanout timeout per subtask to keep deep mode responsive.
     deep_subtask_timeout_seconds: float = 2.5
+    # Corrective RAG: retry retrieval with rewritten query when first-pass relevance is weak.
+    corrective_rag_enabled: bool = True
+    corrective_rag_rewrite_threshold: float = 0.42
     rag_vector_enabled: bool = True
     rag_vector_index_dir: str = str(_DATA_DIR / "vector")
     rag_vector_top_k: int = 8
@@ -131,6 +134,10 @@ class Settings:
                 0.05, float(os.getenv("DEEP_ROUND_STAGE_SOFT_TIMEOUT_SECONDS", "28"))
             ),
             deep_subtask_timeout_seconds=max(0.1, float(os.getenv("DEEP_SUBTASK_TIMEOUT_SECONDS", "2.5"))),
+            corrective_rag_enabled=_to_bool(os.getenv("CORRECTIVE_RAG_ENABLED"), True),
+            corrective_rag_rewrite_threshold=max(
+                0.05, min(1.0, float(os.getenv("CORRECTIVE_RAG_REWRITE_THRESHOLD", "0.42")))
+            ),
             rag_vector_enabled=_to_bool(os.getenv("RAG_VECTOR_ENABLED"), True),
             rag_vector_index_dir=os.getenv("RAG_VECTOR_INDEX_DIR", str(_DATA_DIR / "vector")),
             rag_vector_top_k=max(1, int(os.getenv("RAG_VECTOR_TOP_K", "8"))),
