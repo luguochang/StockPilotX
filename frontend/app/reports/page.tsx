@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Alert, Button, Card, Col, Collapse, Empty, Input, List, Progress, Row, Select, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Col, Collapse, Empty, Input, List, Progress, Row, Select, Space, Tabs, Tag, Typography } from "antd";
 import MediaCarousel from "../components/MediaCarousel";
 import StockSelectorModal from "../components/StockSelectorModal";
 import { fetchJson } from "../lib/api";
@@ -57,6 +57,32 @@ type TaskResult = {
   result: Record<string, unknown> | null;
 };
 
+type ReportModule = {
+  module_id: string;
+  title: string;
+  content: string;
+  evidence_refs?: string[];
+  coverage?: {
+    status?: string;
+    data_points?: number;
+  };
+  confidence?: number;
+  degrade_reason?: string[];
+};
+
+type FinalDecision = {
+  signal?: string;
+  confidence?: number;
+  rationale?: string;
+  invalidation_conditions?: string[];
+  execution_plan?: string[];
+};
+
+type CommitteeNotes = {
+  research_note?: string;
+  risk_note?: string;
+};
+
 function statusColor(status: string): string {
   if (status === "ok" || status === "completed") return "success";
   if (status === "degraded" || status === "partial_ready" || status === "running" || status === "queued") return "warning";
@@ -93,6 +119,10 @@ export default function ReportsPage() {
   const [generationMode, setGenerationMode] = useState("");
   const [businessHealth, setBusinessHealth] = useState<BusinessDataHealth | null>(null);
   const [task, setTask] = useState<ReportTask | null>(null);
+  const [selectedModules, setSelectedModules] = useState<ReportModule[]>([]);
+  const [selectedDecision, setSelectedDecision] = useState<FinalDecision | null>(null);
+  const [selectedCommittee, setSelectedCommittee] = useState<CommitteeNotes | null>(null);
+  const [selectedMetrics, setSelectedMetrics] = useState<Record<string, unknown>>({});
 
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -156,6 +186,42 @@ export default function ReportsPage() {
     setDegradePreview(parseObject(result.degrade));
     setGenerationMode(String(result.generation_mode ?? ""));
     setActiveReportId(String(result.report_id ?? ""));
+    // Parse moduleized report payload for business-friendly rendering.
+    const moduleRows = Array.isArray(result.report_modules) ? result.report_modules : [];
+    const normalizedModules: ReportModule[] = moduleRows
+      .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === "object")
+      .map((row) => ({
+        module_id: String(row.module_id ?? "").trim().toLowerCase(),
+        title: String(row.title ?? row.module_id ?? "模块"),
+        content: String(row.content ?? ""),
+        evidence_refs: Array.isArray(row.evidence_refs) ? row.evidence_refs.map((item) => String(item)) : [],
+        coverage: typeof row.coverage === "object" && row.coverage ? {
+          status: String((row.coverage as Record<string, unknown>).status ?? ""),
+          data_points: Number((row.coverage as Record<string, unknown>).data_points ?? 0),
+        } : undefined,
+        confidence: Number(row.confidence ?? 0),
+        degrade_reason: Array.isArray(row.degrade_reason) ? row.degrade_reason.map((item) => String(item)) : [],
+      }))
+      .filter((row) => Boolean(row.module_id));
+    setSelectedModules(normalizedModules);
+    const decision = parseObject(result.final_decision);
+    setSelectedDecision(Object.keys(decision).length ? {
+      signal: String(decision.signal ?? ""),
+      confidence: Number(decision.confidence ?? 0),
+      rationale: String(decision.rationale ?? ""),
+      invalidation_conditions: Array.isArray(decision.invalidation_conditions)
+        ? decision.invalidation_conditions.map((item) => String(item))
+        : [],
+      execution_plan: Array.isArray(decision.execution_plan)
+        ? decision.execution_plan.map((item) => String(item))
+        : [],
+    } : null);
+    const committee = parseObject(result.committee);
+    setSelectedCommittee(Object.keys(committee).length ? {
+      research_note: String(committee.research_note ?? ""),
+      risk_note: String(committee.risk_note ?? ""),
+    } : null);
+    setSelectedMetrics(parseObject(result.metric_snapshot));
   }
 
   async function syncTaskResult(taskId: string) {
@@ -394,6 +460,77 @@ export default function ReportsPage() {
                   <Text style={{ color: "#475569" }}>active: <Tag color={Boolean(degradePreview.active) ? "warning" : "success"}>{String(degradePreview.active)}</Tag></Text>
                   <Text style={{ color: "#475569" }}>code: {String(degradePreview.code ?? "") || "none"}</Text>
                   <Text style={{ color: "#64748b" }}>message: {String(degradePreview.user_message ?? "") || "none"}</Text>
+                </Space>
+              )}
+            </Card>
+          </Col>
+        </Row>
+      ) : null}
+
+      {(selectedDecision || selectedCommittee || selectedModules.length > 0 || Object.keys(selectedMetrics).length > 0) ? (
+        <Row gutter={[12, 12]} style={{ marginTop: 12 }}>
+          <Col xs={24} lg={8}>
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>最终决策与委员会</span>}>
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                {selectedDecision ? (
+                  <>
+                    <Text>信号: <Tag color={statusColor(String(selectedDecision.signal ?? "hold"))}>{String(selectedDecision.signal ?? "hold")}</Tag></Text>
+                    <Text>置信度: {Number(selectedDecision.confidence ?? 0).toFixed(2)}</Text>
+                    <Text type="secondary">决策理由: {selectedDecision.rationale || "-"}</Text>
+                    {Array.isArray(selectedDecision.invalidation_conditions) && selectedDecision.invalidation_conditions.length > 0 ? (
+                      <Text type="secondary">失效条件: {selectedDecision.invalidation_conditions.join("；")}</Text>
+                    ) : null}
+                  </>
+                ) : (
+                  <Alert type="info" showIcon message="暂无最终决策信息" />
+                )}
+                {selectedCommittee ? (
+                  <>
+                    <Text type="secondary">研究汇总: {selectedCommittee.research_note || "-"}</Text>
+                    <Text type="secondary">风险仲裁: {selectedCommittee.risk_note || "-"}</Text>
+                  </>
+                ) : null}
+              </Space>
+            </Card>
+          </Col>
+          <Col xs={24} lg={8}>
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>模块化报告</span>}>
+              {selectedModules.length === 0 ? (
+                <Alert type="info" showIcon message="当前结果尚未返回模块化报告。" />
+              ) : (
+                <Tabs
+                  size="small"
+                  items={selectedModules.map((module) => ({
+                    key: module.module_id,
+                    label: module.title,
+                    children: (
+                      <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                        <Text type="secondary">{module.content || "该模块暂无内容。"}</Text>
+                        <Text type="secondary">
+                          覆盖状态: {String(module.coverage?.status ?? "unknown")} / 数据点: {Number(module.coverage?.data_points ?? 0)}
+                        </Text>
+                        <Text type="secondary">模块置信度: {Number(module.confidence ?? 0).toFixed(2)}</Text>
+                        {Array.isArray(module.degrade_reason) && module.degrade_reason.length > 0 ? (
+                          <Text type="secondary">降级原因: {module.degrade_reason.join("；")}</Text>
+                        ) : null}
+                      </Space>
+                    ),
+                  }))}
+                />
+              )}
+            </Card>
+          </Col>
+          <Col xs={24} lg={8}>
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>指标快照</span>}>
+              {Object.keys(selectedMetrics).length === 0 ? (
+                <Alert type="info" showIcon message="暂无指标快照" />
+              ) : (
+                <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                  {Object.entries(selectedMetrics)
+                    .slice(0, 16)
+                    .map(([key, value]) => (
+                      <Text key={key} type="secondary">{key}: {String(value)}</Text>
+                    ))}
                 </Space>
               )}
             </Card>

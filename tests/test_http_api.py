@@ -265,6 +265,10 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("generation_mode", report)
         self.assertIn("confidence_attribution", report)
         self.assertIn("llm_input_pack", report)
+        self.assertIn("report_modules", report)
+        self.assertIn("final_decision", report)
+        self.assertIn("committee", report)
+        self.assertIn("metric_snapshot", report)
 
     def test_report_task_endpoints(self) -> None:
         code, created = self._post(
@@ -294,6 +298,11 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c_result, 200)
         self.assertIn("result_level", result)
         self.assertIn("status", result)
+        payload = result.get("result")
+        if isinstance(payload, dict):
+            self.assertIn("report_modules", payload)
+            self.assertIn("final_decision", payload)
+            self.assertIn("committee", payload)
 
     def test_ingest_market_daily(self) -> None:
         code, body = self._post("/v1/ingest/market-daily", {"stock_codes": ["SH600000", "SZ000001"]})

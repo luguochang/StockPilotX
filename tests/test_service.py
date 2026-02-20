@@ -106,8 +106,16 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("generation_mode", generated)
         self.assertIn("confidence_attribution", generated)
         self.assertIn("llm_input_pack", generated)
+        self.assertIn("report_modules", generated)
+        self.assertIn("final_decision", generated)
+        self.assertIn("committee", generated)
+        self.assertIn("metric_snapshot", generated)
         self.assertIn("quality_gate", loaded)
         self.assertIn("report_data_pack_summary", loaded)
+        self.assertIn("report_modules", loaded)
+        self.assertIn("final_decision", loaded)
+        self.assertIn("committee", loaded)
+        self.assertIn("metric_snapshot", loaded)
 
     def test_report_task_lifecycle(self) -> None:
         task = self.svc.report_task_create(
@@ -133,6 +141,11 @@ class ServiceTestCase(unittest.TestCase):
         if final_status in {"completed", "partial_ready"}:
             self.assertIn(str(result.get("result_level", "")), {"partial", "full"})
             self.assertIsInstance(result.get("result"), dict)
+            payload = result.get("result", {})
+            if isinstance(payload, dict):
+                self.assertIn("report_modules", payload)
+                self.assertIn("final_decision", payload)
+                self.assertIn("committee", payload)
 
     def test_ingest_endpoints(self) -> None:
         daily = self.svc.ingest_market_daily(["SH600000", "SZ000001"])
