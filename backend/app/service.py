@@ -2535,6 +2535,34 @@ class AShareAgentService:
             }
             for x in bars[-30:]
         ]
+        # 1y pack: these fields are explicitly consumed by report/deep-think prompts to avoid "3m-only" evidence bias.
+        daily_252 = [
+            {
+                "trade_date": str(x.get("trade_date", "")),
+                "close": float(x.get("close", 0.0) or 0.0),
+                "pct_change": float(x.get("pct_change", 0.0) or 0.0),
+                "volume": float(x.get("volume", 0.0) or 0.0),
+            }
+            for x in bars[-252:]
+        ]
+        history_1y = self._history_1y_summary(code)
+        monthly_12 = self._history_monthly_summary(code, months=12)
+        quarterly_summary = self._quarterly_financial_summary(code, limit=8)
+        timeline_1y = self._event_timeline_1y(code, limit=24)
+        uncertainty_notes = self._build_evidence_uncertainty_notes(
+            dataset=dataset,
+            history_1y=history_1y,
+            quarterly_count=len(quarterly_summary),
+            timeline_count=len(timeline_1y),
+        )
+        time_horizon_coverage = {
+            "history_30d_count": int(len(daily_30)),
+            "history_90d_count": int(min(90, len(bars))),
+            "history_252d_count": int(len(daily_252)),
+            "history_has_full_1y": bool(history_1y.get("has_full_1y", False)),
+            "quarterly_fundamentals_count": int(len(quarterly_summary)),
+            "event_timeline_count": int(len(timeline_1y)),
+        }
         return {
             "stock_code": code,
             "scenario": str(scenario or "").strip().lower(),
@@ -2544,12 +2572,19 @@ class AShareAgentService:
             "financial": self._latest_financial_snapshot(code) or {},
             "history": bars,
             "history_daily_30": daily_30,
+            "history_daily_252": daily_252,
+            "history_1y_summary": history_1y,
+            "history_monthly_summary_12": monthly_12,
             "trend": trend,
             "announcements": announcements,
             "news": news,
             "research": research,
             "fund": fund,
             "macro": macro,
+            "quarterly_fundamentals_summary": quarterly_summary,
+            "event_timeline_1y": timeline_1y,
+            "time_horizon_coverage": time_horizon_coverage,
+            "evidence_uncertainty": uncertainty_notes,
             "missing_data": list(dataset.get("missing_data", []) or []),
             "data_quality": "degraded" if bool(dataset.get("missing_data")) else "ready",
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -2593,6 +2628,175 @@ class AShareAgentService:
             "end_close": end_close,
             "pct_change": pct_change,
         }
+
+    def _history_1y_summary(self, stock_code: str) -> dict[str, Any]:
+        """Build a 1-year summary used by report/deep-think evidence coverage checks."""
+        bars = self._history_bars(stock_code, limit=260)
+        if len(bars) < 2:
+            return {
+                "sample_count": len(bars),
+                "start_date": "",
+                "end_date": "",
+                "start_close": 0.0,
+                "end_close": 0.0,
+                "pct_change": 0.0,
+                "has_full_1y": False,
+            }
+        start = bars[0]
+        end = bars[-1]
+        start_close = float(start.get("close", 0.0) or 0.0)
+        end_close = float(end.get("close", 0.0) or 0.0)
+        pct_change = (end_close / start_close - 1.0) if start_close > 0 else 0.0
+        return {
+            "sample_count": len(bars),
+            "start_date": str(start.get("trade_date", "")),
+            "end_date": str(end.get("trade_date", "")),
+            "start_close": start_close,
+            "end_close": end_close,
+            "pct_change": pct_change,
+            # 252 trading days is the practical "full year" baseline in quant/reporting contexts.
+            "has_full_1y": bool(len(bars) >= 252),
+        }
+
+    def _history_monthly_summary(self, stock_code: str, *, months: int = 12) -> list[dict[str, Any]]:
+        """Compress daily bars into month-level snapshots for long-horizon LLM context."""
+        bars = self._history_bars(stock_code, limit=260)
+        monthly: dict[str, dict[str, Any]] = {}
+        for row in bars:
+            trade_date = str(row.get("trade_date", ""))
+            month = trade_date[:7]
+            if not month:
+                continue
+            close_val = float(row.get("close", 0.0) or 0.0)
+            volume_val = float(row.get("volume", 0.0) or 0.0)
+            bucket = monthly.get(month)
+            if not bucket:
+                monthly[month] = {
+                    "month": month,
+                    "open_close": close_val,
+                    "close": close_val,
+                    "high_close": close_val,
+                    "low_close": close_val,
+                    "volume_sum": volume_val,
+                }
+                continue
+            bucket["close"] = close_val
+            bucket["high_close"] = max(float(bucket.get("high_close", close_val) or close_val), close_val)
+            bucket["low_close"] = min(float(bucket.get("low_close", close_val) or close_val), close_val)
+            bucket["volume_sum"] = float(bucket.get("volume_sum", 0.0) or 0.0) + volume_val
+
+        rows = [monthly[key] for key in sorted(monthly.keys())]
+        return rows[-max(1, int(months)) :]
+
+    def _quarterly_financial_summary(self, stock_code: str, *, limit: int = 8) -> list[dict[str, Any]]:
+        """Extract recent quarterly fundamentals so 1y reports are not built from sparse annual hints."""
+        code = str(stock_code or "").strip().upper().replace(".", "")
+        rows = [
+            x
+            for x in self.ingestion_store.financial_snapshots
+            if str(x.get("stock_code", "")).strip().upper().replace(".", "") == code
+        ]
+        rows.sort(key=lambda x: (str(x.get("report_period", "")), str(x.get("ts", ""))))
+        result: list[dict[str, Any]] = []
+        for row in rows[-max(1, int(limit)) :]:
+            result.append(
+                {
+                    "report_period": str(row.get("report_period", "")).strip(),
+                    "revenue_yoy": round(self._safe_float(row.get("revenue_yoy", 0.0)), 6),
+                    "net_profit_yoy": round(self._safe_float(row.get("net_profit_yoy", 0.0)), 6),
+                    "roe": round(self._safe_float(row.get("roe", 0.0)), 6),
+                    "roa": round(self._safe_float(row.get("roa", 0.0)), 6),
+                    "pe": round(self._safe_float(row.get("pe", 0.0)), 6),
+                    "pb": round(self._safe_float(row.get("pb", 0.0)), 6),
+                    "source_id": str(row.get("source_id", "")),
+                    "ts": str(row.get("ts", "")),
+                }
+            )
+        return result
+
+    def _event_timeline_1y(self, stock_code: str, *, limit: int = 24) -> list[dict[str, Any]]:
+        """Build one merged event timeline (news/research/announcement/macro) for 1y narrative grounding."""
+        code = str(stock_code or "").strip().upper().replace(".", "")
+        rows: list[dict[str, Any]] = []
+
+        for row in self.ingestion_store.announcements:
+            if str(row.get("stock_code", "")).strip().upper().replace(".", "") != code:
+                continue
+            rows.append(
+                {
+                    "date": str(row.get("event_time", ""))[:10],
+                    "event_type": "announcement",
+                    "title": str(row.get("title", ""))[:180],
+                    "source_id": str(row.get("source_id", "")),
+                }
+            )
+        for row in self.ingestion_store.research_reports:
+            if str(row.get("stock_code", "")).strip().upper().replace(".", "") != code:
+                continue
+            rows.append(
+                {
+                    "date": str(row.get("published_at", ""))[:10],
+                    "event_type": "research",
+                    "title": str(row.get("title", ""))[:180],
+                    "source_id": str(row.get("source_id", "")),
+                }
+            )
+        for row in self.ingestion_store.news_items:
+            if str(row.get("stock_code", "")).strip().upper().replace(".", "") != code:
+                continue
+            rows.append(
+                {
+                    "date": str(row.get("event_time", ""))[:10],
+                    "event_type": "news",
+                    "title": str(row.get("title", ""))[:180],
+                    "source_id": str(row.get("source_id", "")),
+                }
+            )
+        # Macro is market-wide, still relevant for per-stock 1y explanation.
+        for row in self.ingestion_store.macro_indicators[-30:]:
+            rows.append(
+                {
+                    "date": str(row.get("event_time", row.get("report_date", "")))[:10],
+                    "event_type": "macro",
+                    "title": f"{str(row.get('metric_name', 'macro'))} {str(row.get('metric_value', ''))}".strip()[:180],
+                    "source_id": str(row.get("source_id", "")),
+                }
+            )
+
+        # Deduplicate by date/type/title to avoid overloading LLM context with repeated vendor rows.
+        dedup: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for row in rows:
+            key = (str(row.get("date", "")), str(row.get("event_type", "")), str(row.get("title", "")))
+            dedup[key] = row
+        normalized = sorted(dedup.values(), key=lambda x: (str(x.get("date", "")), str(x.get("event_type", ""))))
+        return normalized[-max(1, int(limit)) :]
+
+    def _build_evidence_uncertainty_notes(
+        self,
+        *,
+        dataset: dict[str, Any],
+        history_1y: dict[str, Any],
+        quarterly_count: int,
+        timeline_count: int,
+    ) -> list[str]:
+        """Generate explicit uncertainty notes so reports avoid overconfident 1y conclusions."""
+        notes: list[str] = []
+        sample_1y = int(history_1y.get("sample_count", 0) or 0)
+        if sample_1y < 252:
+            notes.append(
+                "可核验主证据范围不足以覆盖完整1y：当前连续日线样本未达到252交易日，"
+                "年度结论需标注不确定性并降低置信度。"
+            )
+        if quarterly_count < 4:
+            notes.append("季度财报摘要样本不足（<4），年度归因对盈利趋势的解释能力受限。")
+        if timeline_count < 8:
+            notes.append("事件时间轴较稀疏（公告/研报/新闻/宏观样本不足），冲击归因可能不完整。")
+        missing_data = [str(x) for x in list(dataset.get("missing_data", []) or []) if str(x).strip()]
+        if missing_data:
+            notes.append(f"系统检测到数据缺口：{', '.join(missing_data)}。")
+        if not notes:
+            notes.append("1y主证据覆盖良好，可按可验证口径输出结论。")
+        return notes[:8]
 
     def _augment_question_with_history_context(self, question: str, stock_codes: list[str]) -> str:
         """Inject 3-month continuous sample summary into model input context."""
@@ -3071,6 +3275,7 @@ class AShareAgentService:
         base_conf = self._safe_float(intel.get("confidence", 0.55), default=0.55)
         quality_cap = self._safe_float(quality_gate.get("score", 0.55), default=0.55)
         confidence = max(0.25, min(0.92, min(base_conf, quality_cap)))
+        quality_status = str(quality_gate.get("status", "pass")).strip().lower() or "pass"
 
         key_catalysts = list(intel.get("key_catalysts", []) or [])
         risk_watch = list(intel.get("risk_watch", []) or [])
@@ -3091,7 +3296,7 @@ class AShareAgentService:
             "预算或风控阈值触发降级",
         ]
         if quality_reasons:
-            invalidation_conditions.append("当前数据质量门控处于 degraded，需要先补数再放大仓位")
+            invalidation_conditions.append(f"当前数据质量门控处于 {quality_status}，需要先补数再放大仓位")
 
         if signal == "buy":
             execution_plan = [
@@ -3109,12 +3314,56 @@ class AShareAgentService:
                 "优先补齐缺失数据，避免因样本不足误判。",
             ]
 
+        market_snapshot = dict(intel.get("market_snapshot", {}) or {})
+        price_now = self._safe_float(market_snapshot.get("price", 0.0), default=0.0)
+        risk_level = str(intel.get("risk_level", "medium")).strip().lower() or "medium"
+        risk_base = {"low": 34.0, "medium": 55.0, "high": 74.0}.get(risk_level, 55.0)
+        # Keep risk score bounded and interpretable (0-100) for UI and export consumers.
+        risk_score = max(5.0, min(100.0, risk_base + min(24.0, 6.0 * float(len(quality_reasons)))))
+        if signal == "buy":
+            risk_score = max(0.0, risk_score - 4.0)
+        elif signal == "reduce":
+            risk_score = min(100.0, risk_score + 3.0)
+
+        if price_now > 0:
+            if signal == "buy":
+                target_price = {
+                    "low": round(price_now * 1.04, 3),
+                    "base": round(price_now * 1.12, 3),
+                    "high": round(price_now * 1.18, 3),
+                }
+            elif signal == "reduce":
+                target_price = {
+                    "low": round(price_now * 0.88, 3),
+                    "base": round(price_now * 0.94, 3),
+                    "high": round(price_now * 0.98, 3),
+                }
+            else:
+                target_price = {
+                    "low": round(price_now * 0.96, 3),
+                    "base": round(price_now * 1.03, 3),
+                    "high": round(price_now * 1.08, 3),
+                }
+        else:
+            target_price = {"low": 0.0, "base": 0.0, "high": 0.0}
+
+        upside = max(0.0, float(target_price.get("high", 0.0) - price_now))
+        downside = max(0.01, float(price_now - target_price.get("low", 0.0)))
+        reward_risk_ratio = round(max(0.1, min(6.0, upside / downside)), 3)
+        position_sizing_hint = str(intel.get("position_hint", "")).strip() or (
+            "35-60%" if signal == "buy" else "5-15%" if signal == "reduce" else "20-35%"
+        )
+
         return {
             "signal": signal,
             "confidence": round(confidence, 4),
             "rationale": " ".join(rationale_parts),
             "invalidation_conditions": invalidation_conditions,
             "execution_plan": execution_plan,
+            "target_price": target_price,
+            "risk_score": round(risk_score, 2),
+            "reward_risk_ratio": reward_risk_ratio,
+            "position_sizing_hint": position_sizing_hint,
         }
 
     def _build_report_committee_notes(
@@ -3345,7 +3594,16 @@ class AShareAgentService:
             + freshness_score * 0.08
         )
         overall_score = max(0.0, min(1.0, overall_score))
-        status = "pass" if overall_score >= 0.75 and not node_veto else "degraded" if overall_score >= 0.5 else "critical"
+        if overall_score >= 0.75 and not node_veto:
+            status = "pass"
+        elif overall_score >= 0.5:
+            status = "watch"
+        else:
+            status = "degraded"
+        if node_veto and status != "pass":
+            status = "degraded"
+        if overall_score < 0.35:
+            status = "critical"
         low_quality_modules = [str(row.get("module_id", "")) for row in modules if self._safe_float(row.get("module_quality_score", 0.0), default=0.0) < 0.45]
         reasons: list[str] = [str(x).strip() for x in list(quality_gate.get("reasons", []) or []) if str(x).strip()]
         if node_veto:
@@ -3440,6 +3698,19 @@ class AShareAgentService:
         citations = list(query_result.get("citations", []) or [])
         citation_ids = [str(x.get("source_id", "")) for x in citations[:8] if str(x.get("source_id", "")).strip()]
         top_news = [str(x.get("title", "")).strip() for x in news_rows[-3:] if str(x.get("title", "")).strip()]
+        bull_points = [
+            str(x.get("summary", x.get("title", ""))).strip()
+            for x in list(intel.get("key_catalysts", []) or [])[:4]
+            if str(x.get("summary", x.get("title", ""))).strip()
+        ]
+        bear_points = [
+            str(x.get("summary", x.get("title", ""))).strip()
+            for x in list(intel.get("risk_watch", []) or [])[:4]
+            if str(x.get("summary", x.get("title", ""))).strip()
+        ]
+        risk_level = str(intel.get("risk_level", "medium")).strip().lower() or "medium"
+        target_price = dict(final_decision.get("target_price", {}) or {})
+        position_hint = str(final_decision.get("position_sizing_hint", "")).strip()
 
         modules = [
             {
@@ -3532,6 +3803,68 @@ class AShareAgentService:
                 "confidence": round(max(0.22, self._safe_float(intel.get("confidence", 0.45), default=0.45) - 0.08), 4),
                 "coverage": {"status": "partial" if not scenarios else "full", "data_points": int(len(scenarios))},
                 "degrade_reason": ["scenario_missing"] if not scenarios else [],
+            },
+            {
+                # TradingAgents-style role module: explicit bullish thesis long text.
+                "module_id": "bull_case",
+                "title": "多头论证（Bull Case）",
+                "content": (
+                    "核心逻辑：趋势与催化共振时，优先考虑增配。"
+                    + (
+                        "\n" + "\n".join(f"- {line}" for line in bull_points[:6])
+                        if bull_points
+                        else "\n- 当前未提取到明确多头催化，需补齐新闻/研报样本。"
+                    )
+                    + f"\n- 目标价参考：{json.dumps(target_price, ensure_ascii=False)}"
+                ),
+                "evidence_refs": citation_ids[:8],
+                "confidence": round(max(0.2, self._safe_float(final_decision.get("confidence", 0.5), default=0.5) - 0.03), 4),
+                "coverage": {"status": "partial" if quality_reasons else "full", "data_points": int(len(bull_points))},
+                "degrade_reason": list(quality_reasons),
+            },
+            {
+                # TradingAgents-style role module: explicit bearish thesis long text.
+                "module_id": "bear_case",
+                "title": "空头论证（Bear Case）",
+                "content": (
+                    "核心逻辑：若风险事件持续发酵，应优先保护回撤。"
+                    + (
+                        "\n" + "\n".join(f"- {line}" for line in bear_points[:6])
+                        if bear_points
+                        else "\n- 当前未提取到明确空头风险，仍需跟踪事件时间轴。"
+                    )
+                    + f"\n- 当前风险等级：{risk_level}"
+                ),
+                "evidence_refs": citation_ids[:8],
+                "confidence": round(max(0.2, self._safe_float(final_decision.get("confidence", 0.5), default=0.5) - 0.05), 4),
+                "coverage": {"status": "partial" if quality_reasons else "full", "data_points": int(len(bear_points))},
+                "degrade_reason": list(quality_reasons),
+            },
+            {
+                "module_id": "risky_case",
+                "title": "激进执行论证（Risky Case）",
+                "content": (
+                    "核心逻辑：在高胜率窗口以更快节奏执行，但严格遵守单步上限。"
+                    f"\n- 仓位提示：{position_hint or '未提供'}"
+                    f"\n- 执行路径：{'; '.join(list(final_decision.get('execution_plan', []) or [])[:3]) or '待补充'}"
+                ),
+                "evidence_refs": citation_ids[:6],
+                "confidence": round(max(0.2, self._safe_float(final_decision.get("confidence", 0.5), default=0.5) - 0.06), 4),
+                "coverage": {"status": "partial" if quality_reasons else "full", "data_points": int(len(list(final_decision.get("execution_plan", []) or [])))},
+                "degrade_reason": list(quality_reasons),
+            },
+            {
+                "module_id": "safe_case",
+                "title": "保守风控论证（Safe Case）",
+                "content": (
+                    "核心逻辑：优先控制回撤与证据不确定性，分批验证再行动。"
+                    f"\n- 门控状态：{str(quality_gate.get('status', 'unknown'))}"
+                    f"\n- 风险触发：{'; '.join(list(final_decision.get('invalidation_conditions', []) or [])[:4]) or '待补充'}"
+                ),
+                "evidence_refs": citation_ids[:6],
+                "confidence": round(max(0.2, self._safe_float(final_decision.get("confidence", 0.5), default=0.5) - 0.04), 4),
+                "coverage": {"status": "partial" if quality_reasons else "full", "data_points": int(len(list(final_decision.get("invalidation_conditions", []) or [])))},
+                "degrade_reason": list(quality_reasons),
             },
             {
                 "module_id": "execution_plan",
@@ -3631,16 +3964,45 @@ class AShareAgentService:
             quality_reasons.append("predict_degraded")
         quality_reasons.extend([str(x) for x in list(report_input_pack.get("missing_data", []) or []) if str(x).strip()])
         quality_reasons = list(dict.fromkeys(quality_reasons))
+        # Weighted quality gate: avoid over-penalizing isolated soft gaps (e.g. research_only gap).
+        reason_weights = {
+            "quote_missing": 0.32,
+            "history_insufficient": 0.30,
+            "history_sample_insufficient": 0.20,
+            "history_30d_insufficient": 0.14,
+            "financial_missing": 0.16,
+            "announcement_missing": 0.10,
+            "news_insufficient": 0.12,
+            "research_insufficient": 0.08,
+            "macro_insufficient": 0.08,
+            "fund_missing": 0.06,
+            "predict_degraded": 0.06,
+            "citations_insufficient": 0.10,
+        }
+        quality_penalty = 0.0
+        for reason in quality_reasons:
+            quality_penalty += float(reason_weights.get(reason, 0.06))
+        quality_penalty = min(0.85, quality_penalty)
+        quality_score = round(max(0.0, 1.0 - quality_penalty), 4)
+        if not quality_reasons:
+            quality_status = "pass"
+        elif quality_penalty < 0.28:
+            quality_status = "watch"
+        else:
+            quality_status = "degraded"
         quality_gate = {
-            "status": "pass" if not quality_reasons else "degraded",
-            "score": round(max(0.0, 1.0 - 0.18 * float(len(quality_reasons))), 4),
+            "status": quality_status,
+            "score": quality_score,
             "reasons": quality_reasons,
+            "penalty": round(quality_penalty, 4),
         }
         report_data_pack_summary = {
             "as_of": datetime.now(timezone.utc).isoformat(),
             "history_sample_size": history_sample_size,
             "history_30d_count": int(((report_input_pack.get("dataset", {}) or {}).get("coverage", {}) or {}).get("history_30d_count", 0) or 0),
             "history_90d_count": int(((report_input_pack.get("dataset", {}) or {}).get("coverage", {}) or {}).get("history_90d_count", 0) or 0),
+            "history_252d_count": int(len(list(report_input_pack.get("history_daily_252", []) or []))),
+            "history_1y_has_full": bool((report_input_pack.get("history_1y_summary", {}) or {}).get("has_full_1y", False)),
             "predict_quality": str(predict_snapshot.get("data_quality", "unknown")),
             "predict_degrade_reasons": list(predict_snapshot.get("degrade_reasons", []) or []),
             "intel_signal": str(intel.get("overall_signal", "")),
@@ -3648,6 +4010,10 @@ class AShareAgentService:
             "news_count": len(list(overview.get("news", []) or [])),
             "research_count": len(list(overview.get("research", []) or [])),
             "macro_count": len(list(overview.get("macro", []) or [])),
+            "quarterly_fundamentals_count": int(len(list(report_input_pack.get("quarterly_fundamentals_summary", []) or []))),
+            "event_timeline_count": int(len(list(report_input_pack.get("event_timeline_1y", []) or []))),
+            "uncertainty_note_count": int(len(list(report_input_pack.get("evidence_uncertainty", []) or []))),
+            "time_horizon_coverage": dict(report_input_pack.get("time_horizon_coverage", {}) or {}),
             "missing_data": list(report_input_pack.get("missing_data", []) or []),
             "data_quality": str(report_input_pack.get("data_quality", "ready")),
         }
@@ -3709,6 +4075,10 @@ class AShareAgentService:
             "sentiment_flow",
             "risk_matrix",
             "scenario_plan",
+            "bull_case",
+            "bear_case",
+            "risky_case",
+            "safe_case",
             "execution_plan",
             "final_decision",
         ]
@@ -3732,6 +4102,29 @@ class AShareAgentService:
 
         report_sections.extend(
             [
+                {
+                    "section_id": "evidence_summary",
+                    "title": "证据摘要",
+                    "content": json.dumps(
+                        {
+                            "citation_count": int(len(evidence_refs)),
+                            "top_citation_sources": [str(x.get("source_id", "")) for x in evidence_refs[:8] if str(x.get("source_id", "")).strip()],
+                            "catalyst_count": int(len(list(intel.get("key_catalysts", []) or []))),
+                            "risk_watch_count": int(len(list(intel.get("risk_watch", []) or []))),
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+                {
+                    "section_id": "uncertainty_notes",
+                    "title": "不确定性清单",
+                    "content": "\n".join(f"- {line}" for line in list(report_input_pack.get("evidence_uncertainty", []) or [])),
+                },
+                {
+                    "section_id": "time_horizon_coverage",
+                    "title": "时域覆盖度",
+                    "content": json.dumps(dict(report_input_pack.get("time_horizon_coverage", {}) or {}), ensure_ascii=False),
+                },
                 {
                     "section_id": "data_quality_gate",
                     "title": "数据质量门控",
@@ -3776,8 +4169,8 @@ class AShareAgentService:
                 "modules 为数组，元素结构："
                 "{module_id,title,content,evidence_refs,confidence,coverage,degrade_reason}。"
                 "module_id 仅允许：executive_summary,market_technical,fundamental_valuation,news_event,"
-                "sentiment_flow,risk_matrix,scenario_plan,execution_plan,final_decision。"
-                "final_decision 结构：{signal,confidence,rationale,invalidation_conditions,execution_plan}，"
+                "sentiment_flow,risk_matrix,scenario_plan,bull_case,bear_case,risky_case,safe_case,execution_plan,final_decision。"
+                "final_decision 结构：{signal,confidence,rationale,invalidation_conditions,execution_plan,target_price,risk_score,reward_risk_ratio,position_sizing_hint}，"
                 "signal 仅允许 buy/hold/reduce。"
                 "committee 结构：{research_note,risk_note}。"
                 "要求："
@@ -3785,6 +4178,8 @@ class AShareAgentService:
                 "2) 若数据不足，降低结论确信度并给出补数建议。"
                 "3) 模块内容聚焦交易可执行性与风险触发条件。"
                 "4) confidence 必须在 0 到 1。"
+                "5) 必须显式使用 1y 证据包（history_daily_252 / quarterly_fundamentals_summary / event_timeline_1y）。"
+                "6) 若1y样本不足，必须在内容里写出不确定性说明。"
                 "context="
                 + json.dumps(
                     {
@@ -3811,6 +4206,13 @@ class AShareAgentService:
                             "missing_data": list(report_input_pack.get("missing_data", []) or []),
                             "data_quality": str(report_input_pack.get("data_quality", "")),
                             "history_daily_30": list(report_input_pack.get("history_daily_30", []) or []),
+                            "history_daily_252": list(report_input_pack.get("history_daily_252", []) or []),
+                            "history_1y_summary": dict(report_input_pack.get("history_1y_summary", {}) or {}),
+                            "history_monthly_summary_12": list(report_input_pack.get("history_monthly_summary_12", []) or []),
+                            "quarterly_fundamentals_summary": list(report_input_pack.get("quarterly_fundamentals_summary", []) or []),
+                            "event_timeline_1y": list(report_input_pack.get("event_timeline_1y", []) or []),
+                            "time_horizon_coverage": dict(report_input_pack.get("time_horizon_coverage", {}) or {}),
+                            "evidence_uncertainty": list(report_input_pack.get("evidence_uncertainty", []) or []),
                         },
                     },
                     ensure_ascii=False,
@@ -3895,6 +4297,32 @@ class AShareAgentService:
                                 for x in list(parsed_decision.get("execution_plan", []))
                                 if str(x).strip()
                             ][:8]
+                        target_raw = parsed_decision.get("target_price")
+                        if isinstance(target_raw, dict):
+                            final_decision["target_price"] = {
+                                "low": round(self._safe_float(target_raw.get("low", 0.0), default=0.0), 3),
+                                "base": round(self._safe_float(target_raw.get("base", 0.0), default=0.0), 3),
+                                "high": round(self._safe_float(target_raw.get("high", 0.0), default=0.0), 3),
+                            }
+                        elif isinstance(target_raw, (int, float)):
+                            base_target = round(float(target_raw), 3)
+                            final_decision["target_price"] = {
+                                "low": round(base_target * 0.95, 3),
+                                "base": base_target,
+                                "high": round(base_target * 1.05, 3),
+                            }
+                        if parsed_decision.get("risk_score") is not None:
+                            final_decision["risk_score"] = round(
+                                max(0.0, min(100.0, self._safe_float(parsed_decision.get("risk_score", 50.0), default=50.0))),
+                                2,
+                            )
+                        if parsed_decision.get("reward_risk_ratio") is not None:
+                            final_decision["reward_risk_ratio"] = round(
+                                max(0.0, min(10.0, self._safe_float(parsed_decision.get("reward_risk_ratio", 1.0), default=1.0))),
+                                3,
+                            )
+                        if str(parsed_decision.get("position_sizing_hint", "")).strip():
+                            final_decision["position_sizing_hint"] = str(parsed_decision.get("position_sizing_hint", "")).strip()[:80]
 
                     parsed_committee = parsed.get("committee")
                     if isinstance(parsed_committee, dict):
@@ -3994,6 +4422,10 @@ class AShareAgentService:
             "\n\n## 最终决策\n"
             f"- signal: {str(final_decision.get('signal', 'hold'))}\n"
             f"- confidence: {self._safe_float(final_decision.get('confidence', 0.5), default=0.5):.2f}\n"
+            f"- target_price: {json.dumps(dict(final_decision.get('target_price', {}) or {}), ensure_ascii=False)}\n"
+            f"- risk_score: {self._safe_float(final_decision.get('risk_score', 0.0), default=0.0):.2f}\n"
+            f"- reward_risk_ratio: {self._safe_float(final_decision.get('reward_risk_ratio', 0.0), default=0.0):.3f}\n"
+            f"- position_sizing_hint: {str(final_decision.get('position_sizing_hint', ''))}\n"
             f"- rationale: {str(final_decision.get('rationale', ''))[:400]}\n"
         )
         markdown += (
@@ -4101,13 +4533,28 @@ class AShareAgentService:
         resp["report_type"] = str(req.report_type)
         resp["schema_version"] = self._report_bundle_schema_version
         resp["result_level"] = "full"
+        degrade_code = ""
+        if quality_gate["status"] == "degraded":
+            degrade_code = "quality_degraded"
+        elif quality_gate["status"] == "watch":
+            degrade_code = "quality_watch"
+        severity = "low"
+        if quality_gate["status"] == "degraded":
+            severity = "high" if float(quality_gate.get("score", 0.0) or 0.0) < 0.5 else "medium"
+        elif quality_gate["status"] == "watch":
+            severity = "low"
         resp["degrade"] = {
             "active": bool(quality_reasons),
-            "code": "quality_degraded" if quality_reasons else "",
+            "code": degrade_code if quality_reasons else "",
+            "severity": severity,
             "reasons": list(dict.fromkeys(quality_reasons)),
             "missing_data": list(dict.fromkeys(quality_reasons)),
             "confidence_penalty": round(min(0.7, 0.15 * float(len(quality_reasons))), 4),
-            "user_message": "Report contains degraded segments; please review quality gate and evidence coverage."
+            "user_message": (
+                "Report has watch-level gaps; conclusions remain usable but should be rechecked with fresher evidence."
+                if quality_gate["status"] == "watch"
+                else "Report contains degraded segments; please review quality gate and evidence coverage."
+            )
             if quality_reasons
             else "Report quality is normal.",
         }
@@ -4243,6 +4690,23 @@ class AShareAgentService:
                 4,
             )
             final_decision["rationale"] = self._sanitize_report_text(str(final_decision.get("rationale", "")).strip())
+            target_price = dict(final_decision.get("target_price", {}) or {})
+            final_decision["target_price"] = {
+                "low": round(self._safe_float(target_price.get("low", 0.0), default=0.0), 3),
+                "base": round(self._safe_float(target_price.get("base", 0.0), default=0.0), 3),
+                "high": round(self._safe_float(target_price.get("high", 0.0), default=0.0), 3),
+            }
+            final_decision["risk_score"] = round(
+                max(0.0, min(100.0, self._safe_float(final_decision.get("risk_score", 0.0), default=0.0))),
+                2,
+            )
+            final_decision["reward_risk_ratio"] = round(
+                max(0.0, min(10.0, self._safe_float(final_decision.get("reward_risk_ratio", 0.0), default=0.0))),
+                3,
+            )
+            final_decision["position_sizing_hint"] = self._sanitize_report_text(
+                str(final_decision.get("position_sizing_hint", "")).strip()
+            )[:80]
             if isinstance(final_decision.get("execution_plan"), list):
                 final_decision["execution_plan"] = [
                     self._sanitize_report_text(str(x).strip())
@@ -4260,9 +4724,16 @@ class AShareAgentService:
         degrade = body.get("degrade")
         if not isinstance(degrade, dict):
             reasons = list((body.get("quality_gate", {}) or {}).get("reasons", []) or [])
+            quality_status = str((body.get("quality_gate", {}) or {}).get("status", "pass")).strip().lower() or "pass"
+            degrade_code = ""
+            if quality_status == "degraded":
+                degrade_code = "quality_degraded"
+            elif quality_status == "watch":
+                degrade_code = "quality_watch"
             degrade = {
                 "active": bool(reasons),
-                "code": "quality_degraded" if reasons else "",
+                "code": degrade_code if reasons else "",
+                "severity": "high" if quality_status == "degraded" else "low" if quality_status == "watch" else "low",
                 "reasons": reasons,
                 "missing_data": reasons,
                 "confidence_penalty": round(min(0.7, 0.15 * float(len(reasons))), 4),
@@ -4455,6 +4926,10 @@ class AShareAgentService:
         has_full = bool(task.get("result_full"))
         has_partial = bool(task.get("result_partial"))
         level = "full" if has_full else "partial" if has_partial else "none"
+        display_ready = bool(has_full)
+        partial_reason = ""
+        if has_partial and not has_full:
+            partial_reason = "warming_up"
         best_result = task.get("result_full") if has_full else task.get("result_partial") if has_partial else {}
         best_result = best_result if isinstance(best_result, dict) else {}
         pack_summary = dict(best_result.get("report_data_pack_summary", {}) or {})
@@ -4477,6 +4952,8 @@ class AShareAgentService:
             "result_level": level,
             "has_partial_result": has_partial,
             "has_full_result": has_full,
+            "display_ready": display_ready,
+            "partial_reason": partial_reason,
             "error_code": str(task.get("error_code", "")),
             "error_message": str(task.get("error_message", "")),
             "data_pack_status": data_pack_status,
@@ -4627,10 +5104,31 @@ class AShareAgentService:
             full = task.get("result_full")
             partial = task.get("result_partial")
             if isinstance(full, dict):
-                return {"task_id": key, "status": str(task.get("status", "")), "result_level": "full", "result": full}
+                return {
+                    "task_id": key,
+                    "status": str(task.get("status", "")),
+                    "result_level": "full",
+                    "display_ready": True,
+                    "partial_reason": "",
+                    "result": full,
+                }
             if isinstance(partial, dict):
-                return {"task_id": key, "status": str(task.get("status", "")), "result_level": "partial", "result": partial}
-            return {"task_id": key, "status": str(task.get("status", "")), "result_level": "none", "result": None}
+                return {
+                    "task_id": key,
+                    "status": str(task.get("status", "")),
+                    "result_level": "partial",
+                    "display_ready": False,
+                    "partial_reason": "warming_up",
+                    "result": partial,
+                }
+            return {
+                "task_id": key,
+                "status": str(task.get("status", "")),
+                "result_level": "none",
+                "display_ready": False,
+                "partial_reason": "",
+                "result": None,
+            }
 
     def report_task_cancel(self, task_id: str) -> dict[str, Any]:
         """Cancel async report task."""

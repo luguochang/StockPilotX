@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Alert, Button, Card, Col, Collapse, Empty, Input, List, Progress, Row, Select, Space, Tabs, Tag, Typography } from "antd";
+import { Alert, Button, Card, Col, Collapse, Empty, Input, List, Progress, Row, Select, Space, Switch, Tabs, Tag, Typography } from "antd";
 import MediaCarousel from "../components/MediaCarousel";
 import StockSelectorModal from "../components/StockSelectorModal";
 import { fetchJson } from "../lib/api";
@@ -49,12 +49,17 @@ type ReportTask = {
   data_pack_missing?: string[];
   quality_gate_detail?: Record<string, unknown>;
   report_quality_dashboard?: Record<string, unknown>;
+  // Full-first UX helper fields: only render full report by default.
+  display_ready?: boolean;
+  partial_reason?: string;
 };
 
 type TaskResult = {
   task_id: string;
   status: string;
   result_level: "none" | "partial" | "full" | string;
+  display_ready?: boolean;
+  partial_reason?: string;
   result: Record<string, unknown> | null;
 };
 
@@ -79,6 +84,14 @@ type FinalDecision = {
   rationale?: string;
   invalidation_conditions?: string[];
   execution_plan?: string[];
+  target_price?: {
+    low?: number;
+    base?: number;
+    high?: number;
+  };
+  risk_score?: number;
+  reward_risk_ratio?: number;
+  position_sizing_hint?: string;
 };
 
 type CommitteeNotes = {
@@ -102,7 +115,7 @@ type ReportExportFormat = "markdown" | "module_markdown" | "json_bundle";
 
 function statusColor(status: string): string {
   if (status === "ok" || status === "completed") return "success";
-  if (status === "degraded" || status === "partial_ready" || status === "running" || status === "queued") return "warning";
+  if (status === "watch" || status === "degraded" || status === "partial_ready" || status === "running" || status === "queued") return "warning";
   if (status === "failed" || status === "cancelled") return "error";
   return "default";
 }
@@ -144,8 +157,12 @@ export default function ReportsPage() {
   const [selectedAnalysisNodes, setSelectedAnalysisNodes] = useState<ReportAnalysisNode[]>([]);
   const [selectedQualityDashboard, setSelectedQualityDashboard] = useState<Record<string, unknown>>({});
   const [exportFormat, setExportFormat] = useState<ReportExportFormat>("markdown");
+  // Default policy: hide partial report body to avoid "content too short" confusion.
+  const [allowPartialPreview, setAllowPartialPreview] = useState(false);
 
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Read toggle state from interval polling callback without stale-closure issues.
+  const allowPartialPreviewRef = useRef(false);
 
   const qualityStatus = String(qualityGatePreview.status ?? "unknown");
   const qualityScore = Number(qualityGatePreview.score ?? 0);
@@ -170,6 +187,10 @@ export default function ReportsPage() {
       pollTimerRef.current = null;
     }
   }
+
+  useEffect(() => {
+    allowPartialPreviewRef.current = allowPartialPreview;
+  }, [allowPartialPreview]);
 
   async function loadBusinessHealth(stockCode: string) {
     const code = stockCode.trim().toUpperCase();
@@ -239,6 +260,16 @@ export default function ReportsPage() {
       execution_plan: Array.isArray(decision.execution_plan)
         ? decision.execution_plan.map((item) => String(item))
         : [],
+      target_price: typeof decision.target_price === "object" && decision.target_price
+        ? {
+          low: Number((decision.target_price as Record<string, unknown>).low ?? 0),
+          base: Number((decision.target_price as Record<string, unknown>).base ?? 0),
+          high: Number((decision.target_price as Record<string, unknown>).high ?? 0),
+        }
+        : undefined,
+      risk_score: Number(decision.risk_score ?? 0),
+      reward_risk_ratio: Number(decision.reward_risk_ratio ?? 0),
+      position_sizing_hint: String(decision.position_sizing_hint ?? ""),
     } : null);
     const committee = parseObject(result.committee);
     setSelectedCommittee(Object.keys(committee).length ? {
@@ -268,7 +299,11 @@ export default function ReportsPage() {
   async function syncTaskResult(taskId: string) {
     const body = (await fetchJson(`/v1/report/tasks/${taskId}/result`)) as TaskResult;
     if (body.result && typeof body.result === "object") {
-      applyReportResult(body.result);
+      const isPartial = body.result_level === "partial";
+      const canDisplay = body.result_level === "full" || (isPartial && allowPartialPreviewRef.current);
+      if (canDisplay) {
+        applyReportResult(body.result);
+      }
       const code = String((body.result as Record<string, unknown>).stock_code ?? "").trim().toUpperCase();
       if (code) {
         setGenerateStockCode(code);
@@ -488,7 +523,34 @@ export default function ReportsPage() {
             <Progress percent={Math.max(0, Math.min(100, Number((Number(task.progress || 0) * 100).toFixed(1))))} strokeColor="#2563eb" />
             {taskDataPackMissing.length ? <Alert type="warning" showIcon message={`数据缺口: ${taskDataPackMissing.join("；")}`} /> : null}
             {task.error_message ? <Alert type="error" showIcon message={task.error_message} /> : null}
-            {task.result_level === "partial" ? <Alert type="warning" showIcon message="已返回最小可用结果，系统仍在补全完整报告。" /> : null}
+            <Space style={{ width: "100%", justifyContent: "space-between" }}>
+              <Text type="secondary">临时结果预览</Text>
+              <Switch
+                checked={allowPartialPreview}
+                checkedChildren="开启"
+                unCheckedChildren="关闭"
+                onChange={(checked) => {
+                  setAllowPartialPreview(checked);
+                  // If user enables preview during generation, refresh once immediately.
+                  if (checked && task?.task_id) {
+                    void syncTaskResult(task.task_id);
+                  }
+                }}
+              />
+            </Space>
+            {task.result_level === "partial" && !allowPartialPreview ? (
+              <Alert
+                type="info"
+                showIcon
+                message="系统正在生成完整报告，临时结果已隐藏（可手动开启预览）。"
+              />
+            ) : null}
+            {task.result_level === "partial" && allowPartialPreview ? (
+              <Alert type="warning" showIcon message="当前展示的是临时结果，完整报告生成后会自动替换。" />
+            ) : null}
+            {String(task.partial_reason ?? "").trim() ? (
+              <Text type="secondary">partial_reason: {String(task.partial_reason)}</Text>
+            ) : null}
           </Space>
         </Card>
       ) : null}
@@ -512,6 +574,13 @@ export default function ReportsPage() {
             <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>数据包摘要</span>}>
               <Space direction="vertical" size={6} style={{ width: "100%" }}>
                 <Text style={{ color: "#475569" }}>历史样本: {String(dataPackPreview.history_sample_size ?? 0)}</Text>
+                <Text style={{ color: "#475569" }}>30/90/252天: {String(dataPackPreview.history_30d_count ?? 0)} / {String(dataPackPreview.history_90d_count ?? 0)} / {String(dataPackPreview.history_252d_count ?? 0)}</Text>
+                <Text style={{ color: "#475569" }}>
+                  1Y覆盖: <Tag color={Boolean(dataPackPreview.history_1y_has_full) ? "success" : "warning"}>{Boolean(dataPackPreview.history_1y_has_full) ? "full" : "partial"}</Tag>
+                </Text>
+                <Text style={{ color: "#475569" }}>
+                  财报/事件/不确定性: {String(dataPackPreview.quarterly_fundamentals_count ?? 0)} / {String(dataPackPreview.event_timeline_count ?? 0)} / {String(dataPackPreview.uncertainty_note_count ?? 0)}
+                </Text>
                 <Text style={{ color: "#475569" }}>预测质量: {String(dataPackPreview.predict_quality ?? "unknown")}</Text>
                 <Text style={{ color: "#475569" }}>情报信号: {String(dataPackPreview.intel_signal ?? "unknown")}</Text>
                 <Text style={{ color: "#475569" }}>情报置信度: {Number(dataPackPreview.intel_confidence ?? 0).toFixed(2)}</Text>
@@ -546,7 +615,18 @@ export default function ReportsPage() {
                   <>
                     <Text>信号: <Tag color={statusColor(String(selectedDecision.signal ?? "hold"))}>{String(selectedDecision.signal ?? "hold")}</Tag></Text>
                     <Text>置信度: {Number(selectedDecision.confidence ?? 0).toFixed(2)}</Text>
+                    {selectedDecision.target_price ? (
+                      <Text type="secondary">
+                        目标价区间: {Number(selectedDecision.target_price.low ?? 0).toFixed(2)} / {Number(selectedDecision.target_price.base ?? 0).toFixed(2)} / {Number(selectedDecision.target_price.high ?? 0).toFixed(2)}
+                      </Text>
+                    ) : null}
+                    <Text type="secondary">风险分: {Number(selectedDecision.risk_score ?? 0).toFixed(2)}</Text>
+                    <Text type="secondary">盈亏比: {Number(selectedDecision.reward_risk_ratio ?? 0).toFixed(2)}</Text>
+                    <Text type="secondary">仓位建议: {selectedDecision.position_sizing_hint || "-"}</Text>
                     <Text type="secondary">决策理由: {selectedDecision.rationale || "-"}</Text>
+                    {Array.isArray(selectedDecision.execution_plan) && selectedDecision.execution_plan.length > 0 ? (
+                      <Text type="secondary">执行步骤: {selectedDecision.execution_plan.join("；")}</Text>
+                    ) : null}
                     {Array.isArray(selectedDecision.invalidation_conditions) && selectedDecision.invalidation_conditions.length > 0 ? (
                       <Text type="secondary">失效条件: {selectedDecision.invalidation_conditions.join("；")}</Text>
                     ) : null}
