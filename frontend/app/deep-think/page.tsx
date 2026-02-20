@@ -73,12 +73,36 @@ type DeepThinkOpinion = {
   risk_tags: string[];
   created_at: string;
 };
+type DeepThinkRuntimeGuard = {
+  warn_emitted?: boolean;
+  timed_out?: boolean;
+  timeout_stage?: string;
+  elapsed_ms?: number;
+  round_timeout_seconds?: number;
+  stage_soft_timeout_seconds?: number;
+  status?: string;
+  stage?: string;
+  warn?: boolean;
+};
+type DeepThinkMultiRolePre = {
+  enabled: boolean;
+  trace_id: string;
+  debate_mode: string;
+  role_count: number;
+  consensus_signal: string;
+  consensus_confidence: number;
+  disagreement_score: number;
+  conflict_sources: string[];
+  counter_view: string;
+  judge_summary: string;
+};
 type DeepThinkBudgetUsage = {
   limit: { token_budget: number; time_budget_ms: number; tool_call_budget: number };
   used: { token_used: number; time_used_ms: number; tool_calls_used: number };
   remaining: { token_budget: number; time_budget_ms: number; tool_call_budget: number };
   warn: boolean;
   exceeded: boolean;
+  runtime_guard?: DeepThinkRuntimeGuard;
 };
 type DeepThinkRound = {
   round_id: string;
@@ -93,6 +117,8 @@ type DeepThinkRound = {
   replan_triggered: boolean;
   stop_reason: string;
   budget_usage: DeepThinkBudgetUsage;
+  runtime_guard?: DeepThinkRuntimeGuard;
+  multi_role_pre?: DeepThinkMultiRolePre;
   created_at: string;
   opinions: DeepThinkOpinion[];
 };
@@ -309,8 +335,21 @@ function getConflictSourceLabel(source: string): string {
     evidence_gap: "证据缺口",
     evidence_conflict: "证据冲突",
     budget_limit: "预算约束",
+    runtime_timeout: "运行时超时",
   };
   return mapping[source] ?? source;
+}
+
+function getRuntimeGuardStageLabel(stage: string): string {
+  const mapping: Record<string, string> = {
+    planning: "任务规划",
+    data_refresh: "数据刷新",
+    intel_search: "实时情报检索",
+    debate: "多Agent协商",
+    arbitration: "仲裁收敛",
+    round_finalize: "轮次收尾",
+  };
+  return mapping[String(stage ?? "").trim()] ?? (stage || "未知阶段");
 }
 
 function normalizeArchiveTimestamp(raw: string): string {
@@ -488,6 +527,9 @@ export default function DeepThinkPage() {
     const normalized = String(event ?? "").trim();
     const stage = String(data?.stage ?? data?.phase ?? "").trim();
     if (normalized === "round_started") return "planning";
+    if (normalized === "pre_arbitration") return "arbitration";
+    if (normalized === "runtime_timeout") return "persist";
+    if (normalized === "runtime_guard" && stage === "round_finalize") return "persist";
     if (stage === "planning") return "planning";
     if (stage === "data_refresh") return "data_refresh";
     if (stage === "intel_search") return "intel_search";
@@ -508,6 +550,23 @@ export default function DeepThinkPage() {
     if (stage !== "idle") {
       const message = String(data?.message ?? data?.reason ?? "").trim();
       setDeepProgressText(message || DEEP_ROUND_STAGE_LABEL[stage]);
+    }
+    // R3/R4 新事件给出更明确的用户反馈，避免只看到事件名但不知道发生了什么。
+    if (String(event) === "pre_arbitration") {
+      const signal = getSignalLabel(String(data?.consensus_signal ?? "hold"));
+      const disagreement = Number(data?.disagreement_score ?? 0).toFixed(3);
+      setDeepProgressText(`预裁决完成：${signal}（分歧度 ${disagreement}），进入主仲裁阶段。`);
+    }
+    if (String(event) === "runtime_guard") {
+      const status = String(data?.status ?? "").trim();
+      const stageLabel = getRuntimeGuardStageLabel(String(data?.stage ?? ""));
+      if (status === "warning") {
+        setDeepProgressText(`运行时守卫预警：${stageLabel}阶段耗时偏高，系统将继续执行并监控超时。`);
+      }
+    }
+    if (String(event) === "runtime_timeout") {
+      const stageLabel = getRuntimeGuardStageLabel(String(data?.stage ?? ""));
+      setDeepProgressText(`触发运行时超时（${stageLabel}），已返回最小可用结果，可继续下一轮补证。`);
     }
     if (String(event) === "done") {
       setDeepProgressText("轮次执行完成，结果已同步。");
@@ -1571,15 +1630,20 @@ export default function DeepThinkPage() {
     const known = [
       "round_started",
       "budget_warning",
+      "runtime_guard",
+      "runtime_timeout",
       "agent_opinion_delta",
       "agent_opinion_final",
       "critic_feedback",
+      "pre_arbitration",
       "arbitration_final",
       "replan_triggered",
       "intel_snapshot",
       "intel_status",
       "intel_self_test",
       "calendar_watchlist",
+      "round_persisted",
+      "journal_linked",
       "business_summary",
       "done",
     ];
@@ -1706,6 +1770,29 @@ export default function DeepThinkPage() {
     const rows = hit?.data?.items;
     return Array.isArray(rows) ? rows.slice(0, 6) : [];
   }, [deepStreamEvents]);
+  const deepLatestPreArbitration = useMemo(() => {
+    const fromRound = latestDeepRound?.multi_role_pre;
+    if (fromRound && Boolean(fromRound.enabled)) return fromRound;
+    const reversed = [...deepStreamEvents].reverse();
+    const hit = reversed.find((item) => String(item.event) === "pre_arbitration");
+    const payload = hit?.data as DeepThinkMultiRolePre | undefined;
+    return payload ?? null;
+  }, [deepStreamEvents, latestDeepRound]);
+  const deepLatestRuntimeGuard = useMemo(() => {
+    // 优先使用轮次快照，确保刷新后仍可见；无快照时回退到流事件。
+    const fromRound = latestDeepRound?.runtime_guard ?? latestDeepRound?.budget_usage?.runtime_guard;
+    if (fromRound) return fromRound;
+    const reversed = [...deepStreamEvents].reverse();
+    const hit = reversed.find(
+      (item) => String(item.event) === "runtime_timeout" || String(item.event) === "runtime_guard"
+    );
+    return (hit?.data as DeepThinkRuntimeGuard | undefined) ?? null;
+  }, [deepStreamEvents, latestDeepRound]);
+  const deepHasRuntimeTimeout = useMemo(() => {
+    if (String(latestDeepRound?.stop_reason ?? "") === "DEEP_ROUND_TIMEOUT") return true;
+    if (Boolean(deepLatestRuntimeGuard?.timed_out)) return true;
+    return deepStreamEvents.some((item) => String(item.event) === "runtime_timeout");
+  }, [deepLatestRuntimeGuard, deepStreamEvents, latestDeepRound]);
   const latestBudget = latestDeepRound?.budget_usage;
   const deepTimelineItems = deepRounds.map((round) => ({
     color: round.replan_triggered ? "orange" : round.stop_reason ? "red" : "blue",
@@ -2722,6 +2809,66 @@ export default function DeepThinkPage() {
                         </Space>
                       </Card>
                     ) : null}
+                    {deepLatestPreArbitration || deepLatestRuntimeGuard ? (
+                      <Card size="small" title={<span style={{ color: "#0f172a" }}>预裁决与运行时守卫</span>}>
+                        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                          {deepLatestPreArbitration ? (
+                            <>
+                              <Space wrap>
+                                <Tag color="cyan">
+                                  预裁决信号：{getSignalLabel(String(deepLatestPreArbitration.consensus_signal ?? "hold"))}
+                                </Tag>
+                                <Tag>预裁决置信度：{Number(deepLatestPreArbitration.consensus_confidence ?? 0).toFixed(3)}</Tag>
+                                <Tag>预裁决分歧度：{Number(deepLatestPreArbitration.disagreement_score ?? 0).toFixed(3)}</Tag>
+                                {String(deepLatestPreArbitration.trace_id ?? "").trim() ? (
+                                  <Tag color="blue">trace_id: {String(deepLatestPreArbitration.trace_id)}</Tag>
+                                ) : null}
+                              </Space>
+                              <Space wrap>
+                                {(deepLatestPreArbitration.conflict_sources ?? []).map((src) => (
+                                  <Tag key={`pre-conflict-${src}`} color="gold">{getConflictSourceLabel(String(src))}</Tag>
+                                ))}
+                                {!(deepLatestPreArbitration.conflict_sources ?? []).length ? <Tag color="green">预裁决无显著冲突</Tag> : null}
+                              </Space>
+                              {String(deepLatestPreArbitration.judge_summary ?? "").trim() ? (
+                                <Text style={{ color: "#334155" }}>
+                                  预裁决摘要：{String(deepLatestPreArbitration.judge_summary)}
+                                </Text>
+                              ) : null}
+                            </>
+                          ) : null}
+                          {deepLatestRuntimeGuard ? (
+                            <>
+                              <Space wrap>
+                                {deepHasRuntimeTimeout ? <Tag color="red">运行时状态：已超时降级</Tag> : <Tag color="green">运行时状态：正常</Tag>}
+                                {Boolean(deepLatestRuntimeGuard.warn ?? deepLatestRuntimeGuard.warn_emitted) ? <Tag color="gold">运行时预警：true</Tag> : null}
+                                {String(deepLatestRuntimeGuard.timeout_stage ?? "").trim() ? (
+                                  <Tag color="orange">超时阶段：{getRuntimeGuardStageLabel(String(deepLatestRuntimeGuard.timeout_stage))}</Tag>
+                                ) : null}
+                                {Number.isFinite(Number(deepLatestRuntimeGuard.elapsed_ms)) ? (
+                                  <Tag>耗时：{Number(deepLatestRuntimeGuard.elapsed_ms ?? 0)}ms</Tag>
+                                ) : null}
+                              </Space>
+                              <Space wrap>
+                                {Number.isFinite(Number(deepLatestRuntimeGuard.round_timeout_seconds)) ? (
+                                  <Tag>轮次超时阈值：{Number(deepLatestRuntimeGuard.round_timeout_seconds ?? 0).toFixed(1)}s</Tag>
+                                ) : null}
+                                {Number.isFinite(Number(deepLatestRuntimeGuard.stage_soft_timeout_seconds)) ? (
+                                  <Tag>阶段软阈值：{Number(deepLatestRuntimeGuard.stage_soft_timeout_seconds ?? 0).toFixed(1)}s</Tag>
+                                ) : null}
+                              </Space>
+                              {deepHasRuntimeTimeout ? (
+                                <Alert
+                                  type="warning"
+                                  showIcon
+                                  message="本轮触发运行时超时，系统已返回最小可用结果。建议继续下一轮补证。"
+                                />
+                              ) : null}
+                            </>
+                          ) : null}
+                        </Space>
+                      </Card>
+                    ) : null}
                     {deepAgentRoleRows.length ? (
                       <div style={{ display: "flex", justifyContent: "flex-end" }}>
                         {/* 角色说明改为 Popover：默认不占版面，业务用户按需点击查看。 */}
@@ -2990,7 +3137,13 @@ export default function DeepThinkPage() {
                         <Tag color={deepSession ? "blue" : "default"}>会话：{deepSession?.session_id ?? "未创建"}</Tag>
                         <Tag color={deepSession?.status === "completed" ? "green" : "processing"}>状态：{deepSession?.status ?? "idle"}</Tag>
                         <Tag>轮次：{deepSession?.current_round ?? 0}/{deepSession?.max_rounds ?? 0}</Tag>
+                        {deepLatestPreArbitration?.enabled ? (
+                          <Tag color="cyan">
+                            预裁决：{getSignalLabel(String(deepLatestPreArbitration.consensus_signal ?? "hold"))}
+                          </Tag>
+                        ) : null}
                         {latestDeepRound?.replan_triggered ? <Tag color="orange">已触发补证重规划</Tag> : null}
+                        {deepHasRuntimeTimeout ? <Tag color="red">运行时超时降级</Tag> : null}
                         {latestDeepRound?.stop_reason ? <Tag color="red">停止原因：{latestDeepRound.stop_reason}</Tag> : null}
                       </Space>
                     </Space>
@@ -3010,7 +3163,11 @@ export default function DeepThinkPage() {
                       </Tag>
                       {deepArchiveExportTask?.task_id ? <Tag>task_id: {deepArchiveExportTask.task_id}</Tag> : null}
                       {deepArchiveExportTask?.task_id ? <Tag>attempt: {deepArchiveExportTask.attempt_count}/{deepArchiveExportTask.max_attempts}</Tag> : null}
+                      {deepLatestPreArbitration?.enabled ? (
+                        <Tag color="cyan">pre_arb: {String(deepLatestPreArbitration.consensus_signal ?? "hold")}</Tag>
+                      ) : null}
                       {latestDeepRound?.replan_triggered ? <Tag color="orange">replan_triggered</Tag> : null}
+                      {deepHasRuntimeTimeout ? <Tag color="red">runtime_timeout</Tag> : null}
                       {latestDeepRound?.stop_reason ? <Tag color="red">{latestDeepRound.stop_reason}</Tag> : null}
                     </Space>
                     {deepLastA2ATask ? (
@@ -3178,6 +3335,35 @@ export default function DeepThinkPage() {
                         <Tag color={latestBudget.warn ? "gold" : "green"}>warn: {String(latestBudget.warn)}</Tag>
                         <Tag color={latestBudget.exceeded ? "red" : "green"}>exceeded: {String(latestBudget.exceeded)}</Tag>
                       </Space>
+                      {deepLatestRuntimeGuard ? (
+                        <>
+                          <Text style={{ color: "#334155" }}>
+                            Runtime Guard：{deepHasRuntimeTimeout ? "timed_out" : "active"}
+                          </Text>
+                          <Space wrap>
+                            <Tag color={Boolean(deepLatestRuntimeGuard.warn ?? deepLatestRuntimeGuard.warn_emitted) ? "gold" : "green"}>
+                              warning: {String(Boolean(deepLatestRuntimeGuard.warn ?? deepLatestRuntimeGuard.warn_emitted))}
+                            </Tag>
+                            <Tag color={deepHasRuntimeTimeout ? "red" : "green"}>
+                              timed_out: {String(Boolean(deepHasRuntimeTimeout))}
+                            </Tag>
+                            {String(deepLatestRuntimeGuard.timeout_stage ?? "").trim() ? (
+                              <Tag color="orange">timeout_stage: {String(deepLatestRuntimeGuard.timeout_stage)}</Tag>
+                            ) : null}
+                            {Number.isFinite(Number(deepLatestRuntimeGuard.elapsed_ms)) ? (
+                              <Tag>elapsed_ms: {Number(deepLatestRuntimeGuard.elapsed_ms ?? 0)}</Tag>
+                            ) : null}
+                          </Space>
+                          <Space wrap>
+                            {Number.isFinite(Number(deepLatestRuntimeGuard.round_timeout_seconds)) ? (
+                              <Tag>round_timeout_s: {Number(deepLatestRuntimeGuard.round_timeout_seconds ?? 0).toFixed(1)}</Tag>
+                            ) : null}
+                            {Number.isFinite(Number(deepLatestRuntimeGuard.stage_soft_timeout_seconds)) ? (
+                              <Tag>stage_soft_timeout_s: {Number(deepLatestRuntimeGuard.stage_soft_timeout_seconds ?? 0).toFixed(1)}</Tag>
+                            ) : null}
+                          </Space>
+                        </>
+                      ) : null}
                     </Space>
                   ) : (
                     <Text style={{ color: "#64748b" }}>执行轮次后展示预算治理指标。</Text>
