@@ -370,27 +370,41 @@ class AgentWorkflow:
         ]
 
     def _deep_retrieve(self, question: str, state: AgentState) -> list[RetrievalItem]:
-        subtasks = self._plan_subtasks(question)
-        state.analysis["deep_subtasks"] = subtasks
         subtask_timeout_seconds = max(0.2, float(getattr(self.middleware.ctx.settings, "deep_subtask_timeout_seconds", 2.5)))
+        react_enabled = bool(getattr(self.middleware.ctx.settings, "react_deep_enabled", False))
+        react_max_iterations = int(getattr(self.middleware.ctx.settings, "react_max_iterations", 2))
+        iterations = max(1, min(4, react_max_iterations if (react_enabled and state.intent == "deep") else 1))
+        state.analysis["react_iterations_planned"] = iterations
         timeout_subtasks: list[str] = []
         failed_subtasks: list[dict[str, str]] = []
-        merged: list[RetrievalItem] = []
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            futures = {q: pool.submit(self.retriever.retrieve, q, 8, 12, 5) for q in subtasks}
-            for subtask, fut in futures.items():
-                try:
-                    merged.extend(fut.result(timeout=subtask_timeout_seconds))
-                except FuturesTimeoutError:
-                    timeout_subtasks.append(subtask)
-                    fut.cancel()
-                except Exception as ex:  # noqa: BLE001
-                    failed_subtasks.append({"subtask": subtask, "error": str(ex)[:200]})
+        executed_subtasks: list[str] = []
+        executed_iterations = 0
         uniq: dict[tuple[str, str], RetrievalItem] = {}
-        for item in merged:
-            uniq[(item.source_id, item.text)] = item
-        items = list(uniq.values())
-        items.sort(key=lambda x: x.score, reverse=True)
+        items: list[RetrievalItem] = []
+        for iteration in range(iterations):
+            executed_iterations += 1
+            subtasks = self._plan_subtasks(question) if iteration == 0 else self._plan_react_followup_subtasks(question, items)
+            if iteration == 0:
+                state.analysis["deep_subtasks"] = list(subtasks)
+            executed_subtasks.extend(subtasks)
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                futures = {q: pool.submit(self.retriever.retrieve, q, 8, 12, 5) for q in subtasks}
+                for subtask, fut in futures.items():
+                    try:
+                        rows = fut.result(timeout=subtask_timeout_seconds)
+                        for row in rows:
+                            uniq[(row.source_id, row.text)] = row
+                    except FuturesTimeoutError:
+                        timeout_subtasks.append(subtask)
+                        fut.cancel()
+                    except Exception as ex:  # noqa: BLE001
+                        failed_subtasks.append({"subtask": subtask, "error": str(ex)[:200]})
+            items = list(uniq.values())
+            items.sort(key=lambda x: x.score, reverse=True)
+            # End early when retrieval quality is already acceptable.
+            top_score = float(items[0].score) if items else 0.0
+            if top_score >= 0.75:
+                break
         rewrite_applied = False
         rewritten_query = ""
         rewrite_threshold = float(getattr(self.middleware.ctx.settings, "corrective_rag_rewrite_threshold", 0.42))
@@ -411,6 +425,7 @@ class AgentWorkflow:
                 items.sort(key=lambda x: x.score, reverse=True)
         state.analysis["timeout_subtasks"] = timeout_subtasks
         state.analysis["corrective_rag_applied"] = rewrite_applied
+        state.analysis["react_iterations_executed"] = executed_iterations
         if rewrite_applied:
             state.analysis["corrective_rag_rewritten_query"] = rewritten_query
         if failed_subtasks:
@@ -420,10 +435,13 @@ class AgentWorkflow:
             "deep_agents",
             {
                 "subtask_count": len(subtasks),
+                "executed_subtasks": len(executed_subtasks),
                 "merged_items": len(items),
                 "timeout_subtasks": timeout_subtasks,
                 "failed_subtasks": len(failed_subtasks),
                 "subtask_timeout_seconds": subtask_timeout_seconds,
+                "react_enabled": react_enabled,
+                "react_iterations_planned": iterations,
                 "corrective_rag_applied": rewrite_applied,
                 "rewrite_threshold": rewrite_threshold,
             },
@@ -441,6 +459,16 @@ class AgentWorkflow:
             "financial trend",
         ]
         return f"{q} | {' | '.join(enrich)}"
+
+    def _plan_react_followup_subtasks(self, question: str, items: list[RetrievalItem]) -> list[str]:
+        """Generate deterministic follow-up subtasks for deep-mode ReAct gray run."""
+        top_snippet = str(items[0].text[:60]) if items else "insufficient_evidence"
+        base = str(question or "").strip()
+        return [
+            f"{base}: contradiction check against {top_snippet}",
+            f"{base}: catalyst sensitivity and event risk",
+            f"{base}: portfolio execution guardrails",
+        ]
 
     def _analyze(self, state: AgentState) -> dict[str, Any]:
         positives = [e for e in state.evidence_pack if e.get("reliability_score", 0) >= 0.9]

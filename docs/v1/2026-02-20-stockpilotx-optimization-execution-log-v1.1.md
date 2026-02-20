@@ -160,3 +160,49 @@ $env:PYTHONPATH='.'; .\.venv\Scripts\python scripts\generate_gate_decision_repor
 - [x] 二次检索合并证据
 - [x] 路径级测试覆盖
 - [x] 回归自测与记录
+
+---
+
+## Batch 4（2026-02-20）
+
+### 对应计划项
+
+- Phase 2 / 6.1：ReAct（deep 模式灰度）
+  - 限制 `max_iterations`
+  - 仅在 deep 场景启用
+  - 保持异常/超时不阻塞主流程
+
+### 本批代码改动
+
+1. `backend/app/config.py`
+- 新增 `react_deep_enabled`（默认 `false`，灰度开关）。
+- 新增 `react_max_iterations`（默认 `2`，上限 `4`）。
+
+2. `backend/app/agents/workflow.py`
+- `_deep_retrieve` 增加迭代检索控制：
+  - `react_deep_enabled=true` 且 `intent=deep` 时按 `react_max_iterations` 执行多轮子任务。
+  - 每轮仍保留子任务超时隔离。
+  - 当检索质量达到阈值时提前结束迭代。
+- 新增 follow-up 子任务规划 `_plan_react_followup_subtasks`。
+- 新增分析字段：
+  - `react_iterations_planned`
+  - `react_iterations_executed`
+
+3. `tests/test_phase0_optimization_v11.py`
+- 新增 `test_react_deep_mode_respects_max_iterations`，验证 deep 灰度迭代次数约束。
+
+### 自测记录
+
+```powershell
+.\.venv\Scripts\python -m pytest -q tests\test_phase0_optimization_v11.py tests\test_eval_gate_decision.py
+```
+
+结果：`10 passed`
+
+### Checklist
+
+- [x] ReAct deep 灰度开关
+- [x] max_iterations 约束
+- [x] 迭代追踪字段
+- [x] 路径测试覆盖
+- [x] 回归自测与记录

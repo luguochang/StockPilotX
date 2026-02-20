@@ -64,6 +64,8 @@ class Settings:
     # Corrective RAG: retry retrieval with rewritten query when first-pass relevance is weak.
     corrective_rag_enabled: bool = True
     corrective_rag_rewrite_threshold: float = 0.42
+    react_deep_enabled: bool = False
+    react_max_iterations: int = 2
     rag_vector_enabled: bool = True
     rag_vector_index_dir: str = str(_DATA_DIR / "vector")
     rag_vector_top_k: int = 8
@@ -138,6 +140,8 @@ class Settings:
             corrective_rag_rewrite_threshold=max(
                 0.05, min(1.0, float(os.getenv("CORRECTIVE_RAG_REWRITE_THRESHOLD", "0.42")))
             ),
+            react_deep_enabled=_to_bool(os.getenv("REACT_DEEP_ENABLED"), False),
+            react_max_iterations=max(1, min(4, int(os.getenv("REACT_MAX_ITERATIONS", "2")))),
             rag_vector_enabled=_to_bool(os.getenv("RAG_VECTOR_ENABLED"), True),
             rag_vector_index_dir=os.getenv("RAG_VECTOR_INDEX_DIR", str(_DATA_DIR / "vector")),
             rag_vector_top_k=max(1, int(os.getenv("RAG_VECTOR_TOP_K", "8"))),

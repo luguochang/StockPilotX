@@ -32,7 +32,11 @@ class _SlowRetriever:
 
 
 class _LowScoreThenRewriteRetriever:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
     def retrieve(self, query: str, *_args, **_kwargs):  # noqa: ANN001
+        self.calls.append(query)
         score = 0.15
         text = "low-score-evidence"
         if "company fundamentals" in query:
@@ -115,10 +119,11 @@ class Phase0OptimizationV11Tests(unittest.TestCase):
         self.assertIn("fact_count", state.analysis)
 
     def test_corrective_rag_rewrite_applies_on_low_score(self) -> None:
+        retriever = _LowScoreThenRewriteRetriever()
         settings = Settings(corrective_rag_enabled=True, corrective_rag_rewrite_threshold=0.4)
         middleware = MiddlewareStack([GuardrailMiddleware(), BudgetMiddleware()], settings=settings)
         workflow = AgentWorkflow(
-            retriever=_LowScoreThenRewriteRetriever(),  # type: ignore[arg-type]
+            retriever=retriever,  # type: ignore[arg-type]
             graph_rag=GraphRAGService(),
             middleware_stack=middleware,
             trace_emit=lambda _trace_id, _name, _payload: None,
@@ -131,6 +136,30 @@ class Phase0OptimizationV11Tests(unittest.TestCase):
         items = workflow._deep_retrieve("test question", state)
         self.assertTrue(bool(state.analysis.get("corrective_rag_applied", False)))
         self.assertTrue(any("rewritten-query-evidence" in x.text for x in items))
+
+    def test_react_deep_mode_respects_max_iterations(self) -> None:
+        retriever = _LowScoreThenRewriteRetriever()
+        settings = Settings(
+            react_deep_enabled=True,
+            react_max_iterations=2,
+            corrective_rag_enabled=False,
+        )
+        middleware = MiddlewareStack([GuardrailMiddleware(), BudgetMiddleware()], settings=settings)
+        workflow = AgentWorkflow(
+            retriever=retriever,  # type: ignore[arg-type]
+            graph_rag=GraphRAGService(),
+            middleware_stack=middleware,
+            trace_emit=lambda _trace_id, _name, _payload: None,
+            external_model_call=None,
+            external_model_stream_call=None,
+            enable_local_fallback=True,
+        )
+        state = AgentState(user_id="u", question="q", intent="deep", trace_id="t")
+        state.retrieval_plan = {"rerank_top_n": 5}
+        _ = workflow._deep_retrieve("test react question", state)
+        self.assertEqual(int(state.analysis.get("react_iterations_planned", 0)), 2)
+        self.assertEqual(int(state.analysis.get("react_iterations_executed", 0)), 2)
+        self.assertGreaterEqual(len(retriever.calls), 6)
 
 
 if __name__ == "__main__":
