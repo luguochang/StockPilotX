@@ -245,6 +245,7 @@ type IntelReviewSnapshot = {
 type DeepConsoleMode = "analysis" | "engineering";
 type DeepRoundStageKey = "idle" | "planning" | "data_refresh" | "intel_search" | "debate" | "arbitration" | "persist" | "done";
 type DeepThinkWorkspace = "business" | "console";
+type DeepFullFlowStage = "idle" | "query" | "round" | "done" | "error";
 
 const DEEP_ROUND_STAGE_ORDER: DeepRoundStageKey[] = ["idle", "planning", "data_refresh", "intel_search", "debate", "arbitration", "persist", "done"];
 const DEEP_ROUND_STAGE_LABEL: Record<DeepRoundStageKey, string> = {
@@ -256,6 +257,14 @@ const DEEP_ROUND_STAGE_LABEL: Record<DeepRoundStageKey, string> = {
   arbitration: "仲裁收敛",
   persist: "结果落库",
   done: "执行完成",
+};
+const DEEP_FULL_FLOW_ORDER: DeepFullFlowStage[] = ["idle", "query", "round", "done"];
+const DEEP_FULL_FLOW_STAGE_LABEL: Record<DeepFullFlowStage, string> = {
+  idle: "待执行",
+  query: "流式分析",
+  round: "轮次研判",
+  done: "执行完成",
+  error: "执行失败",
 };
 
 type AgentMeta = { name: string; role: string };
@@ -385,6 +394,10 @@ export default function DeepThinkPage() {
   const [promptQualityScore, setPromptQualityScore] = useState(100);
   const [promptGuardrailWarnings, setPromptGuardrailWarnings] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  // 统一编排状态：将“流式分析 + DeepThink轮次”串成一次业务动作。
+  const [fullFlowRunning, setFullFlowRunning] = useState(false);
+  const [fullFlowStage, setFullFlowStage] = useState<DeepFullFlowStage>("idle");
+  const [fullFlowMessage, setFullFlowMessage] = useState("");
   const [error, setError] = useState("");
   const [result, setResult] = useState<QueryResponse | null>(null);
   const [overview, setOverview] = useState<MarketOverview | null>(null);
@@ -439,6 +452,7 @@ export default function DeepThinkPage() {
   // 股票切换后提示：明确告知 DeepThink 数据已按标的隔离重置。
   const [deepStockSwitchNotice, setDeepStockSwitchNotice] = useState("");
   const deepTrackedStockRef = useRef(stockCode);
+  const analysisPanelRef = useRef<HTMLDivElement | null>(null);
   const effectiveConsoleMode: DeepConsoleMode = isConsoleWorkspace ? "engineering" : "analysis";
 
   useEffect(() => {
@@ -653,7 +667,7 @@ export default function DeepThinkPage() {
     }
   }
 
-  async function runAnalysis(questionOverride?: string) {
+  async function runAnalysis(questionOverride?: string): Promise<boolean> {
     const submitQuestion = String(questionOverride ?? resolveComposedQuestion()).trim();
     const guard = validatePromptQuality({
       stockCode,
@@ -662,7 +676,7 @@ export default function DeepThinkPage() {
     });
     if (guard.errors.length) {
       setError(guard.errors.join("；"));
-      return;
+      return false;
     }
     setLoading(true);
     setStreaming(true);
@@ -778,12 +792,14 @@ export default function DeepThinkPage() {
       setOverview(overviewBody as MarketOverview);
       await intelCardPromise;
       setQueryProgressText("");
+      return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : "请求失败");
       setResult(null);
       setOverview(null);
       setQueryProgressText("");
       setKnowledgePersistedTraceId("");
+      return false;
     } finally {
       setStreaming(false);
       setLoading(false);
@@ -841,6 +857,10 @@ export default function DeepThinkPage() {
       riskProfile: selectedRiskProfile,
       positionState: selectedPositionState,
     }).trim();
+  }
+
+  function scrollToAnalysisPanel() {
+    analysisPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   async function createDeepThinkSessionRequest(): Promise<DeepThinkSession> {
@@ -1180,7 +1200,7 @@ export default function DeepThinkPage() {
     await replayDeepThinkStream(sessionId);
   }
 
-  async function runDeepThinkRound() {
+  async function runDeepThinkRound(): Promise<boolean> {
     setDeepLoading(true);
     setDeepError("");
     setDeepStockSwitchNotice("");
@@ -1190,7 +1210,7 @@ export default function DeepThinkPage() {
       const autoCreateSession = !deepSession;
       const session = deepSession ?? (await createDeepThinkSessionRequest());
       if (autoCreateSession) {
-        // 明确告诉用户：执行下一轮可自动建会话，不依赖先做市场快析。
+        // 执行下一轮可自动建会话，业务页无需暴露“新建会话”按钮。
         setDeepProgressText("未检测到会话，已自动创建并开始执行...");
       }
       setDeepSession(session);
@@ -1227,11 +1247,50 @@ export default function DeepThinkPage() {
       setDeepSession(loaded);
       const latest = loaded.rounds?.length ? loaded.rounds[loaded.rounds.length - 1] : null;
       await loadDeepThinkEventArchive(loaded.session_id, { roundId: String(latest?.round_id ?? ""), cursor: 0, historyMode: "reset" });
+      return true;
     } catch (e) {
       setDeepError(e instanceof Error ? e.message : "执行 DeepThink 下一轮失败");
       setDeepProgressText("执行失败，请调整问题或稍后重试。");
+      return false;
     } finally {
       setDeepLoading(false);
+    }
+  }
+
+  // 一键全流程：先跑流式分析，再推进 DeepThink 轮次，避免用户在两个区域来回点击。
+  async function runDeepThinkFullFlow(questionOverride?: string) {
+    const submitQuestion = String(questionOverride ?? resolveComposedQuestion()).trim();
+    if (!submitQuestion) {
+      setError("请输入分析问题后再执行。");
+      return;
+    }
+    if (fullFlowRunning) return;
+    setFullFlowRunning(true);
+    setFullFlowStage("query");
+    setFullFlowMessage("步骤 1/2：正在执行流式分析...");
+    setError("");
+    setDeepError("");
+    try {
+      const queryOk = await runAnalysis(submitQuestion);
+      if (!queryOk) {
+        setFullFlowStage("error");
+        setFullFlowMessage("流式分析失败，请检查输入或稍后重试。");
+        return;
+      }
+
+      setFullFlowStage("round");
+      setFullFlowMessage("步骤 2/2：正在执行 DeepThink 下一轮...");
+      const roundOk = await runDeepThinkRound();
+      if (!roundOk) {
+        setFullFlowStage("error");
+        setFullFlowMessage("DeepThink 轮次执行失败，请稍后重试。");
+        return;
+      }
+
+      setFullFlowStage("done");
+      setFullFlowMessage("全流程执行完成，已生成结论与证据。");
+    } finally {
+      setFullFlowRunning(false);
     }
   }
 
@@ -1399,6 +1458,24 @@ export default function DeepThinkPage() {
       pctChange,
     };
   }, [overview]);
+  const recentFiveTradeRows = useMemo(() => {
+    const bars = [...(overview?.history ?? [])].sort((a, b) => String(a.trade_date).localeCompare(String(b.trade_date)));
+    const recent = bars.slice(-5).reverse();
+    return recent.map((row, idx) => {
+      const open = Number(row.open ?? 0);
+      const close = Number(row.close ?? 0);
+      const pctChange = open > 0 ? ((close / open) - 1) * 100 : 0;
+      return {
+        key: `${row.trade_date}-${idx}`,
+        trade_date: String(row.trade_date ?? ""),
+        open,
+        close,
+        high: Number(row.high ?? 0),
+        low: Number(row.low ?? 0),
+        pct_change: pctChange,
+      };
+    });
+  }, [overview]);
   // 业务语义：共享语料命中表示本次回答引用了“文档库/RAG问答记忆”，而不只依赖即时上下文。
   const sharedKnowledgeHits = useMemo(() => {
     const rows = result?.citations ?? [];
@@ -1542,6 +1619,12 @@ export default function DeepThinkPage() {
     if (deepCurrentStage === "done") return "已完成";
     return "待执行";
   }, [deepCurrentStage, deepError, deepLoading, deepStreaming]);
+  const fullFlowPercent = useMemo(() => {
+    if (fullFlowStage === "error") return 100;
+    const idx = DEEP_FULL_FLOW_ORDER.indexOf(fullFlowStage);
+    if (idx <= 0) return 0;
+    return Number(((idx / (DEEP_FULL_FLOW_ORDER.length - 1)) * 100).toFixed(1));
+  }, [fullFlowStage]);
   const deepDecisionSummary = useMemo(() => {
     if (!latestDeepRound) return null;
     const signal = String(latestDeepRound.consensus_signal ?? "hold");
@@ -1814,8 +1897,8 @@ export default function DeepThinkPage() {
             这里聚焦深度分析执行链路：多角色协商、证据追溯、流式过程可见与结果可回放。
           </Paragraph>
           <Space>
-            <Button type="primary" size="large" onClick={() => runAnalysis(resolveComposedQuestion())}>
-              启动深度分析
+            <Button type="primary" size="large" onClick={scrollToAnalysisPanel}>
+              进入分析面板
             </Button>
             <Button size="large" ghost>
               查看能力链路
@@ -1900,7 +1983,8 @@ export default function DeepThinkPage() {
       >
         <Row gutter={[14, 14]}>
           <Col xs={24} xl={14}>
-            <Card className="premium-card" style={{ borderColor: "rgba(15,23,42,0.12)" }}>
+            <div ref={analysisPanelRef}>
+              <Card className="premium-card" style={{ borderColor: "rgba(15,23,42,0.12)" }}>
               <Space direction="vertical" style={{ width: "100%" }}>
                 <Text style={{ color: "#475569" }}>
                   标准分析默认使用模板构建问题，减少自由输入造成的语义偏差；需要时可切换到自由输入。
@@ -1978,13 +2062,21 @@ export default function DeepThinkPage() {
                     <Tag key={`guard-${idx}`} color="blue">{item}</Tag>
                   ))}
                 </Space>
-                <Button type="primary" size="large" loading={loading} onClick={() => runAnalysis(resolveComposedQuestion())}>
-                  开始分析
+                <Button type="primary" size="large" loading={fullFlowRunning || loading || deepLoading} onClick={() => runDeepThinkFullFlow(resolveComposedQuestion())}>
+                  {deepSession?.session_id ? "继续全流程分析（流式+下一轮）" : "开始全流程分析"}
                 </Button>
+                <Space wrap>
+                  <Tag color={fullFlowStage === "done" ? "green" : fullFlowStage === "error" ? "red" : fullFlowRunning ? "processing" : "default"}>
+                    全流程阶段：{DEEP_FULL_FLOW_STAGE_LABEL[fullFlowStage]}
+                  </Tag>
+                  {fullFlowMessage ? <Tag color="blue">{fullFlowMessage}</Tag> : null}
+                </Space>
+                <Progress percent={fullFlowPercent} status={fullFlowStage === "error" ? "exception" : fullFlowRunning ? "active" : "normal"} />
                 {streaming ? <Text style={{ color: "#2563eb" }}>流式输出中...</Text> : null}
                 {streaming && queryProgressText ? <Text style={{ color: "#475569" }}>阶段：{queryProgressText}</Text> : null}
               </Space>
-            </Card>
+              </Card>
+            </div>
 
             {error ? <Alert style={{ marginTop: 12 }} message={error} type="error" showIcon /> : null}
 
@@ -2005,13 +2097,13 @@ export default function DeepThinkPage() {
                   <Tag color="cyan">Provider：{activeProvider || "unknown"}</Tag>
                   <Tag>API：{activeApiStyle || "unknown"}</Tag>
                 </Space>
-                <pre style={{ whiteSpace: "pre-wrap", color: "#0f172a", margin: 0 }}>{result.answer}</pre>
+                <pre style={{ whiteSpace: "pre-wrap", color: "#0f172a", margin: 0, maxHeight: 420, overflowY: "auto" }}>{result.answer}</pre>
                 <Text style={{ color: "#64748b" }}>trace_id: {result.trace_id}</Text>
               </Card>
             ) : null}
           </Col>
 
-          <Col xs={24} xl={10}>
+          <Col xs={24} xl={10} style={{ alignSelf: "flex-start", position: "sticky", top: 88 }}>
             <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>实时快照</span>}>
               <Row gutter={10}>
                 <Col span={12}>
@@ -2037,6 +2129,27 @@ export default function DeepThinkPage() {
               </Space>
             </Card>
 
+            <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>最近5个交易日明细</span>} style={{ marginTop: 12 }}>
+              <Table
+                size="small"
+                pagination={false}
+                dataSource={recentFiveTradeRows}
+                columns={[
+                  { title: "日期", dataIndex: "trade_date", key: "trade_date", width: 96 },
+                  { title: "开", dataIndex: "open", key: "open", width: 72, render: (v: number) => v.toFixed(2) },
+                  { title: "收", dataIndex: "close", key: "close", width: 72, render: (v: number) => v.toFixed(2) },
+                  {
+                    title: "涨跌",
+                    dataIndex: "pct_change",
+                    key: "pct_change",
+                    width: 88,
+                    render: (v: number) => <Text style={{ color: v >= 0 ? "#059669" : "#dc2626" }}>{v.toFixed(2)}%</Text>,
+                  },
+                ]}
+                locale={{ emptyText: "暂无最近交易日数据" }}
+              />
+            </Card>
+
             <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>最近三个月连续样本</span>} style={{ marginTop: 12 }}>
               {history3mSummary ? (
                 <Space direction="vertical" style={{ width: "100%" }} size={6}>
@@ -2057,7 +2170,7 @@ export default function DeepThinkPage() {
                   </Text>
                 </Space>
               ) : (
-                <Text style={{ color: "#64748b" }}>连续样本不足，建议先在“市场快析”执行一次分析以刷新历史数据。</Text>
+                <Text style={{ color: "#64748b" }}>连续样本不足，建议先点击“开始全流程分析”刷新历史数据。</Text>
               )}
             </Card>
 
@@ -2498,28 +2611,8 @@ export default function DeepThinkPage() {
                 </Space>
                 {effectiveConsoleMode === "analysis" ? (
                   <>
-                    <Space wrap>
-                      <Button onClick={startDeepThinkSession} loading={deepLoading}>
-                        新建会话
-                      </Button>
-                      <Button type="primary" onClick={runDeepThinkRound} loading={deepLoading}>
-                        {deepSession?.session_id ? "执行下一轮" : "执行下一轮（自动建会话）"}
-                      </Button>
-                      <Button onClick={runDeepThinkRoundViaA2A} loading={deepLoading}>
-                        A2A派发下一轮
-                      </Button>
-                      <Button onClick={refreshDeepThinkSession} disabled={!deepSession?.session_id || deepLoading}>
-                        刷新会话
-                      </Button>
-                      <Button onClick={() => exportDeepThinkBusiness("csv")} disabled={!deepSession?.session_id} loading={deepArchiveExporting}>
-                        导出业务结论CSV
-                      </Button>
-                      <Button onClick={runDeepIntelSelfTest} loading={deepIntelProbeLoading}>
-                        情报链路自检
-                      </Button>
-                    </Space>
                     <Text style={{ color: "#64748b" }}>
-                      提示：无需先执行上方流式分析，直接点击“执行下一轮”会自动创建会话并开始分析。
+                      业务模式已简化为“一键全流程”。请在上方输入区点击“开始全流程分析”，系统会自动完成流式分析与下一轮研判。
                     </Text>
                     {deepStockSwitchNotice ? (
                       <Alert
@@ -2532,10 +2625,10 @@ export default function DeepThinkPage() {
                     ) : null}
                     <Space direction="vertical" size={4} style={{ width: "100%" }}>
                       <Text style={{ color: "#334155" }}>
-                        执行状态：{deepActionStatusText} | 当前阶段：{DEEP_ROUND_STAGE_LABEL[deepCurrentStage]}
+                        全流程状态：{DEEP_FULL_FLOW_STAGE_LABEL[fullFlowStage]} | 轮次状态：{deepActionStatusText}
                       </Text>
-                      <Progress percent={deepStagePercent} status={deepError ? "exception" : (deepLoading || deepStreaming) ? "active" : "normal"} />
-                      <Text style={{ color: "#64748b" }}>{deepProgressText || "点击“执行下一轮”开始分析。"}</Text>
+                      <Progress percent={fullFlowPercent} status={fullFlowStage === "error" ? "exception" : fullFlowRunning ? "active" : "normal"} />
+                      <Text style={{ color: "#64748b" }}>{fullFlowMessage || deepProgressText || "点击“开始全流程分析”启动业务流程。"}</Text>
                     </Space>
                     {deepDecisionSummary ? (
                       <Card size="small" title={<span style={{ color: "#0f172a" }}>本轮结论摘要</span>}>
@@ -2561,7 +2654,7 @@ export default function DeepThinkPage() {
                         </Space>
                       </Card>
                     ) : (
-                      <Text style={{ color: "#64748b" }}>暂无轮次结果，请先执行一轮。</Text>
+                      <Text style={{ color: "#64748b" }}>暂无轮次结果，请先点击“开始全流程分析”。</Text>
                     )}
                     {deepDecisionExplainModel ? (
                       <Card size="small" title={<span style={{ color: "#0f172a" }}>为什么是这个结论</span>}>
@@ -2874,7 +2967,7 @@ export default function DeepThinkPage() {
                       </Button>
                     </Space>
                     <Text style={{ color: "#64748b" }}>
-                      提示：无需先执行上方流式分析，直接点击“执行下一轮”会自动创建会话并开始分析。
+                      提示：工程模式可直接“执行下一轮”，系统会自动建会话并推进轮次。
                     </Text>
                     {deepStockSwitchNotice ? (
                       <Alert
@@ -2890,9 +2983,9 @@ export default function DeepThinkPage() {
                 {effectiveConsoleMode === "analysis" ? (
                   <Card size="small" title={<span style={{ color: "#0f172a" }}>如何使用这块面板</span>}>
                     <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                      <Text style={{ color: "#334155" }}>1. 点击“执行下一轮”，系统会自动拉取数据并推进多Agent研判。</Text>
+                      <Text style={{ color: "#334155" }}>1. 在上方输入区点击“开始全流程分析”，系统会自动完成流式分析和轮次推进。</Text>
                       <Text style={{ color: "#334155" }}>2. 重点查看“本轮结论摘要/为什么是这个结论/风险与行动建议”。</Text>
-                      <Text style={{ color: "#334155" }}>3. 若触发补证重规划或存在高风险冲突，再执行下一轮复核。</Text>
+                      <Text style={{ color: "#334155" }}>3. 若触发补证重规划或存在高风险冲突，可在工程控制台继续执行复核轮次。</Text>
                       <Space wrap>
                         <Tag color={deepSession ? "blue" : "default"}>会话：{deepSession?.session_id ?? "未创建"}</Tag>
                         <Tag color={deepSession?.status === "completed" ? "green" : "processing"}>状态：{deepSession?.status ?? "idle"}</Tag>
@@ -2951,7 +3044,7 @@ export default function DeepThinkPage() {
                   {deepTimelineItems.length ? (
                     <Timeline items={deepTimelineItems.slice(-3)} />
                   ) : (
-                    <Text style={{ color: "#64748b" }}>尚未执行 DeepThink 轮次。可先点击“执行下一轮”。</Text>
+                    <Text style={{ color: "#64748b" }}>尚未执行 DeepThink 轮次。请先点击“开始全流程分析”。</Text>
                   )}
                 </Space>
               </Card>
@@ -2964,7 +3057,7 @@ export default function DeepThinkPage() {
                   {deepTimelineItems.length ? (
                     <Timeline items={deepTimelineItems} />
                   ) : (
-                    <Text style={{ color: "#64748b" }}>尚未执行 DeepThink 轮次。可先点击「新建会话」再执行。</Text>
+                    <Text style={{ color: "#64748b" }}>尚未执行 DeepThink 轮次。可先在业务页发起全流程，或在工程模式手动建会话后执行。</Text>
                   )}
                 </Card>
 

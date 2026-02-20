@@ -2,6 +2,7 @@
 import type { ReactNode } from "react";
 import "antd/dist/reset.css";
 import ShellHeader from "./components/ShellHeader";
+import BackendStatusBanner from "./components/BackendStatusBanner";
 
 export const metadata = {
   title: "StockPilotX",
@@ -11,13 +12,12 @@ export const metadata = {
 const navItems = [
   { href: "/", label: "首页" },
   { href: "/deep-think", label: "DeepThink" },
-  { href: "/predict", label: "预测" },
+  { href: "/predict", label: "预测研究台" },
   { href: "/watchlist", label: "关注池" },
-  { href: "/journal", label: "Journal" },
+  { href: "/journal", label: "投资日志" },
   { href: "/reports", label: "报告" },
   { href: "/docs-center", label: "文档" },
-  { href: "/rag-center", label: "RAG运营" },
-  { href: "/ui-demos", label: "UI Lab" }
+  { href: "/rag-center", label: "RAG运营" }
 ];
 
 export default function RootLayout({ children }: { children: ReactNode }) {
@@ -27,6 +27,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <div className="bg-orb bg-orb-a" />
         <div className="bg-orb bg-orb-b" />
         <ShellHeader navItems={navItems} />
+        <BackendStatusBanner />
         {children}
         <footer className="site-footer">
           <div className="site-footer-inner">
@@ -63,3 +64,4 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     </html>
   );
 }
+

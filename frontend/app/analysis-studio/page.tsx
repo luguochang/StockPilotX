@@ -1,6 +1,6 @@
 ﻿import { redirect } from "next/navigation";
 
-// 兼容历史入口：analysis-studio 已重命名为 market-quick。
+// 兼容历史入口：分析润色模块已下线，统一收敛到 DeepThink。
 export default function AnalysisStudioRedirectPage() {
-  redirect("/market-quick");
+  redirect("/deep-think");
 }

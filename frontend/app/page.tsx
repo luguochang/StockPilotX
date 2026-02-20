@@ -15,16 +15,16 @@ const featureCards = [
     tag: "核心入口",
   },
   {
-    title: "预测与因子分析",
-    desc: "查看预测信号、关键因子和评测摘要，支持多标的横向对比。",
+    title: "预测研究台",
+    desc: "先看结论与质量门禁，再按需展开预测明细、分层聚合和解释层结果。",
     href: "/predict",
     tag: "量化视角",
   },
   {
-    title: "Journal Workspace",
-    desc: "Record decisions, add reflections, generate AI reflection, and review insights.",
+    title: "投资日志工作台",
+    desc: "记录决策、补充复盘、生成 AI 复盘并查看聚合洞察，形成研究闭环。",
     href: "/journal",
-    tag: "Research Loop",
+    tag: "决策复盘",
   },
   {
     title: "报告中心",
