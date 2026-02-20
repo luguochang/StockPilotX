@@ -787,6 +787,30 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    @app.get("/v1/reports/{report_id}/versions/diff")
+    def report_versions_diff(
+        report_id: str,
+        base_version: int = 0,
+        candidate_version: int = 0,
+        authorization: str | None = Header(default=None),
+    ):
+        token = _extract_bearer_token(authorization)
+        try:
+            result = svc.report_versions_diff(
+                token,
+                report_id,
+                base_version=(base_version if base_version > 0 else None),
+                candidate_version=(candidate_version if candidate_version > 0 else None),
+            )
+            if "error" in result:
+                code = 404 if str(result.get("error", "")).endswith("not_found") or str(result.get("error", "")) == "not_found" else 400
+                raise HTTPException(status_code=code, detail=result)
+            return result
+        except HTTPException:
+            raise
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     @app.post("/v1/reports/{report_id}/export")
     def report_export(report_id: str, format: str = "markdown", authorization: str | None = Header(default=None)):
         token = _extract_bearer_token(authorization)

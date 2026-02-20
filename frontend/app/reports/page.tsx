@@ -121,6 +121,7 @@ export default function ReportsPage() {
   const [selectedMarkdown, setSelectedMarkdown] = useState("");
   const [selectedRaw, setSelectedRaw] = useState("");
   const [selectedVersions, setSelectedVersions] = useState("");
+  const [selectedVersionDiff, setSelectedVersionDiff] = useState("");
   const [generateStockCode, setGenerateStockCode] = useState("SH600000");
   const [generateType, setGenerateType] = useState<"fact" | "research">("research");
   const [templateId, setTemplateId] = useState("default");
@@ -399,6 +400,21 @@ export default function ReportsPage() {
     }
   }
 
+  async function loadReportVersionDiff(reportId: string) {
+    setLoading(true);
+    setError("");
+    try {
+      const body = await fetchJson(`/v1/reports/${reportId}/versions/diff`);
+      setSelectedVersionDiff(JSON.stringify(body, null, 2));
+      setActiveReportId(reportId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "加载版本差异失败");
+      setSelectedVersionDiff("");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
     void load();
     return () => {
@@ -589,6 +605,7 @@ export default function ReportsPage() {
                     <Text type="secondary">overall_score: {Number(selectedQualityDashboard.overall_score ?? 0).toFixed(2)}</Text>
                     <Text type="secondary">coverage_ratio: {Number(selectedQualityDashboard.coverage_ratio ?? 0).toFixed(2)}</Text>
                     <Text type="secondary">consistency_score: {Number(selectedQualityDashboard.consistency_score ?? 0).toFixed(2)}</Text>
+                    <Text type="secondary">freshness_score: {Number(selectedQualityDashboard.evidence_freshness_score ?? 0).toFixed(2)}</Text>
                     <Text type="secondary">evidence_ref_count: {Number(selectedQualityDashboard.evidence_ref_count ?? 0)}</Text>
                   </>
                 ) : (
@@ -667,6 +684,7 @@ export default function ReportsPage() {
                 actions={[
                   <Button key="detail" size="small" onClick={() => void loadReportDetail(item.report_id)}>详情</Button>,
                   <Button key="versions" size="small" onClick={() => void loadReportVersions(item.report_id)}>版本</Button>,
+                  <Button key="diff" size="small" onClick={() => void loadReportVersionDiff(item.report_id)}>版本差异</Button>,
                   <Button key="view" size="small" onClick={() => void exportReport(item.report_id)}>查看导出</Button>,
                 ]}
               >
@@ -697,8 +715,16 @@ export default function ReportsPage() {
         </motion.div>
       ) : null}
 
+      {selectedVersionDiff ? (
+        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>
+          <Card className="premium-card" style={{ marginTop: 12 }} title={<span style={{ color: "#0f172a" }}>版本差异</span>}>
+            <pre style={{ whiteSpace: "pre-wrap", color: "#0f172a", margin: 0 }}>{selectedVersionDiff}</pre>
+          </Card>
+        </motion.div>
+      ) : null}
+
       {selectedRaw ? (
-        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.22 }}>
+        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.24 }}>
           <Card className="premium-card" style={{ marginTop: 12 }} title={<span style={{ color: "#0f172a" }}>接口原始返回</span>}>
             <pre style={{ whiteSpace: "pre-wrap", color: "#0f172a", margin: 0 }}>{selectedRaw}</pre>
           </Card>

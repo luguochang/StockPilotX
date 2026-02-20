@@ -271,15 +271,27 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("metric_snapshot", report)
         self.assertIn("analysis_nodes", report)
         self.assertIn("quality_dashboard", report)
+        self.assertIn("schema_version", report)
         modules = report.get("report_modules", [])
         if isinstance(modules, list) and modules:
             self.assertIn("module_quality_score", modules[0])
             self.assertIn("module_degrade_code", modules[0])
+        evidence_refs = report.get("evidence_refs", [])
+        if isinstance(evidence_refs, list) and evidence_refs:
+            self.assertIn("freshness_score", evidence_refs[0])
+            self.assertIn("freshness_tier", evidence_refs[0])
 
         export_code, export_body = self._post(f"/v1/reports/{report_id}/export?format=module_markdown", {})
         self.assertEqual(export_code, 200)
         self.assertEqual(str(export_body.get("format", "")), "module_markdown")
         self.assertIn("模块化报告导出", str(export_body.get("content", "")))
+        export_json_code, export_json = self._post(f"/v1/reports/{report_id}/export?format=json_bundle", {})
+        self.assertEqual(export_json_code, 200)
+        self.assertIn("schema_version", (export_json.get("json_bundle", {}) if isinstance(export_json.get("json_bundle"), dict) else {}))
+
+        diff_code, diff_body = self._get(f"/v1/reports/{report_id}/versions/diff")
+        self.assertEqual(diff_code, 200)
+        self.assertIn("diff", diff_body)
 
     def test_report_task_endpoints(self) -> None:
         code, created = self._post(
@@ -299,6 +311,7 @@ class HttpApiTestCase(unittest.TestCase):
         for _ in range(120):
             c_get, snapshot = self._get(f"/v1/report/tasks/{task_id}")
             self.assertEqual(c_get, 200)
+            self.assertIn("report_quality_dashboard", snapshot)
             final_status = str(snapshot.get("status", ""))
             if final_status in {"completed", "failed"}:
                 break

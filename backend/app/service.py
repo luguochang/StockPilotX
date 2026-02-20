@@ -158,6 +158,8 @@ class AShareAgentService:
 
         # 鎶ュ憡瀛樺偍锛歁VP 鍏堜娇鐢ㄥ唴瀛樺瓧鍏?
         self._reports: dict[str, dict[str, Any]] = {}
+        # Report JSON bundle schema version used by export + version diff APIs.
+        self._report_bundle_schema_version = "2.2.0"
         # Async report generation runtime state for /v1/report/tasks.
         self._report_task_lock = threading.RLock()
         self._report_tasks: dict[str, dict[str, Any]] = {}
@@ -2900,6 +2902,126 @@ class AShareAgentService:
         except Exception:
             return float(default)
 
+    @staticmethod
+    def _safe_parse_datetime(value: Any) -> datetime | None:
+        """Best-effort parse for mixed datetime payloads from citations/intel rows."""
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            raw = str(value or "").strip()
+            if not raw:
+                return None
+            text = raw
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            dt: datetime | None = None
+            try:
+                dt = datetime.fromisoformat(text)
+            except Exception:
+                dt = None
+            if dt is None:
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d", "%Y/%m/%d %H:%M:%S"):
+                    try:
+                        dt = datetime.strptime(raw, fmt)
+                        break
+                    except Exception:
+                        continue
+            if dt is None:
+                return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    def _evidence_freshness_profile(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Score evidence freshness for quality dashboard and export explainability."""
+        ts = self._safe_parse_datetime(
+            row.get("event_time")
+            or row.get("published_at")
+            or row.get("ts")
+            or row.get("updated_at")
+            or row.get("created_at")
+        )
+        if ts is None:
+            return {"event_time": "", "age_hours": None, "freshness_score": 0.35, "freshness_tier": "unknown"}
+        age_hours = max(0.0, (datetime.now(timezone.utc) - ts).total_seconds() / 3600.0)
+        if age_hours <= 24:
+            score, tier = 1.0, "live"
+        elif age_hours <= 72:
+            score, tier = 0.9, "fresh"
+        elif age_hours <= 24 * 7:
+            score, tier = 0.75, "recent"
+        elif age_hours <= 24 * 30:
+            score, tier = 0.55, "stale"
+        elif age_hours <= 24 * 90:
+            score, tier = 0.38, "old"
+        else:
+            score, tier = 0.2, "very_old"
+        return {
+            "event_time": ts.isoformat(),
+            "age_hours": round(age_hours, 2),
+            "freshness_score": round(score, 4),
+            "freshness_tier": tier,
+        }
+
+    def _normalize_report_evidence_refs(self, evidence_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Normalize top-level evidence list with freshness scoring."""
+        normalized: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in evidence_rows:
+            if not isinstance(row, dict):
+                continue
+            source_id = str(row.get("source_id", "")).strip()
+            source_url = str(row.get("source_url", "")).strip()
+            excerpt = self._sanitize_report_text(str(row.get("excerpt", "")).strip())
+            dedup_key = (source_id, excerpt[:120])
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            freshness = self._evidence_freshness_profile(row)
+            normalized.append(
+                {
+                    "source_id": source_id,
+                    "source_url": source_url,
+                    "reliability_score": round(max(0.0, min(1.0, self._safe_float(row.get("reliability_score", 0.0), default=0.0))), 4),
+                    "excerpt": excerpt[:320],
+                    "event_time": str(row.get("event_time", freshness.get("event_time", ""))),
+                    "freshness_score": round(
+                        max(
+                            0.0,
+                            min(
+                                1.0,
+                                self._safe_float(
+                                    row.get("freshness_score", freshness.get("freshness_score", 0.35)),
+                                    default=0.35,
+                                ),
+                            ),
+                        ),
+                        4,
+                    ),
+                    "freshness_tier": str(row.get("freshness_tier", freshness.get("freshness_tier", "unknown"))),
+                    "age_hours": (
+                        round(self._safe_float(row.get("age_hours", freshness.get("age_hours", 0.0)), default=0.0), 2)
+                        if row.get("age_hours") is not None or freshness.get("age_hours") is not None
+                        else None
+                    ),
+                }
+            )
+        return normalized
+
+    def _build_report_evidence_ref(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Project one citation/intel row into normalized report evidence schema."""
+        freshness = self._evidence_freshness_profile(row)
+        return {
+            "source_id": str(row.get("source_id", "")),
+            "source_url": str(row.get("source_url", "")),
+            "reliability_score": float(row.get("reliability_score", 0.0) or 0.0),
+            "excerpt": str(row.get("excerpt", row.get("summary", row.get("title", ""))))[:240],
+            "event_time": str(row.get("event_time", freshness.get("event_time", ""))),
+            "freshness_score": float(freshness.get("freshness_score", 0.35) or 0.35),
+            "freshness_tier": str(freshness.get("freshness_tier", "unknown")),
+            "age_hours": freshness.get("age_hours"),
+        }
+
     def _build_report_metric_snapshot(
         self,
         *,
@@ -3186,10 +3308,12 @@ class AShareAgentService:
         quality_gate: dict[str, Any],
         final_decision: dict[str, Any],
         analysis_nodes: list[dict[str, Any]] | None = None,
+        evidence_refs: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Build module-level quality board with coverage/evidence/consistency metrics."""
         modules = self._normalize_report_modules(report_modules)
         node_rows = self._normalize_report_analysis_nodes(list(analysis_nodes or []))
+        evidence_rows = self._normalize_report_evidence_refs(list(evidence_refs or []))
         module_count = len(modules)
         module_scores = [self._safe_float(row.get("module_quality_score", 0.0), default=0.0) for row in modules]
         avg_module_score = sum(module_scores) / float(module_count) if module_count else 0.0
@@ -3203,17 +3327,22 @@ class AShareAgentService:
             if str(item).strip()
         }
         evidence_density = float(len(unique_evidence)) / float(module_count) if module_count else 0.0
+        freshness_scores = [self._safe_float(row.get("freshness_score", 0.35), default=0.35) for row in evidence_rows]
+        freshness_score = sum(freshness_scores) / float(len(freshness_scores)) if freshness_scores else 0.35
+        stale_evidence_count = sum(1 for row in freshness_scores if row < 0.55)
+        stale_evidence_ratio = float(stale_evidence_count) / float(len(freshness_scores)) if freshness_scores else 0.0
         decision_confidence = self._safe_float(final_decision.get("confidence", 0.5), default=0.5)
         consistency_score = max(0.0, min(1.0, 1.0 - abs(decision_confidence - avg_module_score)))
         node_veto = any(bool(row.get("veto", False)) for row in node_rows)
         quality_gate_score = self._safe_float(quality_gate.get("score", 0.0), default=0.0)
 
         overall_score = (
-            avg_module_score * 0.38
-            + coverage_ratio * 0.22
-            + min(1.0, evidence_density / 2.0) * 0.15
+            avg_module_score * 0.34
+            + coverage_ratio * 0.20
+            + min(1.0, evidence_density / 2.0) * 0.14
             + consistency_score * 0.15
-            + quality_gate_score * 0.10
+            + quality_gate_score * 0.09
+            + freshness_score * 0.08
         )
         overall_score = max(0.0, min(1.0, overall_score))
         status = "pass" if overall_score >= 0.75 and not node_veto else "degraded" if overall_score >= 0.5 else "critical"
@@ -3221,6 +3350,8 @@ class AShareAgentService:
         reasons: list[str] = [str(x).strip() for x in list(quality_gate.get("reasons", []) or []) if str(x).strip()]
         if node_veto:
             reasons.append("risk_arbiter_veto")
+        if freshness_score < 0.45:
+            reasons.append("evidence_stale")
         reasons = list(dict.fromkeys(reasons))
         return {
             "status": status,
@@ -3231,6 +3362,8 @@ class AShareAgentService:
             "coverage_ratio": round(coverage_ratio, 4),
             "evidence_ref_count": int(len(unique_evidence)),
             "evidence_density": round(evidence_density, 4),
+            "evidence_freshness_score": round(freshness_score, 4),
+            "stale_evidence_ratio": round(stale_evidence_ratio, 4),
             "consistency_score": round(consistency_score, 4),
             "low_quality_modules": low_quality_modules[:8],
             "reasons": reasons,
@@ -3568,12 +3701,6 @@ class AShareAgentService:
             quality_reasons=quality_reasons,
             final_decision=final_decision,
         )
-        quality_dashboard = self._build_report_quality_dashboard(
-            report_modules=report_modules,
-            quality_gate=quality_gate,
-            final_decision=final_decision,
-            analysis_nodes=analysis_nodes,
-        )
         module_order = [
             "executive_summary",
             "market_technical",
@@ -3588,15 +3715,7 @@ class AShareAgentService:
         generation_mode = "fallback"
         generation_error = ""
         report_id = str(uuid.uuid4())
-        evidence_refs = [
-            {
-                "source_id": str(c.get("source_id", "")),
-                "source_url": str(c.get("source_url", "")),
-                "reliability_score": float(c.get("reliability_score", 0.0)),
-                "excerpt": str(c.get("excerpt", ""))[:240],
-            }
-            for c in query_result["citations"]
-        ]
+        evidence_refs = [self._build_report_evidence_ref(dict(c)) for c in list(query_result.get("citations", []) or [])]
         report_sections = [
             {"section_id": "summary", "title": "结论摘要", "content": str(query_result["answer"])[:800]},
             {
@@ -3608,23 +3727,8 @@ class AShareAgentService:
             {"section_id": "action", "title": "操作建议", "content": "建议分批验证信号稳定性，避免一次性重仓。"},
         ]
         for row in list(intel.get("evidence", []) or [])[:6]:
-            evidence_refs.append(
-                {
-                    "source_id": str(row.get("source_id", "")),
-                    "source_url": str(row.get("source_url", "")),
-                    "reliability_score": float(row.get("reliability_score", 0.0) or 0.0),
-                    "excerpt": str(row.get("summary", row.get("title", "")))[:240],
-                }
-            )
-        dedup_evidence: list[dict[str, Any]] = []
-        seen_keys: set[tuple[str, str]] = set()
-        for row in evidence_refs:
-            key = (str(row.get("source_id", "")), str(row.get("excerpt", ""))[:120])
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            dedup_evidence.append(row)
-        evidence_refs = dedup_evidence[:14]
+            evidence_refs.append(self._build_report_evidence_ref(dict(row)))
+        evidence_refs = self._normalize_report_evidence_refs(evidence_refs)[:14]
 
         report_sections.extend(
             [
@@ -3828,6 +3932,7 @@ class AShareAgentService:
             quality_gate=quality_gate,
             final_decision=final_decision,
             analysis_nodes=analysis_nodes,
+            evidence_refs=evidence_refs,
         )
 
         # Project module payload into report_sections for backward-compatible renderers.
@@ -3901,6 +4006,7 @@ class AShareAgentService:
         )
         self._reports[report_id] = {
             "report_id": report_id,
+            "schema_version": self._report_bundle_schema_version,
             "trace_id": query_result["trace_id"],
             "markdown": markdown,
             "citations": query_result["citations"],
@@ -3937,6 +4043,20 @@ class AShareAgentService:
                 tenant_id = int(me["tenant_id"])
             except Exception:
                 pass
+        version_payload = {
+            "schema_version": self._report_bundle_schema_version,
+            "report_id": report_id,
+            "stock_code": str(req.stock_code),
+            "report_type": str(req.report_type),
+            "final_decision": dict(final_decision),
+            "committee": dict(committee),
+            "report_modules": list(report_modules),
+            "analysis_nodes": list(analysis_nodes),
+            "quality_dashboard": dict(quality_dashboard),
+            "metric_snapshot": dict(metric_snapshot),
+            "quality_gate": dict(quality_gate),
+            "evidence_refs": list(evidence_refs),
+        }
         self.web.save_report_index(
             report_id=report_id,
             user_id=user_id,
@@ -3947,6 +4067,7 @@ class AShareAgentService:
             run_id=run_id,
             pool_snapshot_id=pool_snapshot_id,
             template_id=template_id,
+            payload_json=json.dumps(version_payload, ensure_ascii=False),
         )
         resp = ReportResponse(
             report_id=report_id,
@@ -3978,6 +4099,7 @@ class AShareAgentService:
         resp["generation_error"] = generation_error
         resp["stock_code"] = str(req.stock_code)
         resp["report_type"] = str(req.report_type)
+        resp["schema_version"] = self._report_bundle_schema_version
         resp["result_level"] = "full"
         resp["degrade"] = {
             "active": bool(quality_reasons),
@@ -4096,6 +4218,9 @@ class AShareAgentService:
             module_rows.append(item)
         if module_rows:
             body["report_modules"] = self._normalize_report_modules(module_rows)
+        body["evidence_refs"] = self._normalize_report_evidence_refs(
+            [dict(row) for row in list(body.get("evidence_refs", []) or []) if isinstance(row, dict)]
+        )
 
         node_rows: list[dict[str, Any]] = []
         for row in list(body.get("analysis_nodes", []) or []):
@@ -4151,7 +4276,9 @@ class AShareAgentService:
             quality_gate=dict(body.get("quality_gate", {}) or {}),
             final_decision=dict(body.get("final_decision", {}) or {}),
             analysis_nodes=list(body.get("analysis_nodes", []) or []),
+            evidence_refs=list(body.get("evidence_refs", []) or []),
         )
+        body["schema_version"] = str(body.get("schema_version", self._report_bundle_schema_version) or self._report_bundle_schema_version)
         if "result_level" not in body:
             body["result_level"] = "full"
         return body
@@ -4182,11 +4309,13 @@ class AShareAgentService:
         )
         result = {
             "report_id": f"partial-{uuid.uuid4().hex[:10]}",
+            "schema_version": self._report_bundle_schema_version,
             "trace_id": str(query_result.get("trace_id", "")),
             "stock_code": code,
             "report_type": str(req.report_type),
             "markdown": markdown,
             "citations": citations,
+            "evidence_refs": [self._build_report_evidence_ref(dict(item)) for item in citations[:10]],
             "report_modules": [
                 {
                     "module_id": "executive_summary",
@@ -6714,8 +6843,250 @@ class AShareAgentService:
     def reports_list(self, token: str) -> list[dict[str, Any]]:
         return self.web.report_list(token)
 
+    def _load_report_payload_from_version_row(self, report_id: str, row: dict[str, Any]) -> dict[str, Any]:
+        """Load one persisted report version row into sanitized payload."""
+        parsed: dict[str, Any] = {}
+        raw_payload = str(row.get("payload_json", "")).strip()
+        if raw_payload:
+            try:
+                data = json.loads(raw_payload)
+                if isinstance(data, dict):
+                    parsed = dict(data)
+            except Exception:
+                parsed = {}
+        if not parsed:
+            parsed = {
+                "report_id": report_id,
+                "markdown": self._sanitize_report_text(str(row.get("markdown", ""))),
+                "report_modules": [],
+                "analysis_nodes": [],
+                "final_decision": {"signal": "hold", "confidence": 0.5, "rationale": ""},
+                "committee": {"research_note": "", "risk_note": ""},
+                "quality_gate": {"status": "degraded", "score": 0.5, "reasons": ["legacy_version_without_payload"]},
+                "quality_dashboard": {},
+            }
+        parsed["report_id"] = report_id
+        parsed["version"] = int(row.get("version", 0) or 0)
+        parsed["created_at"] = str(row.get("created_at", ""))
+        if not str(parsed.get("markdown", "")).strip():
+            parsed["markdown"] = self._sanitize_report_text(str(row.get("markdown", "")))
+        return self._sanitize_report_payload(parsed)
+
+    def _build_report_version_diff_payload(self, *, base: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+        """Compute report diff across decision, quality dashboard, modules and analysis nodes."""
+        base_decision = dict(base.get("final_decision", {}) or {})
+        cand_decision = dict(candidate.get("final_decision", {}) or {})
+        base_quality = dict(base.get("quality_dashboard", {}) or {})
+        cand_quality = dict(candidate.get("quality_dashboard", {}) or {})
+
+        module_map_base = {
+            str(row.get("module_id", "")).strip(): row
+            for row in list(base.get("report_modules", []) or [])
+            if isinstance(row, dict) and str(row.get("module_id", "")).strip()
+        }
+        module_map_cand = {
+            str(row.get("module_id", "")).strip(): row
+            for row in list(candidate.get("report_modules", []) or [])
+            if isinstance(row, dict) and str(row.get("module_id", "")).strip()
+        }
+        module_ids = sorted(set(module_map_base.keys()) | set(module_map_cand.keys()))
+        module_deltas: list[dict[str, Any]] = []
+        for module_id in module_ids:
+            b = dict(module_map_base.get(module_id, {}) or {})
+            c = dict(module_map_cand.get(module_id, {}) or {})
+            module_deltas.append(
+                {
+                    "module_id": module_id,
+                    "exists_in_base": bool(b),
+                    "exists_in_candidate": bool(c),
+                    "quality_delta": round(
+                        self._safe_float(c.get("module_quality_score", 0.0), default=0.0)
+                        - self._safe_float(b.get("module_quality_score", 0.0), default=0.0),
+                        4,
+                    ),
+                    "confidence_delta": round(
+                        self._safe_float(c.get("confidence", 0.0), default=0.0)
+                        - self._safe_float(b.get("confidence", 0.0), default=0.0),
+                        4,
+                    ),
+                    "coverage_changed": str((b.get("coverage", {}) or {}).get("status", "")) != str((c.get("coverage", {}) or {}).get("status", "")),
+                    "degrade_changed": list(b.get("degrade_reason", []) or []) != list(c.get("degrade_reason", []) or []),
+                }
+            )
+
+        node_map_base = {
+            str(row.get("node_id", "")).strip(): row
+            for row in list(base.get("analysis_nodes", []) or [])
+            if isinstance(row, dict) and str(row.get("node_id", "")).strip()
+        }
+        node_map_cand = {
+            str(row.get("node_id", "")).strip(): row
+            for row in list(candidate.get("analysis_nodes", []) or [])
+            if isinstance(row, dict) and str(row.get("node_id", "")).strip()
+        }
+        node_ids = sorted(set(node_map_base.keys()) | set(node_map_cand.keys()))
+        node_deltas: list[dict[str, Any]] = []
+        for node_id in node_ids:
+            b = dict(node_map_base.get(node_id, {}) or {})
+            c = dict(node_map_cand.get(node_id, {}) or {})
+            node_deltas.append(
+                {
+                    "node_id": node_id,
+                    "exists_in_base": bool(b),
+                    "exists_in_candidate": bool(c),
+                    "signal_from": str(b.get("signal", "")),
+                    "signal_to": str(c.get("signal", "")),
+                    "signal_changed": str(b.get("signal", "")) != str(c.get("signal", "")),
+                    "confidence_delta": round(
+                        self._safe_float(c.get("confidence", 0.0), default=0.0)
+                        - self._safe_float(b.get("confidence", 0.0), default=0.0),
+                        4,
+                    ),
+                    "veto_from": bool(b.get("veto", False)),
+                    "veto_to": bool(c.get("veto", False)),
+                }
+            )
+
+        quality_delta = {
+            "status_from": str(base_quality.get("status", "")),
+            "status_to": str(cand_quality.get("status", "")),
+            "status_changed": str(base_quality.get("status", "")) != str(cand_quality.get("status", "")),
+            "overall_score_delta": round(
+                self._safe_float(cand_quality.get("overall_score", 0.0), default=0.0)
+                - self._safe_float(base_quality.get("overall_score", 0.0), default=0.0),
+                4,
+            ),
+            "coverage_ratio_delta": round(
+                self._safe_float(cand_quality.get("coverage_ratio", 0.0), default=0.0)
+                - self._safe_float(base_quality.get("coverage_ratio", 0.0), default=0.0),
+                4,
+            ),
+            "consistency_score_delta": round(
+                self._safe_float(cand_quality.get("consistency_score", 0.0), default=0.0)
+                - self._safe_float(base_quality.get("consistency_score", 0.0), default=0.0),
+                4,
+            ),
+            "freshness_score_delta": round(
+                self._safe_float(cand_quality.get("evidence_freshness_score", 0.0), default=0.0)
+                - self._safe_float(base_quality.get("evidence_freshness_score", 0.0), default=0.0),
+                4,
+            ),
+        }
+        decision_delta = {
+            "signal_from": str(base_decision.get("signal", "hold")),
+            "signal_to": str(cand_decision.get("signal", "hold")),
+            "signal_changed": str(base_decision.get("signal", "hold")) != str(cand_decision.get("signal", "hold")),
+            "confidence_delta": round(
+                self._safe_float(cand_decision.get("confidence", 0.0), default=0.0)
+                - self._safe_float(base_decision.get("confidence", 0.0), default=0.0),
+                4,
+            ),
+        }
+        summary: list[str] = []
+        if quality_delta["status_changed"]:
+            summary.append(f"质量状态变化：{quality_delta['status_from']} -> {quality_delta['status_to']}")
+        if decision_delta["signal_changed"]:
+            summary.append(f"决策信号变化：{decision_delta['signal_from']} -> {decision_delta['signal_to']}")
+        top_module_shift = sorted(module_deltas, key=lambda x: abs(self._safe_float(x.get("quality_delta", 0.0), default=0.0)), reverse=True)[:3]
+        for row in top_module_shift:
+            if abs(self._safe_float(row.get("quality_delta", 0.0), default=0.0)) >= 0.01:
+                summary.append(f"模块 {row['module_id']} 质量变化 {self._safe_float(row['quality_delta'], default=0.0):+.2f}")
+        if not summary:
+            summary.append("版本间结构化差异较小。")
+        return {
+            "base_version": int(base.get("version", 0) or 0),
+            "candidate_version": int(candidate.get("version", 0) or 0),
+            "schema_version": str(candidate.get("schema_version", self._report_bundle_schema_version) or self._report_bundle_schema_version),
+            "quality_delta": quality_delta,
+            "decision_delta": decision_delta,
+            "module_deltas": module_deltas,
+            "node_deltas": node_deltas,
+            "summary": summary[:8],
+        }
+
     def report_versions(self, token: str, report_id: str) -> list[dict[str, Any]]:
-        return self.web.report_versions(token, report_id)
+        rows = self.web.report_version_rows(token, report_id, limit=50)
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._load_report_payload_from_version_row(report_id, row)
+            quality = dict(payload.get("quality_dashboard", {}) or {})
+            decision = dict(payload.get("final_decision", {}) or {})
+            items.append(
+                {
+                    "version": int(payload.get("version", 0) or 0),
+                    "created_at": str(payload.get("created_at", "")),
+                    "schema_version": str(payload.get("schema_version", self._report_bundle_schema_version)),
+                    "signal": str(decision.get("signal", "hold")),
+                    "confidence": float(decision.get("confidence", 0.0) or 0.0),
+                    "quality_status": str(quality.get("status", "unknown")),
+                    "quality_score": float(quality.get("overall_score", 0.0) or 0.0),
+                    "module_count": len(list(payload.get("report_modules", []) or [])),
+                    "analysis_node_count": len(list(payload.get("analysis_nodes", []) or [])),
+                    "evidence_freshness_score": float(quality.get("evidence_freshness_score", 0.0) or 0.0),
+                }
+            )
+        for idx in range(len(items)):
+            if idx + 1 >= len(items):
+                items[idx]["delta_vs_prev"] = {}
+                continue
+            curr = dict(items[idx])
+            prev = dict(items[idx + 1])
+            items[idx]["delta_vs_prev"] = {
+                "quality_score_delta": round(self._safe_float(curr.get("quality_score", 0.0), default=0.0) - self._safe_float(prev.get("quality_score", 0.0), default=0.0), 4),
+                "confidence_delta": round(self._safe_float(curr.get("confidence", 0.0), default=0.0) - self._safe_float(prev.get("confidence", 0.0), default=0.0), 4),
+                "signal_changed": str(curr.get("signal", "")) != str(prev.get("signal", "")),
+                "freshness_score_delta": round(
+                    self._safe_float(curr.get("evidence_freshness_score", 0.0), default=0.0)
+                    - self._safe_float(prev.get("evidence_freshness_score", 0.0), default=0.0),
+                    4,
+                ),
+            }
+        return items
+
+    def report_versions_diff(
+        self,
+        token: str,
+        report_id: str,
+        *,
+        base_version: int | None = None,
+        candidate_version: int | None = None,
+    ) -> dict[str, Any]:
+        rows = self.web.report_version_rows(token, report_id, limit=80)
+        if not rows:
+            return {"error": "not_found", "report_id": report_id}
+        payload_by_version = {
+            int(row.get("version", 0) or 0): self._load_report_payload_from_version_row(report_id, row)
+            for row in rows
+        }
+        versions = sorted(payload_by_version.keys(), reverse=True)
+        candidate_v = int(candidate_version or versions[0])
+        if candidate_v not in payload_by_version:
+            return {"error": "candidate_version_not_found", "report_id": report_id, "candidate_version": candidate_v}
+        if base_version is not None:
+            base_v = int(base_version)
+        else:
+            lower = [v for v in versions if v < candidate_v]
+            base_v = int(lower[0]) if lower else int(candidate_v)
+        if base_v not in payload_by_version:
+            return {"error": "base_version_not_found", "report_id": report_id, "base_version": base_v}
+        base_payload = payload_by_version[base_v]
+        candidate_payload = payload_by_version[candidate_v]
+        diff_payload = self._build_report_version_diff_payload(base=base_payload, candidate=candidate_payload)
+        return {
+            "report_id": report_id,
+            "available_versions": versions,
+            "diff": diff_payload,
+            "base_snapshot": {
+                "version": int(base_payload.get("version", 0) or 0),
+                "signal": str((base_payload.get("final_decision", {}) or {}).get("signal", "hold")),
+                "quality_status": str((base_payload.get("quality_dashboard", {}) or {}).get("status", "unknown")),
+            },
+            "candidate_snapshot": {
+                "version": int(candidate_payload.get("version", 0) or 0),
+                "signal": str((candidate_payload.get("final_decision", {}) or {}).get("signal", "hold")),
+                "quality_status": str((candidate_payload.get("quality_dashboard", {}) or {}).get("status", "unknown")),
+            },
+        }
 
     def report_export(self, token: str, report_id: str, *, format: str = "markdown") -> dict[str, Any]:
         payload = self.web.report_export(token, report_id)
@@ -6727,14 +7098,31 @@ class AShareAgentService:
 
         # Prefer in-memory enriched payload so export can include modules/quality board.
         cached = self._reports.get(report_id)
+        persisted_payload: dict[str, Any] = {}
+        raw_payload_json = str(payload.get("payload_json", "")).strip()
+        if raw_payload_json:
+            try:
+                parsed = json.loads(raw_payload_json)
+                if isinstance(parsed, dict):
+                    persisted_payload = parsed
+            except Exception:
+                persisted_payload = {}
         report_payload = self._sanitize_report_payload(dict(cached)) if isinstance(cached, dict) else {}
+        if not report_payload and persisted_payload:
+            report_payload = self._sanitize_report_payload(dict(persisted_payload))
         report_payload["report_id"] = report_id
         report_payload["version"] = int(payload.get("version", 0) or 0)
         if not str(report_payload.get("markdown", "")).strip():
             report_payload["markdown"] = self._sanitize_report_text(str(payload.get("markdown", "")))
+        report_payload["schema_version"] = str(
+            report_payload.get("schema_version")
+            or persisted_payload.get("schema_version")
+            or self._report_bundle_schema_version
+        )
 
         module_markdown = self._render_report_module_markdown(report_payload)
         json_bundle = {
+            "schema_version": str(report_payload.get("schema_version", self._report_bundle_schema_version)),
             "report_id": report_id,
             "version": report_payload.get("version", 0),
             "stock_code": str(report_payload.get("stock_code", "")),
@@ -6746,6 +7134,7 @@ class AShareAgentService:
             "quality_dashboard": dict(report_payload.get("quality_dashboard", {}) or {}),
             "metric_snapshot": dict(report_payload.get("metric_snapshot", {}) or {}),
             "quality_gate": dict(report_payload.get("quality_gate", {}) or {}),
+            "evidence_refs": list(report_payload.get("evidence_refs", []) or []),
         }
         if export_format == "module_markdown":
             content = module_markdown
@@ -6760,6 +7149,7 @@ class AShareAgentService:
         return {
             "report_id": report_id,
             "version": report_payload.get("version", 0),
+            "schema_version": str(report_payload.get("schema_version", self._report_bundle_schema_version)),
             "format": export_format,
             "media_type": media_type,
             "content": content,

@@ -112,6 +112,7 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("metric_snapshot", generated)
         self.assertIn("analysis_nodes", generated)
         self.assertIn("quality_dashboard", generated)
+        self.assertIn("schema_version", generated)
         modules = generated.get("report_modules", [])
         if isinstance(modules, list) and modules:
             self.assertIn("module_quality_score", modules[0])
@@ -127,6 +128,10 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("committee", loaded)
         self.assertIn("metric_snapshot", loaded)
         self.assertIn("quality_dashboard", loaded)
+        evidence_refs = generated.get("evidence_refs", [])
+        if isinstance(evidence_refs, list) and evidence_refs:
+            self.assertIn("freshness_score", evidence_refs[0])
+            self.assertIn("freshness_tier", evidence_refs[0])
 
         # Export should support multiple formats for downstream delivery.
         export_markdown = self.svc.report_export("", generated["report_id"], format="module_markdown")
@@ -135,6 +140,37 @@ class ServiceTestCase(unittest.TestCase):
         export_json = self.svc.report_export("", generated["report_id"], format="json_bundle")
         self.assertEqual(str(export_json.get("format", "")), "json_bundle")
         self.assertIsInstance(export_json.get("json_bundle"), dict)
+        self.assertIn("schema_version", export_json.get("json_bundle", {}))
+
+        # Persist one more version and verify structured diff output.
+        latest_payload = dict(self.svc._reports.get(generated["report_id"], {}) or {})
+        latest_payload["schema_version"] = str(latest_payload.get("schema_version", "2.2.0"))
+        latest_payload["final_decision"] = {
+            **dict(latest_payload.get("final_decision", {}) or {}),
+            "signal": "reduce",
+            "confidence": 0.31,
+        }
+        latest_payload["quality_dashboard"] = {
+            **dict(latest_payload.get("quality_dashboard", {}) or {}),
+            "status": "degraded",
+            "overall_score": 0.36,
+        }
+        self.svc.web.save_report_index(
+            report_id=generated["report_id"],
+            user_id=1,
+            tenant_id=1,
+            stock_code="SH600000",
+            report_type="fact",
+            markdown=str(latest_payload.get("markdown", "")),
+            payload_json=json.dumps(latest_payload, ensure_ascii=False),
+        )
+        versions = self.svc.report_versions("", generated["report_id"])
+        self.assertGreaterEqual(len(versions), 2)
+        self.assertIn("delta_vs_prev", versions[0])
+        diff = self.svc.report_versions_diff("", generated["report_id"])
+        self.assertEqual(str((diff.get("diff", {}) or {}).get("base_version", "")), str(min(v.get("version", 0) for v in versions)))
+        self.assertEqual(str((diff.get("diff", {}) or {}).get("candidate_version", "")), str(max(v.get("version", 0) for v in versions)))
+        self.assertIn("module_deltas", diff.get("diff", {}))
 
     def test_report_task_lifecycle(self) -> None:
         task = self.svc.report_task_create(
@@ -148,6 +184,7 @@ class ServiceTestCase(unittest.TestCase):
         final_status = ""
         for _ in range(120):
             snapshot = self.svc.report_task_get(task_id)
+            self.assertIn("report_quality_dashboard", snapshot)
             final_status = str(snapshot.get("status", ""))
             if final_status in {"completed", "failed", "partial_ready"}:
                 break

@@ -1145,6 +1145,7 @@ class WebAppService:
         run_id: str = "",
         pool_snapshot_id: str = "",
         template_id: str = "",
+        payload_json: str = "{}",
     ) -> None:
         self.store.execute(
             """
@@ -1156,8 +1157,8 @@ class WebAppService:
         existing = self.store.query_one("SELECT MAX(version) AS v FROM report_version WHERE report_id = ?", (report_id,))
         next_version = int(existing["v"] or 0) + 1
         self.store.execute(
-            "INSERT INTO report_version (report_id, version, markdown) VALUES (?, ?, ?)",
-            (report_id, next_version, markdown),
+            "INSERT INTO report_version (report_id, version, markdown, payload_json) VALUES (?, ?, ?, ?)",
+            (report_id, next_version, markdown, str(payload_json or "{}")),
         )
 
     def report_list(self, token: str) -> list[dict[str, Any]]:
@@ -1175,19 +1176,32 @@ class WebAppService:
     def report_versions(self, token: str, report_id: str) -> list[dict[str, Any]]:
         _ = self.auth_me(token)
         return self.store.query_all(
-            "SELECT version, created_at FROM report_version WHERE report_id = ? ORDER BY version DESC",
+            "SELECT version, created_at, payload_json FROM report_version WHERE report_id = ? ORDER BY version DESC",
             (report_id,),
+        )
+
+    def report_version_rows(self, token: str, report_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
+        _ = self.auth_me(token)
+        safe_limit = max(1, min(200, int(limit)))
+        return self.store.query_all(
+            "SELECT version, created_at, markdown, payload_json FROM report_version WHERE report_id = ? ORDER BY version DESC LIMIT ?",
+            (report_id, safe_limit),
         )
 
     def report_export(self, token: str, report_id: str) -> dict[str, Any]:
         _ = self.auth_me(token)
         latest = self.store.query_one(
-            "SELECT markdown, version FROM report_version WHERE report_id = ? ORDER BY version DESC LIMIT 1",
+            "SELECT markdown, version, payload_json FROM report_version WHERE report_id = ? ORDER BY version DESC LIMIT 1",
             (report_id,),
         )
         if not latest:
             return {"error": "not_found"}
-        return {"report_id": report_id, "version": latest["version"], "markdown": latest["markdown"]}
+        return {
+            "report_id": report_id,
+            "version": latest["version"],
+            "markdown": latest["markdown"],
+            "payload_json": str(latest.get("payload_json", "{}") or "{}"),
+        }
 
     # ----------------- Docs center -----------------
     def doc_upsert(self, *, doc_id: str, filename: str, parse_confidence: float, needs_review: bool, user_id: int | None = None, tenant_id: int | None = None) -> None:

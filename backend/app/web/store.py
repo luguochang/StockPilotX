@@ -610,6 +610,8 @@ class WebStore:
             self._ensure_column("report_index", "run_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("report_index", "pool_snapshot_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("report_index", "template_id", "TEXT NOT NULL DEFAULT ''")
+            # Keep one structured snapshot per report version for version-diff and JSON export.
+            self._ensure_column("report_version", "payload_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column("deep_think_round", "task_graph", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column("deep_think_round", "replan_triggered", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("deep_think_round", "stop_reason", "TEXT NOT NULL DEFAULT ''")
