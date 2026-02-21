@@ -42,6 +42,43 @@ StockPilotX通过AI技术解决这些痛点：
 
 ---
 
+## 📸 功能展示
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/asset/首页.png" alt="首页" />
+      <p align="center"><b>首页 - 股票搜索</b></p>
+    </td>
+    <td width="50%">
+      <img src="docs/asset/预测研究台.png" alt="预测研究台" />
+      <p align="center"><b>预测研究台 - 多Agent协作</b></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="docs/asset/deepthink_01.png" alt="Deep Think" />
+      <p align="center"><b>Deep Think - 深度推理</b></p>
+    </td>
+    <td width="50%">
+      <img src="docs/asset/报告中心_01.png" alt="报告中心" />
+      <p align="center"><b>报告中心 - 历史报告管理</b></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="docs/asset/关注池.png" alt="关注池" />
+      <p align="center"><b>关注池 - 自选股管理</b></p>
+    </td>
+    <td width="50%">
+      <img src="docs/asset/deepthink_02.png" alt="Deep Think 详情" />
+      <p align="center"><b>Deep Think - 推理详情</b></p>
+    </td>
+  </tr>
+</table>
+
+---
+
 ## 🎯 核心业务场景
 
 ### 场景1：股票投资决策
@@ -324,10 +361,9 @@ def run_stream(state: AgentState):
 
 - Python 3.11+
 - Node.js 18+
-- Docker & Docker Compose（推荐）
 - OpenAI API Key 或 Anthropic API Key
 
-### 方式一：Docker一键启动（推荐）
+### 本地启动
 
 ```bash
 # 1. Clone项目
@@ -338,34 +374,13 @@ cd StockPilotX
 cp backend/config/llm_providers.example.json backend/config/llm_providers.local.json
 # 编辑llm_providers.local.json，配置你的API Key
 
-# 3. 配置环境变量（可选）
-export PRIMARY_LLM_API_KEY=your_api_key_here
-
-# 4. 启动所有服务
-docker-compose up -d
-
-# 5. 查看日志
-docker-compose logs -f
-
-# 6. 访问应用
-# 前端：http://localhost:3000
-# 后端API：http://localhost:8000
-# API文档：http://localhost:8000/docs
-```
-
-### 方式二：本地开发环境
-
-```bash
-# 1. Clone项目
-git clone https://github.com/luguochang/StockPilotX.git
-cd StockPilotX
-
-# 2. 配置LLM提供商
-cp backend/config/llm_providers.example.json backend/config/llm_providers.local.json
-# 编辑llm_providers.local.json
-
 # 3. 配置环境变量
+# Linux/Mac
 export PRIMARY_LLM_API_KEY=your_api_key_here
+# Windows PowerShell
+$env:PRIMARY_LLM_API_KEY="your_api_key_here"
+# Windows CMD
+set PRIMARY_LLM_API_KEY=your_api_key_here
 
 # 4. 启动后端
 cd backend

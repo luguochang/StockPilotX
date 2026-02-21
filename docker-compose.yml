@@ -9,6 +9,14 @@ services:
     environment:
       - APP_ENV=prod
       - JWT_SECRET=change-me
+      - PRIMARY_LLM_API_KEY=${PRIMARY_LLM_API_KEY}
+      - SECONDARY_LLM_API_KEY=${SECONDARY_LLM_API_KEY}
+    volumes:
+      - ./backend/config:/app/backend/config
+      - ./backend/data:/app/backend/data
+    depends_on:
+      - redis
+
   frontend:
     build:
       context: .
@@ -16,7 +24,16 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_BASE=http://backend:8000
+      - NEXT_PUBLIC_API_BASE=http://localhost:8000
     depends_on:
       - backend
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
