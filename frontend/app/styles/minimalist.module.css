@@ -1,0 +1,98 @@
+.heroMinimal {
+  min-height: 60vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-primary);
+  padding: 80px 40px;
+}
+
+.heroTitle {
+  font-size: var(--font-size-hero);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.heroSubtitle {
+  font-size: 20px;
+  color: var(--color-text-secondary);
+  line-height: 1.8;
+  max-width: 600px;
+  margin: 24px auto 48px;
+  text-align: center;
+}
+
+.featureGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--spacing-lg);
+  margin-top: var(--spacing-xl);
+  padding: 0 40px;
+  max-width: 1400px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.featureCard {
+  border: 0.5px solid var(--color-border);
+  border-radius: var(--radius-none);
+  padding: var(--spacing-lg) var(--spacing-md);
+  background: var(--color-bg-primary);
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+  cursor: pointer;
+}
+
+.featureCard:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--shadow-lg);
+}
+
+.featureTitle {
+  font-size: var(--font-size-h3);
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin-bottom: 16px;
+}
+
+.featureDesc {
+  font-size: var(--font-size-body);
+  color: var(--color-text-secondary);
+  line-height: 1.8;
+  margin-bottom: var(--spacing-md);
+}
+
+.featureButton {
+  display: inline-block;
+  padding: 12px 24px;
+  background: var(--color-primary);
+  color: white;
+  text-decoration: none;
+  border-radius: var(--radius-none);
+  font-size: var(--font-size-body);
+  font-weight: 500;
+  transition: opacity 0.2s ease;
+}
+
+.featureButton:hover {
+  opacity: 0.9;
+  color: white;
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+  .heroMinimal {
+    padding: 40px 20px;
+  }
+
+  .featureGrid {
+    padding: 0 20px;
+    gap: var(--spacing-md);
+  }
+
+  .featureCard {
+    padding: var(--spacing-md) var(--spacing-sm);
+  }
+}

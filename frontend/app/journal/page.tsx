@@ -2,14 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Alert, Button, Card, Col, Collapse, Flex, Form, Input, Row, Select, Steps, Switch, Table, Tabs, Tag, Typography, message } from "antd";
+import { Alert, Button, Card, Col, Flex, Form, Input, Progress, Row, Select, Switch, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
 const { Title, Paragraph, Text } = Typography;
 
-type JournalType = "decision" | "reflection" | "learning";
-type TemplateId = "decision" | "risk" | "review";
+type JournalStatus = "open" | "review_due" | "closed";
+type OutcomeRating = "" | "good" | "neutral" | "bad";
 
 type JournalItem = {
   journal_id: number;
@@ -18,98 +18,115 @@ type JournalItem = {
   content: string;
   stock_code: string;
   decision_type: string;
+  related_research_id: string;
+  related_portfolio_id: number | null;
   tags: string[];
   sentiment: string;
+  source_type: string;
+  source_ref_id: string;
+  status: JournalStatus;
+  review_due_at: string;
+  executed_as_planned: boolean;
+  outcome_rating: OutcomeRating;
+  outcome_note: string;
+  deviation_reason: string;
+  closed_at: string;
   created_at: string;
-  reflection_count?: number;
-  has_ai_reflection?: boolean;
+  updated_at: string;
+  is_overdue?: boolean;
 };
 
-type ReflectionItem = {
-  reflection_id: number;
-  reflection_content: string;
-  created_at: string;
+type PortfolioItem = {
+  portfolio_id: number;
+  portfolio_name: string;
 };
 
-type AiReflection = {
-  status: string;
-  summary: string;
-  insights: string[];
-  lessons: string[];
-  confidence: number;
-  generated_at: string;
-};
-
-type Insights = {
-  total_journals: number;
-  stock_activity: Array<{ key: string; count: number }>;
-  keyword_profile: Array<{ keyword: string; count: number }>;
-  reflection_coverage: { reflection_coverage_rate: number; ai_reflection_coverage_rate: number };
-};
-
-type CreateForm = {
-  template_id: TemplateId;
+type TransactionItem = {
+  transaction_id: number;
   stock_code: string;
-  thesis: string;
-  custom_title: string;
-  custom_tags: string;
-  journal_type: JournalType;
-  decision_type: "buy" | "hold" | "reduce";
-  sentiment: "positive" | "neutral" | "negative";
+  transaction_type: string;
+  quantity: number;
+  price: number;
+  fee: number;
+  amount: number;
+  transaction_date: string;
 };
 
-type FilterForm = {
-  journal_type: string;
+type ExecutionBoard = {
+  status: string;
+  window_days: number;
+  new_logs_7d: number;
+  review_due_count: number;
+  overdue_count: number;
+  closed_count_30d: number;
+  execution_rate: number;
+  close_rate: number;
+  top_deviation_reasons: Array<{ reason: string; count: number }>;
+};
+
+type QuickCreateForm = {
+  stock_code: string;
+  event_type: "buy" | "sell" | "rebalance" | "watch";
+  review_days: number;
+  thesis: string;
+  tags: string;
+};
+
+type TransactionCreateForm = {
+  portfolio_id: number;
+  transaction_id: number;
+  review_days: number;
+};
+
+type QueueFilterForm = {
+  status: "" | JournalStatus;
   stock_code: string;
   limit: number;
 };
 
-const TEMPLATES: Record<TemplateId, { label: string; hint: string; journal_type: JournalType; decision_type: "buy" | "hold" | "reduce"; sentiment: "positive" | "neutral" | "negative"; tags: string[]; ai_focus: string; title_prefix: string }> = {
-  decision: {
-    label: "交易决策简报",
-    hint: "写清核心观点、触发条件、失效条件。",
-    journal_type: "decision",
-    decision_type: "hold",
-    sentiment: "neutral",
-    tags: ["decision", "thesis"],
-    ai_focus: "优先检查触发条件和失效条件是否可验证。",
-    title_prefix: "交易决策",
-  },
-  risk: {
-    label: "风险防守记录",
-    hint: "写清风险来源、风控阈值和执行动作。",
-    journal_type: "reflection",
-    decision_type: "reduce",
-    sentiment: "negative",
-    tags: ["risk", "drawdown"],
-    ai_focus: "优先检查风险识别盲区和风控阈值是否可执行。",
-    title_prefix: "风险防守",
-  },
-  review: {
-    label: "复盘改进记录",
-    hint: "写清结果偏差、原因和下次改进动作。",
-    journal_type: "learning",
-    decision_type: "hold",
-    sentiment: "neutral",
-    tags: ["review", "improvement"],
-    ai_focus: "优先输出可执行改进清单。",
-    title_prefix: "交易复盘",
-  },
+type ListFilterForm = {
+  stock_code: string;
+  journal_type: string;
+  limit: number;
+};
+
+type OutcomeForm = {
+  executed_as_planned: boolean;
+  outcome_rating: OutcomeRating;
+  outcome_note: string;
+  deviation_reason: string;
+  close: boolean;
 };
 
 function parseCommaItems(raw: string): string[] {
   return raw
     .split(",")
     .map((item) => item.trim())
-    .filter((item) => item.length > 0);
+    .filter((item) => item.length > 0)
+    .slice(0, 12);
+}
+
+function statusColor(status: string): string {
+  if (status === "closed") return "green";
+  if (status === "review_due") return "orange";
+  return "blue";
+}
+
+function sourceColor(sourceType: string): string {
+  if (sourceType === "transaction") return "cyan";
+  if (sourceType === "deepthink") return "purple";
+  return "default";
 }
 
 function friendlyError(messageText: string, fallback: string): string {
   const lower = messageText.toLowerCase();
   if (!messageText) return fallback;
-  if (lower.includes("journal_type")) return "日志类型无效，请切换模板后重试。";
-  if (lower.includes("http 500")) return "服务暂时繁忙，请稍后重试。";
-  if (lower.includes("http 404")) return "接口未找到，请检查后端服务是否最新。";
+  if (lower.includes("stock_code")) return "股票代码必填。";
+  if (lower.includes("portfolio_id")) return "请先选择组合。";
+  if (lower.includes("transaction_id")) return "请先选择交易记录。";
+  if (lower.includes("outcome_rating")) return "结果评级只支持 good / neutral / bad。";
+  if (lower.includes("http 404")) return "接口未找到，请确认后端已更新。";
+  if (lower.includes("http 500")) return "服务暂时异常，请稍后重试。";
   return messageText;
 }
 
@@ -124,30 +141,39 @@ async function parseOrThrow<T>(resp: Response, fallbackError: string): Promise<T
 
 export default function JournalPage() {
   const [messageApi, contextHolder] = message.useMessage();
-  const [createForm] = Form.useForm<CreateForm>();
-  const [filterForm] = Form.useForm<FilterForm>();
-  const [wizardStep, setWizardStep] = useState(0);
-  const [expertMode, setExpertMode] = useState(false);
-  const [advancedOpen, setAdvancedOpen] = useState<string[]>([]);
-  const [filterAdvancedOpen, setFilterAdvancedOpen] = useState<string[]>([]);
+  const [quickForm] = Form.useForm<QuickCreateForm>();
+  const [transactionForm] = Form.useForm<TransactionCreateForm>();
+  const [queueFilterForm] = Form.useForm<QueueFilterForm>();
+  const [listFilterForm] = Form.useForm<ListFilterForm>();
+  const [outcomeForm] = Form.useForm<OutcomeForm>();
+
+  const [quickCreating, setQuickCreating] = useState(false);
+  const [transactionCreating, setTransactionCreating] = useState(false);
+  const [queueLoading, setQueueLoading] = useState(false);
   const [listLoading, setListLoading] = useState(false);
-  const [createLoading, setCreateLoading] = useState(false);
-  const [reflectionLoading, setReflectionLoading] = useState(false);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [boardLoading, setBoardLoading] = useState(false);
+  const [portfolioLoading, setPortfolioLoading] = useState(false);
+  const [transactionLoading, setTransactionLoading] = useState(false);
+  const [outcomeLoading, setOutcomeLoading] = useState(false);
+
   const [journals, setJournals] = useState<JournalItem[]>([]);
+  const [reviewQueue, setReviewQueue] = useState<JournalItem[]>([]);
+  const [portfolios, setPortfolios] = useState<PortfolioItem[]>([]);
+  const [transactions, setTransactions] = useState<TransactionItem[]>([]);
+  const [board, setBoard] = useState<ExecutionBoard | null>(null);
+  const [boardWindowDays, setBoardWindowDays] = useState(90);
   const [selectedJournalId, setSelectedJournalId] = useState<number | null>(null);
-  const [reflections, setReflections] = useState<ReflectionItem[]>([]);
-  const [reflectionInput, setReflectionInput] = useState("");
-  const [aiFocus, setAiFocus] = useState("");
-  const [aiReflection, setAiReflection] = useState<AiReflection | null>(null);
-  const [insights, setInsights] = useState<Insights | null>(null);
 
-  const selectedTemplateId = Form.useWatch("template_id", createForm) as TemplateId | undefined;
-  const selectedTemplate = useMemo(() => TEMPLATES[selectedTemplateId ?? "decision"], [selectedTemplateId]);
-  const selectedJournal = useMemo(() => journals.find((item) => item.journal_id === selectedJournalId) ?? null, [journals, selectedJournalId]);
+  const watchedPortfolioId = Form.useWatch("portfolio_id", transactionForm) as number | undefined;
 
-  const journalColumns: ColumnsType<JournalItem> = [
+  const selectedJournal = useMemo(() => {
+    if (!selectedJournalId) return null;
+    const fromQueue = reviewQueue.find((item) => item.journal_id === selectedJournalId);
+    if (fromQueue) return fromQueue;
+    return journals.find((item) => item.journal_id === selectedJournalId) ?? null;
+  }, [journals, reviewQueue, selectedJournalId]);
+
+  const queueColumns: ColumnsType<JournalItem> = [
     {
       title: "日志",
       dataIndex: "title",
@@ -156,355 +182,587 @@ export default function JournalPage() {
         <Flex vertical gap={2}>
           <Text strong>{record.title}</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            {record.stock_code || "未绑定标的"} | {record.created_at}
+            {record.stock_code || "N/A"} | {record.created_at}
           </Text>
         </Flex>
       ),
     },
     {
-      title: "类型",
-      key: "type",
-      width: 160,
+      title: "状态",
+      key: "status",
+      width: 180,
       render: (_, record) => (
-        <Flex gap={6} wrap>
-          <Tag color="blue">{record.journal_type}</Tag>
-          <Tag>{record.decision_type || "none"}</Tag>
+        <Flex vertical gap={4}>
+          <Flex gap={6} wrap>
+            <Tag color={statusColor(record.status)}>{record.status}</Tag>
+            {record.is_overdue ? <Tag color="red">overdue</Tag> : null}
+          </Flex>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            due: {record.review_due_at || "--"}
+          </Text>
         </Flex>
       ),
     },
     {
-      title: "覆盖",
-      key: "coverage",
-      width: 140,
+      title: "来源",
+      key: "source",
+      width: 190,
       render: (_, record) => (
         <Flex vertical gap={2}>
-          <Text style={{ fontSize: 12 }}>手工: {Number(record.reflection_count ?? 0)}</Text>
-          <Text style={{ fontSize: 12 }}>AI: {record.has_ai_reflection ? "yes" : "no"}</Text>
+          <Tag color={sourceColor(record.source_type)}>{record.source_type}</Tag>
+          <Text type="secondary" style={{ fontSize: 12 }} ellipsis>
+            {record.source_ref_id || "manual"}
+          </Text>
         </Flex>
       ),
     },
   ];
 
-  async function loadJournals(values?: Partial<FilterForm>) {
-    const current = { ...filterForm.getFieldsValue(), ...(values ?? {}) };
+  const listColumns: ColumnsType<JournalItem> = [
+    {
+      title: "日志",
+      dataIndex: "title",
+      key: "title",
+      render: (_, record) => (
+        <Flex vertical gap={2}>
+          <Text strong>{record.title}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {record.stock_code || "N/A"} | {record.created_at}
+          </Text>
+        </Flex>
+      ),
+    },
+    {
+      title: "执行",
+      key: "outcome",
+      width: 220,
+      render: (_, record) => (
+        <Flex vertical gap={4}>
+          <Flex gap={6} wrap>
+            <Tag color={statusColor(record.status)}>{record.status}</Tag>
+            <Tag>{record.decision_type || "hold"}</Tag>
+            {record.executed_as_planned ? <Tag color="green">on-plan</Tag> : null}
+          </Flex>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            rating: {record.outcome_rating || "--"}
+          </Text>
+        </Flex>
+      ),
+    },
+  ];
+
+  async function loadPortfolios() {
+    setPortfolioLoading(true);
+    try {
+      const resp = await fetch(`${API_BASE}/v1/portfolio`);
+      const rows = await parseOrThrow<PortfolioItem[]>(resp, "加载组合失败");
+      const nextRows = Array.isArray(rows) ? rows : [];
+      setPortfolios(nextRows);
+      const current = Number(transactionForm.getFieldValue("portfolio_id") || 0);
+      if (!current && nextRows.length > 0) {
+        transactionForm.setFieldValue("portfolio_id", Number(nextRows[0].portfolio_id));
+      }
+    } catch (error) {
+      messageApi.error(error instanceof Error ? error.message : "加载组合失败");
+    } finally {
+      setPortfolioLoading(false);
+    }
+  }
+
+  async function loadTransactions(portfolioId: number, keepValue = false) {
+    setTransactionLoading(true);
+    try {
+      const resp = await fetch(`${API_BASE}/v1/portfolio/${portfolioId}/transactions?limit=200`);
+      const rows = await parseOrThrow<TransactionItem[]>(resp, "加载交易记录失败");
+      const nextRows = Array.isArray(rows) ? rows : [];
+      setTransactions(nextRows);
+      if (!keepValue) {
+        transactionForm.setFieldValue("transaction_id", undefined);
+      }
+    } catch (error) {
+      setTransactions([]);
+      messageApi.error(error instanceof Error ? error.message : "加载交易记录失败");
+    } finally {
+      setTransactionLoading(false);
+    }
+  }
+
+  async function loadJournals(values?: Partial<ListFilterForm>) {
+    const current = { ...listFilterForm.getFieldsValue(), ...(values ?? {}) };
     const query = new URLSearchParams();
-    if (current.journal_type) query.set("journal_type", current.journal_type);
     if (current.stock_code) query.set("stock_code", current.stock_code.trim().toUpperCase());
-    query.set("limit", String(current.limit || 40));
+    if (current.journal_type) query.set("journal_type", current.journal_type);
+    query.set("limit", String(current.limit || 60));
+
     setListLoading(true);
     try {
       const resp = await fetch(`${API_BASE}/v1/journal?${query.toString()}`);
-      const body = await parseOrThrow<JournalItem[]>(resp, "加载日志失败");
-      setJournals(Array.isArray(body) ? body : []);
-      if (selectedJournalId && !body.find((item) => item.journal_id === selectedJournalId)) setSelectedJournalId(null);
+      const rows = await parseOrThrow<JournalItem[]>(resp, "加载日志列表失败");
+      setJournals(Array.isArray(rows) ? rows : []);
     } catch (error) {
-      messageApi.error(error instanceof Error ? error.message : "加载日志失败");
+      messageApi.error(error instanceof Error ? error.message : "加载日志列表失败");
     } finally {
       setListLoading(false);
     }
   }
 
-  async function loadReflections(journalId: number) {
-    setReflectionLoading(true);
+  async function loadReviewQueue(values?: Partial<QueueFilterForm>) {
+    const current = { ...queueFilterForm.getFieldsValue(), ...(values ?? {}) };
+    const query = new URLSearchParams();
+    if (current.status) query.set("status", current.status);
+    if (current.stock_code) query.set("stock_code", current.stock_code.trim().toUpperCase());
+    query.set("limit", String(current.limit || 80));
+
+    setQueueLoading(true);
     try {
-      const resp = await fetch(`${API_BASE}/v1/journal/${journalId}/reflections?limit=80`);
-      const body = await parseOrThrow<ReflectionItem[]>(resp, "加载复盘失败");
-      setReflections(Array.isArray(body) ? body : []);
+      const resp = await fetch(`${API_BASE}/v1/journal/review-queue?${query.toString()}`);
+      const rows = await parseOrThrow<JournalItem[]>(resp, "加载复盘队列失败");
+      setReviewQueue(Array.isArray(rows) ? rows : []);
     } catch (error) {
-      messageApi.error(error instanceof Error ? error.message : "加载复盘失败");
+      messageApi.error(error instanceof Error ? error.message : "加载复盘队列失败");
     } finally {
-      setReflectionLoading(false);
+      setQueueLoading(false);
     }
   }
 
-  async function loadAIReflection(journalId: number) {
-    setAiLoading(true);
+  async function loadExecutionBoard(windowDays: number) {
+    setBoardLoading(true);
     try {
-      const resp = await fetch(`${API_BASE}/v1/journal/${journalId}/ai-reflection`);
-      const body = await parseOrThrow<AiReflection | Record<string, never>>(resp, "加载 AI 复盘失败");
-      if (body && typeof body === "object" && "status" in body) setAiReflection(body as AiReflection);
-      else setAiReflection(null);
+      const resp = await fetch(`${API_BASE}/v1/journal/execution-board?window_days=${windowDays}`);
+      const payload = await parseOrThrow<ExecutionBoard>(resp, "加载执行看板失败");
+      setBoard(payload);
     } catch (error) {
-      messageApi.error(error instanceof Error ? error.message : "加载 AI 复盘失败");
+      messageApi.error(error instanceof Error ? error.message : "加载执行看板失败");
     } finally {
-      setAiLoading(false);
+      setBoardLoading(false);
     }
   }
 
-  async function loadInsights() {
-    setInsightsLoading(true);
-    try {
-      const resp = await fetch(`${API_BASE}/v1/journal/insights?window_days=180&timeline_days=60&limit=600`);
-      const body = await parseOrThrow<Insights>(resp, "加载洞察失败");
-      setInsights(body);
-    } catch (error) {
-      messageApi.error(error instanceof Error ? error.message : "加载洞察失败");
-    } finally {
-      setInsightsLoading(false);
-    }
+  async function refreshJournalWorkspace() {
+    await Promise.all([
+      loadJournals(),
+      loadReviewQueue(),
+      loadExecutionBoard(boardWindowDays),
+    ]);
   }
 
-  async function handleCreate(values: CreateForm) {
-    setCreateLoading(true);
+  async function handleQuickCreate(values: QuickCreateForm) {
+    setQuickCreating(true);
     try {
-      // Guard every free-form field to avoid `trim` on undefined when optional fields are unmounted.
-      const templateId = (String(values?.template_id ?? "decision") as TemplateId);
-      const tpl = TEMPLATES[templateId];
-      const stockCode = String(values?.stock_code ?? "").trim().toUpperCase();
-      const thesisRaw = String(values?.thesis ?? "").trim();
-      const thesis = thesisRaw || `${stockCode} 当前按模板创建记录，后续补充更完整观点。`;
-      if (!stockCode) throw new Error("请先选择股票代码。");
-
-      const tags = Array.from(new Set([...tpl.tags, ...parseCommaItems(values.custom_tags || "")])).slice(0, 12);
-      // Two-step wizard default flow only needs template + stock; thesis is optional.
+      const stockCode = values.stock_code.trim().toUpperCase();
+      if (!stockCode) throw new Error("股票代码必填");
       const payload = {
-        journal_type: values.journal_type || tpl.journal_type,
-        title: String(values?.custom_title ?? "").trim() || `${tpl.title_prefix} ${stockCode}`,
         stock_code: stockCode,
-        decision_type: values.decision_type || tpl.decision_type,
-        tags,
-        sentiment: values.sentiment || tpl.sentiment,
-        auto_thesis: thesisRaw.length === 0,
-        thesis_hint: thesis,
-        content: [
-          `模板: ${tpl.label}`,
-          `核心观点: ${thesis}`,
-          "触发条件: （可补充）",
-          "失效条件: （可补充）",
-          "执行计划: （可补充）",
-        ].join("\n"),
+        event_type: values.event_type,
+        review_days: Number(values.review_days || 5),
+        thesis: values.thesis?.trim() ?? "",
+        tags: parseCommaItems(values.tags ?? ""),
       };
-      const resp = await fetch(`${API_BASE}/v1/journal`, {
+      const resp = await fetch(`${API_BASE}/v1/journal/quick`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const created = await parseOrThrow<JournalItem>(resp, "创建日志失败");
-      messageApi.success("日志创建成功");
-      createForm.setFieldValue("thesis", "");
-      createForm.setFieldValue("custom_title", "");
-      createForm.setFieldValue("custom_tags", "");
-      setAiFocus(tpl.ai_focus);
-      setWizardStep(0);
-      await Promise.all([loadJournals(), loadInsights()]);
+      const created = await parseOrThrow<JournalItem>(resp, "快速创建失败");
+      messageApi.success("日志已创建");
+      quickForm.setFieldValue("thesis", "");
+      quickForm.setFieldValue("tags", "");
       setSelectedJournalId(Number(created.journal_id));
+      await refreshJournalWorkspace();
     } catch (error) {
-      messageApi.error(error instanceof Error ? error.message : "创建日志失败");
+      messageApi.error(error instanceof Error ? error.message : "快速创建失败");
     } finally {
-      setCreateLoading(false);
+      setQuickCreating(false);
     }
   }
 
-  async function handleAddReflection() {
-    if (!selectedJournalId) return void messageApi.warning("请先选择一条日志");
-    if (!reflectionInput.trim()) return void messageApi.warning("请输入复盘内容");
-    setReflectionLoading(true);
+  async function handleCreateFromTransaction(values: TransactionCreateForm) {
+    setTransactionCreating(true);
     try {
-      const resp = await fetch(`${API_BASE}/v1/journal/${selectedJournalId}/reflections`, {
+      const payload = {
+        portfolio_id: Number(values.portfolio_id),
+        transaction_id: Number(values.transaction_id),
+        review_days: Number(values.review_days || 5),
+      };
+      const resp = await fetch(`${API_BASE}/v1/journal/from-transaction`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reflection_content: reflectionInput.trim() }),
+        body: JSON.stringify(payload),
       });
-      await parseOrThrow<ReflectionItem>(resp, "写入复盘失败");
-      setReflectionInput("");
-      messageApi.success("复盘已记录");
-      await Promise.all([loadReflections(selectedJournalId), loadJournals(), loadInsights()]);
+      const created = await parseOrThrow<JournalItem & { action?: string }>(resp, "交易联动创建失败");
+      const action = String(created.action || "created");
+      messageApi.success(action === "reused" ? "已复用已有日志" : "已按交易生成日志");
+      setSelectedJournalId(Number(created.journal_id));
+      await refreshJournalWorkspace();
     } catch (error) {
-      messageApi.error(error instanceof Error ? error.message : "写入复盘失败");
+      messageApi.error(error instanceof Error ? error.message : "交易联动创建失败");
     } finally {
-      setReflectionLoading(false);
+      setTransactionCreating(false);
     }
   }
 
-  async function handleGenerateAIReflection() {
-    if (!selectedJournalId) return void messageApi.warning("请先选择一条日志");
-    const focus = aiFocus.trim() || selectedTemplate.ai_focus;
-    setAiLoading(true);
+  async function handleOutcomeSubmit(values: OutcomeForm) {
+    if (!selectedJournalId) {
+      messageApi.warning("请先从列表或队列选择一条日志");
+      return;
+    }
+
+    setOutcomeLoading(true);
     try {
-      const resp = await fetch(`${API_BASE}/v1/journal/${selectedJournalId}/ai-reflection/generate`, {
-        method: "POST",
+      const payload = {
+        executed_as_planned: Boolean(values.executed_as_planned),
+        outcome_rating: String(values.outcome_rating || "").trim().toLowerCase(),
+        outcome_note: String(values.outcome_note || "").trim(),
+        deviation_reason: String(values.deviation_reason || "").trim(),
+        close: Boolean(values.close),
+      };
+      const resp = await fetch(`${API_BASE}/v1/journal/${selectedJournalId}/outcome`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ focus }),
+        body: JSON.stringify(payload),
       });
-      const generated = await parseOrThrow<AiReflection>(resp, "生成 AI 复盘失败");
-      setAiReflection(generated);
-      messageApi.success(generated.status === "ready" ? "AI 复盘生成完成" : "AI 复盘已回退为本地模板");
-      await Promise.all([loadJournals(), loadInsights()]);
+      const updated = await parseOrThrow<JournalItem>(resp, "回填执行结果失败");
+      messageApi.success(updated.status === "closed" ? "结果已保存并关闭" : "结果已保存");
+      await refreshJournalWorkspace();
     } catch (error) {
-      messageApi.error(error instanceof Error ? error.message : "生成 AI 复盘失败");
+      messageApi.error(error instanceof Error ? error.message : "回填执行结果失败");
     } finally {
-      setAiLoading(false);
+      setOutcomeLoading(false);
     }
   }
 
   useEffect(() => {
-    createForm.setFieldsValue({
-      template_id: "decision",
+    quickForm.setFieldsValue({
       stock_code: "SH600000",
+      event_type: "watch",
+      review_days: 5,
       thesis: "",
-      custom_title: "",
-      custom_tags: "",
-      journal_type: "decision",
-      decision_type: "hold",
-      sentiment: "neutral",
+      tags: "",
     });
-    filterForm.setFieldsValue({ journal_type: "", stock_code: "", limit: 40 });
-    setAiFocus(TEMPLATES.decision.ai_focus);
-    void Promise.all([loadJournals({ limit: 40 }), loadInsights()]);
+    transactionForm.setFieldsValue({ review_days: 5 });
+    queueFilterForm.setFieldsValue({ status: "", stock_code: "", limit: 80 });
+    listFilterForm.setFieldsValue({ stock_code: "", journal_type: "", limit: 60 });
+    void Promise.all([
+      loadPortfolios(),
+      loadJournals({ limit: 60 }),
+      loadReviewQueue({ limit: 80 }),
+      loadExecutionBoard(90),
+    ]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    createForm.setFieldsValue({
-      journal_type: selectedTemplate.journal_type,
-      decision_type: selectedTemplate.decision_type,
-      sentiment: selectedTemplate.sentiment,
-    });
-    setAiFocus(selectedTemplate.ai_focus);
-  }, [createForm, selectedTemplate]);
-
-  useEffect(() => {
-    if (!selectedJournalId) {
-      setReflections([]);
-      setAiReflection(null);
+    if (!watchedPortfolioId) {
+      setTransactions([]);
       return;
     }
-    void Promise.all([loadReflections(selectedJournalId), loadAIReflection(selectedJournalId)]);
+    void loadTransactions(Number(watchedPortfolioId));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedJournalId]);
+  }, [watchedPortfolioId]);
+
+  useEffect(() => {
+    if (!selectedJournal) {
+      outcomeForm.resetFields();
+      return;
+    }
+    outcomeForm.setFieldsValue({
+      executed_as_planned: Boolean(selectedJournal.executed_as_planned),
+      outcome_rating: (selectedJournal.outcome_rating || "") as OutcomeRating,
+      outcome_note: selectedJournal.outcome_note || "",
+      deviation_reason: selectedJournal.deviation_reason || "",
+      close: selectedJournal.status === "closed",
+    });
+  }, [selectedJournal, outcomeForm]);
 
   return (
     <main className="container">
       {contextHolder}
-      <motion.section initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
+      <motion.section initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35 }}>
         <Card className="premium-card" style={{ marginBottom: 12 }}>
-          <Flex vertical gap={10}>
-            <Tag color="processing" style={{ width: "fit-content" }}>Investment Journal Workspace</Tag>
-            <Title level={2} style={{ margin: 0 }}>投资日志工作台</Title>
-            <Paragraph style={{ margin: 0, color: "#475569", maxWidth: 820 }}>
-              默认采用两步向导：先选模板和股票，再写一句核心观点。高级字段已收纳到专家模式，减少输入负担。
+          <Flex vertical gap={8}>
+            <Tag color="processing" style={{ width: "fit-content" }}>
+              Journal Execution Ledger
+            </Tag>
+            <Title level={2} style={{ margin: 0 }}>
+              投资日志执行复盘账本
+            </Title>
+            <Paragraph style={{ margin: 0, color: "#475569", maxWidth: 860 }}>
+              主链路聚焦执行闭环：快速创建日志、从交易自动建日志、进入复盘队列、回填执行结果、在执行看板上观察偏差和完成率。
             </Paragraph>
           </Flex>
         </Card>
       </motion.section>
 
       <Row gutter={[12, 12]}>
-        <Col xs={24} xl={14}>
-          <Card className="premium-card" title="快速记录（两步向导）" style={{ marginBottom: 12 }}>
-            <Form<CreateForm> layout="vertical" form={createForm} onFinish={handleCreate}>
-              <Steps
-                size="small"
-                current={wizardStep}
-                items={[
-                  { title: "选择模板与股票" },
-                  { title: "补充核心观点（可选）" },
-                ]}
-                style={{ marginBottom: 12 }}
-              />
-
-              {wizardStep === 0 ? (
-                <Row gutter={10}>
-                  <Col xs={24} md={12}>
-                    <Form.Item name="template_id" label="模板" rules={[{ required: true, message: "请选择模板" }]}>
-                      <Select options={Object.entries(TEMPLATES).map(([key, val]) => ({ value: key, label: `${val.label} - ${val.hint}` }))} />
-                    </Form.Item>
-                  </Col>
-                  <Col xs={24} md={12}>
-                    <Form.Item name="stock_code" label="股票代码" rules={[{ required: true, message: "请输入股票代码" }]}>
-                      <Input placeholder="例如 SH600000" />
-                    </Form.Item>
-                  </Col>
-                </Row>
-              ) : (
-                <Form.Item name="thesis" label="核心观点（可选）">
-                  <Input.TextArea rows={5} placeholder="可选：输入一句观点；留空将由系统自动生成草稿。" />
-                </Form.Item>
-              )}
-
-              <Flex align="center" justify="space-between" style={{ marginBottom: 10 }}>
-                <Flex gap={8}>
-                  {wizardStep > 0 ? <Button onClick={() => setWizardStep(0)}>上一步</Button> : null}
-                  {wizardStep === 0 ? (
-                    <>
-                      <Button type="primary" htmlType="submit" loading={createLoading}>直接创建</Button>
-                      <Button onClick={() => setWizardStep(1)}>下一步完善观点</Button>
-                    </>
-                  ) : (
-                    <Button type="primary" htmlType="submit" loading={createLoading}>创建日志</Button>
-                  )}
-                </Flex>
-                <Flex gap={8} align="center">
-                  <Text type="secondary">专家模式</Text>
-                  <Switch checked={expertMode} onChange={setExpertMode} />
-                </Flex>
+        <Col xs={24} xl={12}>
+          <Card className="premium-card" title="快速创建日志（观点可选）">
+            <Form<QuickCreateForm> form={quickForm} layout="vertical" onFinish={(values) => void handleQuickCreate(values)}>
+              <Row gutter={10}>
+                <Col xs={24} md={10}>
+                  <Form.Item name="stock_code" label="股票代码" rules={[{ required: true, message: "请输入股票代码" }]}>
+                    <Input placeholder="SH600000" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={7}>
+                  <Form.Item name="event_type" label="事件类型" rules={[{ required: true, message: "请选择事件类型" }]}>
+                    <Select
+                      options={[
+                        { label: "买入", value: "buy" },
+                        { label: "卖出", value: "sell" },
+                        { label: "调仓", value: "rebalance" },
+                        { label: "观察", value: "watch" },
+                      ]}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={7}>
+                  <Form.Item name="review_days" label="复盘天数" rules={[{ required: true, message: "请选择复盘天数" }]}>
+                    <Select options={[3, 5, 7, 14, 30].map((day) => ({ label: `${day}天`, value: day }))} />
+                  </Form.Item>
+                </Col>
+              </Row>
+              <Form.Item name="thesis" label="一句观点（可选）">
+                <Input.TextArea rows={3} placeholder="可留空，后续在结果回填时补充" />
+              </Form.Item>
+              <Form.Item name="tags" label="标签（可选，逗号分隔）">
+                <Input placeholder="risk, earnings, breakout" />
+              </Form.Item>
+              <Flex justify="space-between" align="center">
+                <Text type="secondary">不依赖大模型，先把执行动作落表，后续再复盘。</Text>
+                <Button type="primary" htmlType="submit" loading={quickCreating}>
+                  创建日志
+                </Button>
               </Flex>
-
-              {expertMode ? (
-                <Collapse
-                  size="small"
-                  activeKey={advancedOpen}
-                  onChange={(keys) => setAdvancedOpen((Array.isArray(keys) ? keys : [keys]).map(String))}
-                  items={[{ key: "advanced", label: "专家字段（可选）", children: (
-                    <Flex vertical gap={8}>
-                      <Form.Item name="custom_title" label="自定义标题"><Input placeholder="可留空，系统自动生成标题" /></Form.Item>
-                      <Form.Item name="custom_tags" label="补充标签（逗号分隔）"><Input placeholder="估值, 风险, 仓位" /></Form.Item>
-                      <Row gutter={10}>
-                        <Col xs={24} md={8}>
-                          <Form.Item name="journal_type" label="日志类型">
-                            <Select options={[{ label: "决策", value: "decision" }, { label: "复盘", value: "reflection" }, { label: "学习", value: "learning" }]} />
-                          </Form.Item>
-                        </Col>
-                        <Col xs={24} md={8}>
-                          <Form.Item name="decision_type" label="决策方向">
-                            <Select options={[{ label: "买入", value: "buy" }, { label: "持有", value: "hold" }, { label: "减仓", value: "reduce" }]} />
-                          </Form.Item>
-                        </Col>
-                        <Col xs={24} md={8}>
-                          <Form.Item name="sentiment" label="情绪标签">
-                            <Select options={[{ label: "积极", value: "positive" }, { label: "中性", value: "neutral" }, { label: "谨慎", value: "negative" }]} />
-                          </Form.Item>
-                        </Col>
-                      </Row>
-                    </Flex>
-                  ) }]}
-                />
-              ) : null}
             </Form>
           </Card>
+        </Col>
 
-          <Card className="premium-card" title="日志列表">
-            <Form<FilterForm> form={filterForm} layout="inline" onFinish={(values) => void loadJournals(values)}>
-              <Form.Item name="stock_code" label="股票"><Input placeholder="SH600000" /></Form.Item>
-              <Form.Item name="limit" label="条数"><Select style={{ width: 110 }} options={[{ label: "20", value: 20 }, { label: "40", value: 40 }, { label: "80", value: 80 }]} /></Form.Item>
-              <Form.Item><Button htmlType="submit" loading={listLoading}>查询</Button></Form.Item>
+        <Col xs={24} xl={12}>
+          <Card
+            className="premium-card"
+            title="从交易自动建日志"
+            extra={
+              <Button size="small" loading={portfolioLoading} onClick={() => void loadPortfolios()}>
+                刷新组合
+              </Button>
+            }
+          >
+            <Form<TransactionCreateForm> form={transactionForm} layout="vertical" onFinish={(values) => void handleCreateFromTransaction(values)}>
+              <Row gutter={10}>
+                <Col xs={24} md={10}>
+                  <Form.Item name="portfolio_id" label="组合" rules={[{ required: true, message: "请选择组合" }]}>
+                    <Select
+                      loading={portfolioLoading}
+                      options={portfolios.map((item) => ({ label: `${item.portfolio_name} (#${item.portfolio_id})`, value: item.portfolio_id }))}
+                      placeholder={portfolios.length > 0 ? "请选择组合" : "暂无组合"}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={9}>
+                  <Form.Item name="transaction_id" label="交易记录" rules={[{ required: true, message: "请选择交易记录" }]}>
+                    <Select
+                      loading={transactionLoading}
+                      options={transactions.map((item) => ({
+                        label: `${item.stock_code} ${item.transaction_type.toUpperCase()} qty ${Number(item.quantity).toFixed(2)} @ ${Number(item.price).toFixed(2)} | ${item.transaction_date}`,
+                        value: item.transaction_id,
+                      }))}
+                      placeholder={watchedPortfolioId ? "请选择交易" : "先选择组合"}
+                      showSearch
+                      optionFilterProp="label"
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={5}>
+                  <Form.Item name="review_days" label="复盘天数" rules={[{ required: true, message: "请选择" }]}>
+                    <Select options={[3, 5, 7, 14, 30].map((day) => ({ label: `${day}天`, value: day }))} />
+                  </Form.Item>
+                </Col>
+              </Row>
+              <Flex justify="space-between" align="center">
+                <Text type="secondary">同一组合 + 同一交易会自动幂等复用同一条日志。</Text>
+                <Button type="primary" htmlType="submit" loading={transactionCreating}>
+                  生成/复用日志
+                </Button>
+              </Flex>
             </Form>
+          </Card>
+        </Col>
+      </Row>
 
-            <Collapse
-              size="small"
-              activeKey={filterAdvancedOpen}
-              onChange={(keys) => setFilterAdvancedOpen((Array.isArray(keys) ? keys : [keys]).map(String))}
-              style={{ marginTop: 10 }}
-              items={[
-                {
-                  key: "filter-advanced",
-                  label: "更多筛选（可选）",
-                  children: (
-                    <Form<FilterForm> form={filterForm} layout="inline">
-                      <Form.Item name="journal_type" label="类型">
-                        <Select style={{ width: 160 }} options={[{ label: "全部", value: "" }, { label: "决策", value: "decision" }, { label: "复盘", value: "reflection" }, { label: "学习", value: "learning" }]} />
-                      </Form.Item>
-                    </Form>
-                  ),
-                },
-              ]}
-            />
+      <Row gutter={[12, 12]} style={{ marginTop: 2 }}>
+        <Col xs={24} xl={15}>
+          <Card
+            className="premium-card"
+            title="复盘队列"
+            extra={
+              <Button size="small" loading={queueLoading} onClick={() => void loadReviewQueue()}>
+                刷新队列
+              </Button>
+            }
+          >
+            <Form<QueueFilterForm> form={queueFilterForm} layout="inline" onFinish={(values) => void loadReviewQueue(values)}>
+              <Form.Item name="status" label="状态">
+                <Select
+                  style={{ width: 150 }}
+                  options={[
+                    { label: "全部（open+review_due）", value: "" },
+                    { label: "open", value: "open" },
+                    { label: "review_due", value: "review_due" },
+                    { label: "closed", value: "closed" },
+                  ]}
+                />
+              </Form.Item>
+              <Form.Item name="stock_code" label="股票">
+                <Input placeholder="SH600000" style={{ width: 140 }} />
+              </Form.Item>
+              <Form.Item name="limit" label="条数">
+                <Select style={{ width: 100 }} options={[40, 80, 120, 200].map((n) => ({ label: String(n), value: n }))} />
+              </Form.Item>
+              <Form.Item>
+                <Button htmlType="submit" loading={queueLoading}>
+                  查询
+                </Button>
+              </Form.Item>
+            </Form>
 
             <Table<JournalItem>
               style={{ marginTop: 12 }}
               rowKey="journal_id"
+              size="small"
+              loading={queueLoading}
+              dataSource={reviewQueue}
+              columns={queueColumns}
+              pagination={{ pageSize: 8, showSizeChanger: false }}
+              rowClassName={(record) => (record.journal_id === selectedJournalId ? "ant-table-row-selected" : "")}
+              onRow={(record) => ({ onClick: () => setSelectedJournalId(record.journal_id) })}
+            />
+          </Card>
+        </Col>
+
+        <Col xs={24} xl={9}>
+          <Card
+            className="premium-card"
+            title="执行看板"
+            extra={
+              <Flex gap={8}>
+                <Select
+                  size="small"
+                  value={boardWindowDays}
+                  onChange={(value) => {
+                    setBoardWindowDays(value);
+                    void loadExecutionBoard(value);
+                  }}
+                  options={[30, 60, 90, 180, 365].map((d) => ({ label: `${d}天`, value: d }))}
+                />
+                <Button size="small" loading={boardLoading} onClick={() => void loadExecutionBoard(boardWindowDays)}>
+                  刷新
+                </Button>
+              </Flex>
+            }
+          >
+            {!board ? (
+              <Alert type="info" showIcon message="暂无看板数据" />
+            ) : (
+              <Flex vertical gap={10}>
+                <Row gutter={8}>
+                  <Col span={12}>
+                    <Card size="small">
+                      <Text type="secondary">近7天新增</Text>
+                      <Title level={4} style={{ margin: 0 }}>{board.new_logs_7d}</Title>
+                    </Card>
+                  </Col>
+                  <Col span={12}>
+                    <Card size="small">
+                      <Text type="secondary">待复盘</Text>
+                      <Title level={4} style={{ margin: 0 }}>{board.review_due_count}</Title>
+                    </Card>
+                  </Col>
+                </Row>
+                <Row gutter={8}>
+                  <Col span={12}>
+                    <Card size="small">
+                      <Text type="secondary">超期</Text>
+                      <Title level={4} style={{ margin: 0 }}>{board.overdue_count}</Title>
+                    </Card>
+                  </Col>
+                  <Col span={12}>
+                    <Card size="small">
+                      <Text type="secondary">已关闭</Text>
+                      <Title level={4} style={{ margin: 0 }}>{board.closed_count_30d}</Title>
+                    </Card>
+                  </Col>
+                </Row>
+                <Card size="small">
+                  <Flex vertical gap={6}>
+                    <Text>按计划执行率 {(board.execution_rate * 100).toFixed(1)}%</Text>
+                    <Progress percent={Math.round(board.execution_rate * 100)} size="small" />
+                    <Text>复盘闭环率 {(board.close_rate * 100).toFixed(1)}%</Text>
+                    <Progress percent={Math.round(board.close_rate * 100)} size="small" status="active" />
+                  </Flex>
+                </Card>
+                <Flex vertical gap={6}>
+                  <Text strong>主要偏差原因</Text>
+                  {board.top_deviation_reasons.length === 0 ? (
+                    <Text type="secondary">暂无偏差原因记录</Text>
+                  ) : (
+                    <Flex gap={6} wrap>
+                      {board.top_deviation_reasons.map((item) => (
+                        <Tag key={`${item.reason}-${item.count}`} color="orange">
+                          {item.reason} | {item.count}
+                        </Tag>
+                      ))}
+                    </Flex>
+                  )}
+                </Flex>
+              </Flex>
+            )}
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={[12, 12]} style={{ marginTop: 2 }}>
+        <Col xs={24} xl={14}>
+          <Card
+            className="premium-card"
+            title="日志列表"
+            extra={
+              <Button size="small" loading={listLoading} onClick={() => void loadJournals()}>
+                刷新日志
+              </Button>
+            }
+          >
+            <Form<ListFilterForm> form={listFilterForm} layout="inline" onFinish={(values) => void loadJournals(values)}>
+              <Form.Item name="stock_code" label="股票">
+                <Input placeholder="SH600000" style={{ width: 140 }} />
+              </Form.Item>
+              <Form.Item name="journal_type" label="类型">
+                <Select
+                  style={{ width: 150 }}
+                  options={[
+                    { label: "全部", value: "" },
+                    { label: "decision", value: "decision" },
+                    { label: "reflection", value: "reflection" },
+                    { label: "learning", value: "learning" },
+                  ]}
+                />
+              </Form.Item>
+              <Form.Item name="limit" label="条数">
+                <Select style={{ width: 100 }} options={[20, 40, 60, 100, 200].map((n) => ({ label: String(n), value: n }))} />
+              </Form.Item>
+              <Form.Item>
+                <Button htmlType="submit" loading={listLoading}>
+                  查询
+                </Button>
+              </Form.Item>
+            </Form>
+
+            <Table<JournalItem>
+              style={{ marginTop: 12 }}
+              rowKey="journal_id"
+              size="small"
               loading={listLoading}
               dataSource={journals}
-              columns={journalColumns}
+              columns={listColumns}
               pagination={{ pageSize: 8, showSizeChanger: false }}
               rowClassName={(record) => (record.journal_id === selectedJournalId ? "ant-table-row-selected" : "")}
               onRow={(record) => ({ onClick: () => setSelectedJournalId(record.journal_id) })}
@@ -513,85 +771,67 @@ export default function JournalPage() {
         </Col>
 
         <Col xs={24} xl={10}>
-          <Card className="premium-card" title="Journal 洞察看板" extra={<Button size="small" loading={insightsLoading} onClick={() => void loadInsights()}>刷新</Button>}>
-            {!insights ? (
-              <Alert type="info" showIcon message="暂无洞察数据，请先创建日志。" />
+          <Card className="premium-card" title={selectedJournal ? `结果回填 #${selectedJournal.journal_id}` : "结果回填"}>
+            {!selectedJournal ? (
+              <Alert type="info" showIcon message="请先在复盘队列或日志列表选择一条记录" />
             ) : (
               <Flex vertical gap={10}>
-                <Row gutter={10}>
-                  <Col span={8}><Card size="small"><Text type="secondary">日志总数</Text><Title level={4} style={{ margin: 0 }}>{insights.total_journals}</Title></Card></Col>
-                  <Col span={8}><Card size="small"><Text type="secondary">手工覆盖</Text><Title level={4} style={{ margin: 0 }}>{(insights.reflection_coverage.reflection_coverage_rate * 100).toFixed(1)}%</Title></Card></Col>
-                  <Col span={8}><Card size="small"><Text type="secondary">AI覆盖</Text><Title level={4} style={{ margin: 0 }}>{(insights.reflection_coverage.ai_reflection_coverage_rate * 100).toFixed(1)}%</Title></Card></Col>
-                </Row>
-                <Flex gap={6} wrap>{insights.stock_activity.slice(0, 6).map((item) => <Tag key={item.key}>{item.key} | {item.count}</Tag>)}</Flex>
-                <Flex gap={6} wrap>{insights.keyword_profile.slice(0, 8).map((item) => <Tag key={item.keyword} color="blue">{item.keyword} | {item.count}</Tag>)}</Flex>
+                <Card size="small">
+                  <Flex vertical gap={6}>
+                    <Paragraph style={{ margin: 0 }}>
+                      <Text strong>{selectedJournal.title}</Text>
+                    </Paragraph>
+                    <Flex gap={6} wrap>
+                      <Tag>{selectedJournal.stock_code || "N/A"}</Tag>
+                      <Tag color={statusColor(selectedJournal.status)}>{selectedJournal.status}</Tag>
+                      <Tag color={sourceColor(selectedJournal.source_type)}>{selectedJournal.source_type}</Tag>
+                      <Tag>{selectedJournal.decision_type || "hold"}</Tag>
+                    </Flex>
+                    <Text type="secondary">review_due_at: {selectedJournal.review_due_at || "--"}</Text>
+                  </Flex>
+                </Card>
+
+                <Form<OutcomeForm> form={outcomeForm} layout="vertical" onFinish={(values) => void handleOutcomeSubmit(values)}>
+                  <Row gutter={10}>
+                    <Col xs={24} md={12}>
+                      <Form.Item name="executed_as_planned" label="是否按计划执行" valuePropName="checked">
+                        <Switch checkedChildren="是" unCheckedChildren="否" />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} md={12}>
+                      <Form.Item name="outcome_rating" label="结果评级">
+                        <Select
+                          options={[
+                            { label: "未评级", value: "" },
+                            { label: "good", value: "good" },
+                            { label: "neutral", value: "neutral" },
+                            { label: "bad", value: "bad" },
+                          ]}
+                        />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                  <Form.Item name="deviation_reason" label="偏差原因（可选）">
+                    <Input placeholder="例如：入场时点过早 / 仓位过重 / 风险响应滞后" />
+                  </Form.Item>
+                  <Form.Item name="outcome_note" label="复盘结论（可选）">
+                    <Input.TextArea rows={4} placeholder="记录实际执行、偏差、下次改进动作" />
+                  </Form.Item>
+                  <Form.Item name="close" label="提交后关闭该日志" valuePropName="checked">
+                    <Switch checkedChildren="关闭" unCheckedChildren="保持开启" />
+                  </Form.Item>
+                  <Flex justify="space-between" align="center">
+                    <Button onClick={() => outcomeForm.resetFields()}>重置</Button>
+                    <Button type="primary" htmlType="submit" loading={outcomeLoading}>
+                      保存结果
+                    </Button>
+                  </Flex>
+                </Form>
               </Flex>
             )}
           </Card>
         </Col>
       </Row>
-
-      <Card className="premium-card" style={{ marginTop: 12 }} title={selectedJournal ? `日志详情 #${selectedJournal.journal_id}` : "日志详情"}>
-        {!selectedJournal ? (
-          <Alert type="info" showIcon message="请先在日志列表选择一条记录。" />
-        ) : (
-          <Tabs
-            items={[
-              {
-                key: "manual",
-                label: "手工复盘",
-                children: (
-                  <Flex vertical gap={10}>
-                    <Paragraph style={{ margin: 0, color: "#475569" }}>已选日志: <Text strong>{selectedJournal.title}</Text></Paragraph>
-                    <Input.TextArea rows={4} value={reflectionInput} onChange={(e) => setReflectionInput(e.target.value)} placeholder="记录偏差原因、执行问题、修正动作..." />
-                    <Flex gap={8}>
-                      <Button type="primary" loading={reflectionLoading} onClick={() => void handleAddReflection()}>提交手工复盘</Button>
-                      <Button loading={reflectionLoading} onClick={() => void loadReflections(selectedJournal.journal_id)}>刷新复盘列表</Button>
-                    </Flex>
-                    <Table<ReflectionItem>
-                      rowKey="reflection_id"
-                      size="small"
-                      loading={reflectionLoading}
-                      dataSource={reflections}
-                      pagination={{ pageSize: 5, showSizeChanger: false }}
-                      columns={[{ title: "内容", dataIndex: "reflection_content", key: "reflection_content", render: (value: string) => <Text>{value}</Text> }, { title: "时间", dataIndex: "created_at", key: "created_at", width: 180 }]}
-                    />
-                  </Flex>
-                ),
-              },
-              {
-                key: "ai",
-                label: "AI复盘",
-                children: (
-                  <Flex vertical gap={10}>
-                    <Input value={aiFocus} onChange={(e) => setAiFocus(e.target.value)} placeholder="AI复盘重点（可自定义）" />
-                    <Flex gap={8}>
-                      <Button type="primary" loading={aiLoading} onClick={() => void handleGenerateAIReflection()}>生成 AI 复盘</Button>
-                      <Button loading={aiLoading} onClick={() => void loadAIReflection(selectedJournal.journal_id)}>刷新 AI 结果</Button>
-                    </Flex>
-                    {!aiReflection ? (
-                      <Alert type="info" showIcon message="当前日志尚未生成 AI 复盘。" />
-                    ) : (
-                      <Card size="small">
-                        <Flex vertical gap={8}>
-                          <Flex gap={8} wrap>
-                            <Tag color={aiReflection.status === "ready" ? "green" : "orange"}>{aiReflection.status}</Tag>
-                            <Tag>confidence {aiReflection.confidence.toFixed(2)}</Tag>
-                            <Tag>{aiReflection.generated_at}</Tag>
-                          </Flex>
-                          <Paragraph style={{ margin: 0 }}>{aiReflection.summary}</Paragraph>
-                          <Flex vertical gap={4}><Text strong>洞察</Text>{aiReflection.insights.map((item) => <Text key={`insight-${item}`}>- {item}</Text>)}</Flex>
-                          <Flex vertical gap={4}><Text strong>改进动作</Text>{aiReflection.lessons.map((item) => <Text key={`lesson-${item}`}>- {item}</Text>)}</Flex>
-                        </Flex>
-                      </Card>
-                    )}
-                  </Flex>
-                ),
-              },
-            ]}
-          />
-        )}
-      </Card>
     </main>
   );
 }

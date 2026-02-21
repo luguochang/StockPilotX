@@ -44,6 +44,16 @@ def _exchange_from_code(code: str) -> str:
     return "UNKNOWN"
 
 
+def _exchange_name(exchange: str) -> str:
+    if exchange == "SH":
+        return "上交所"
+    if exchange == "SZ":
+        return "深交所"
+    if exchange == "BJ":
+        return "北交所"
+    return "未知"
+
+
 def _listing_board_from_code(code: str) -> str:
     raw = code[2:] if code.startswith(("SH", "SZ", "BJ")) else code
     if raw.startswith("68"):
@@ -71,6 +81,18 @@ def _market_tier(exchange: str, listing_board: str) -> str:
     return f"{exchange}-{listing_board}"
 
 
+def _board_code(listing_board: str) -> str:
+    if "主板" in listing_board:
+        return "MAIN"
+    if "创业" in listing_board:
+        return "GEM"
+    if "科创" in listing_board:
+        return "STAR"
+    if "北交" in listing_board:
+        return "BSE"
+    return "OTHER"
+
+
 class AShareUniverseSyncService:
     """A 股主数据同步（股票清单 + 行业层级）。"""
 
@@ -96,9 +118,14 @@ class AShareUniverseSyncService:
                 "stock_code": code,
                 "stock_name": str(row.get("name", "")).strip() or code,
                 "exchange": _exchange_from_code(code),
+                "exchange_name": _exchange_name(_exchange_from_code(code)),
                 "listing_board": _listing_board_from_code(code),
+                "board_code": _board_code(_listing_board_from_code(code)),
                 "market_tier": _market_tier(_exchange_from_code(code), _listing_board_from_code(code)),
                 "industry_l1": "",
+                "industry_l2": "",
+                "industry_l3": "",
+                "is_active": 1,
                 "source": "akshare:stock_info_a_code_name",
             }
 
@@ -123,9 +150,14 @@ class AShareUniverseSyncService:
                         "stock_code": code,
                         "stock_name": str(item.get("名称", "")).strip() or code,
                         "exchange": _exchange_from_code(code),
+                        "exchange_name": _exchange_name(_exchange_from_code(code)),
                         "listing_board": _listing_board_from_code(code),
+                        "board_code": _board_code(_listing_board_from_code(code)),
                         "market_tier": _market_tier(_exchange_from_code(code), _listing_board_from_code(code)),
                         "industry_l1": "",
+                        "industry_l2": "",
+                        "industry_l3": "",
+                        "is_active": 1,
                         "source": "akshare:stock_board_industry_cons_em",
                     }
                 if not stocks[code]["industry_l1"]:
@@ -152,6 +184,8 @@ class AShareUniverseSyncService:
         exchange: str = "",
         listing_board: str = "",
         industry_l1: str = "",
+        industry_l2: str = "",
+        industry_l3: str = "",
         market_tier: str = "",
         limit: int = 30,
     ) -> list[dict[str, Any]]:
@@ -173,15 +207,26 @@ class AShareUniverseSyncService:
         if industry_l1.strip():
             where.append("u.industry_l1 = ?")
             params.append(industry_l1.strip())
+        if industry_l2.strip():
+            where.append("u.industry_l2 = ?")
+            params.append(industry_l2.strip())
+        if industry_l3.strip():
+            where.append("u.industry_l3 = ?")
+            params.append(industry_l3.strip())
 
         sql = """
             SELECT
                 u.stock_code,
                 u.stock_name,
                 u.exchange,
+                u.exchange_name,
                 u.market_tier,
                 u.listing_board,
+                u.board_code,
                 u.industry_l1,
+                u.industry_l2,
+                u.industry_l3,
+                u.is_active,
                 u.updated_at
             FROM stock_universe u
         """
@@ -189,18 +234,31 @@ class AShareUniverseSyncService:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY u.stock_code LIMIT ?"
         params.append(max(1, min(int(limit), 200)))
-        return self.store.query_all(sql, tuple(params))
+        rows = self.store.query_all(sql, tuple(params))
+        for row in rows:
+            row["industry_path"] = "/".join(
+                [
+                    x
+                    for x in [row.get("industry_l1"), row.get("industry_l2"), row.get("industry_l3")]
+                    if str(x or "").strip()
+                ]
+            )
+        return rows
 
     def filters(self) -> dict[str, list[str]]:
         exchanges = self.store.query_all("SELECT DISTINCT exchange AS v FROM stock_universe ORDER BY exchange")
         boards = self.store.query_all("SELECT DISTINCT listing_board AS v FROM stock_universe ORDER BY listing_board")
         tiers = self.store.query_all("SELECT DISTINCT market_tier AS v FROM stock_universe WHERE market_tier <> '' ORDER BY market_tier")
         industries = self.store.query_all("SELECT DISTINCT industry_l1 AS v FROM stock_universe WHERE industry_l1 <> '' ORDER BY industry_l1")
+        industries_l2 = self.store.query_all("SELECT DISTINCT industry_l2 AS v FROM stock_universe WHERE industry_l2 <> '' ORDER BY industry_l2")
+        industries_l3 = self.store.query_all("SELECT DISTINCT industry_l3 AS v FROM stock_universe WHERE industry_l3 <> '' ORDER BY industry_l3")
         return {
             "exchange": [x["v"] for x in exchanges],
             "market_tier": [x["v"] for x in tiers],
             "listing_board": [x["v"] for x in boards],
             "industry_l1": [x["v"] for x in industries],
+            "industry_l2": [x["v"] for x in industries_l2],
+            "industry_l3": [x["v"] for x in industries_l3],
         }
 
     def _replace_universe(self, stocks: list[dict[str, Any]], industry_links: list[dict[str, str]]) -> None:
@@ -209,16 +267,24 @@ class AShareUniverseSyncService:
         for s in stocks:
             self.store.execute(
                 """
-                INSERT INTO stock_universe (stock_code, stock_name, exchange, market_tier, listing_board, industry_l1, source, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO stock_universe (
+                    stock_code, stock_name, exchange, exchange_name, market_tier, listing_board, board_code,
+                    industry_l1, industry_l2, industry_l3, is_active, source, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 (
                     str(s.get("stock_code", "")),
                     str(s.get("stock_name", "")),
                     str(s.get("exchange", "")),
+                    str(s.get("exchange_name", "")),
                     str(s.get("market_tier", "")),
                     str(s.get("listing_board", "")),
+                    str(s.get("board_code", "")),
                     str(s.get("industry_l1", "")),
+                    str(s.get("industry_l2", "")),
+                    str(s.get("industry_l3", "")),
+                    int(s.get("is_active", 1)),
                     str(s.get("source", "")),
                 ),
             )

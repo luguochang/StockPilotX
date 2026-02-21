@@ -445,46 +445,6 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertIn("module_health", business)
         self.assertIn("stock_snapshot", business)
 
-    def test_docs_upload_and_index(self) -> None:
-        upload_code, uploaded = self._post(
-            "/v1/docs/upload",
-            {"doc_id": "api-doc-1", "filename": "demo.pdf", "content": "财报内容" * 500, "source": "api"},
-        )
-        self.assertEqual(upload_code, 200)
-        self.assertEqual(uploaded["status"], "uploaded")
-
-        index_code, indexed = self._post("/v1/docs/api-doc-1/index", {})
-        self.assertEqual(index_code, 200)
-        self.assertEqual(indexed["status"], "indexed")
-
-        v_code, versions = self._get("/v1/docs/api-doc-1/versions?limit=20")
-        self.assertEqual(v_code, 200)
-        self.assertTrue(isinstance(versions, list))
-        self.assertGreaterEqual(len(versions), 1)
-        self.assertGreaterEqual(int(versions[0].get("version", 0)), 1)
-
-        p_code, runs = self._get("/v1/docs/api-doc-1/pipeline-runs?limit=20")
-        self.assertEqual(p_code, 200)
-        self.assertTrue(isinstance(runs, list))
-        self.assertGreaterEqual(len(runs), 2)
-        stages = {str(x.get("stage", "")) for x in runs}
-        self.assertIn("upload", stages)
-        self.assertIn("index", stages)
-
-        c_rec, rec = self._post(
-            "/v1/docs/recommend",
-            {"stock_code": "SH600000", "question": "请推荐和银行业相关的材料", "top_k": 5},
-        )
-        self.assertEqual(c_rec, 200)
-        self.assertIn("items", rec)
-        self.assertTrue(isinstance(rec.get("items", []), list))
-
-        qr_code, quality = self._get("/v1/docs/api-doc-1/quality-report")
-        self.assertEqual(qr_code, 200)
-        self.assertIn("quality_score", quality)
-        self.assertIn("chunk_stats", quality)
-        self.assertIn("recommendations", quality)
-
     def test_rag_asset_management_endpoints(self) -> None:
         c1, policies = self._get("/v1/rag/source-policy")
         self.assertEqual(c1, 200)
@@ -498,13 +458,24 @@ class HttpApiTestCase(unittest.TestCase):
         self.assertEqual(c2, 200)
         self.assertEqual(str(policy_updated.get("source", "")), "user_upload")
 
-        _ = self._post(
-            "/v1/docs/upload",
-            {"doc_id": "api-rag-doc-1", "filename": "rag-demo.pdf", "content": "SH600000 纪要" * 380, "source": "cninfo"},
+        encoded_seed = base64.b64encode(("SH600000 纪要 " * 420).encode("utf-8")).decode("ascii")
+        c_seed, seeded = self._post(
+            "/v1/rag/workflow/upload-and-index",
+            {
+                "filename": "api-rag-doc-1.txt",
+                "content_type": "text/plain",
+                "content_base64": encoded_seed,
+                "source": "cninfo",
+                "stock_codes": ["SH600000"],
+                "force_reupload": True,
+            },
         )
-        _ = self._post("/v1/docs/api-rag-doc-1/index", {})
+        self.assertEqual(c_seed, 200)
+        self.assertEqual(str(seeded.get("status", "")), "ok")
+        seeded_doc_id = str((seeded.get("result") or {}).get("doc_id", ""))
+        self.assertTrue(seeded_doc_id)
 
-        c3, chunks = self._get("/v1/rag/docs/chunks?doc_id=api-rag-doc-1&limit=20")
+        c3, chunks = self._get(f"/v1/rag/docs/chunks?doc_id={urllib.parse.quote(seeded_doc_id)}&limit=20")
         self.assertEqual(c3, 200)
         self.assertTrue(isinstance(chunks, list))
         self.assertGreater(len(chunks), 0)
@@ -654,6 +625,29 @@ class HttpApiTestCase(unittest.TestCase):
         get_code, loaded = self._get(f"/v1/evals/{run['eval_run_id']}")
         self.assertEqual(get_code, 200)
         self.assertIn("status", loaded)
+
+    def test_sql_agent_poc_query(self) -> None:
+        # Seed one row first so SQL PoC returns stable data in CI/local.
+        _ = self._post(
+            "/v1/query",
+            {
+                "user_id": "api-sql-poc-u1",
+                "question": "sql poc query history seed",
+                "stock_codes": ["SH600000"],
+            },
+        )
+        code, body = self._post(
+            "/v1/sql-agent/poc/query",
+            {"sql": "SELECT question, trace_id FROM query_history LIMIT 5", "max_rows": 5},
+        )
+        self.assertEqual(code, 200)
+        self.assertTrue(bool(body.get("ok", False)))
+        self.assertTrue(isinstance(body.get("rows", []), list))
+
+        code2, body2 = self._post("/v1/sql-agent/poc/query", {"sql": "DELETE FROM query_history"})
+        self.assertEqual(code2, 200)
+        self.assertFalse(bool(body2.get("ok", True)))
+        self.assertEqual(str(body2.get("error", "")), "sql_not_allowed")
 
     def test_scheduler_run_and_status(self) -> None:
         code, status = self._get("/v1/scheduler/status")

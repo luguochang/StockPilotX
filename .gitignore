@@ -5,6 +5,7 @@ __pycache__/
 
 # Local virtual env
 .venv/
+.venv_*/
 
 # Runtime logs
 *.log
@@ -24,3 +25,36 @@ tmp_assets/
 tmp_*.txt
 *.tmp
 minimax-home.html
+nul
+
+# Blog articles (published to external platforms)
+docs/blog/
+
+# Claude Code
+.claude/
+
+# Playwright
+.playwright-cli/
+
+# IDE
+.idea/
+
+# Database files (local development)
+backend/data/*.db
+backend/data/*.db-journal
+
+# Backup files
+*.backup
+
+# Personal notes and planning docs
+docs/self/
+docs/v1/
+docs/2026-*/
+docs/*.pdf
+
+# Frontend build artifacts
+frontend/tsconfig.tsbuildinfo
+frontend/app/design-demo/
+
+# Test files
+test_anthropic_connectivity.py

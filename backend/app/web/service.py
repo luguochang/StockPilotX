@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from backend.app.stock.universe_sync import AShareUniverseSyncService
@@ -666,6 +666,47 @@ class WebAppService:
             raise ValueError("journal_type must be one of decision/reflection/learning")
         return kind
 
+    def _journal_normalize_source_type(self, source_type: str) -> str:
+        source = str(source_type or "").strip().lower() or "manual"
+        if source not in {"manual", "transaction", "deepthink"}:
+            raise ValueError("source_type must be one of manual/transaction/deepthink")
+        return source
+
+    def _journal_normalize_status(self, status: str) -> str:
+        value = str(status or "").strip().lower() or "open"
+        if value not in {"open", "review_due", "closed"}:
+            raise ValueError("status must be one of open/review_due/closed")
+        return value
+
+    @staticmethod
+    def _journal_parse_due_at(raw: Any) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            return ""
+        # Accept ISO-like datetime to reduce frontend formatting burden.
+        normalized = text.replace("T", " ").replace("Z", "").strip()
+        if len(normalized) == 10:
+            normalized = f"{normalized} 00:00:00"
+        return normalized[:19]
+
+    @staticmethod
+    def _journal_default_due_at(days: int) -> str:
+        due = datetime.now() + timedelta(days=max(1, min(365, int(days))))
+        return due.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _journal_parse_optional_bool(raw: Any, *, field_name: str) -> bool:
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, (int, float)):
+            return bool(raw)
+        text = str(raw or "").strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+        raise ValueError(f"{field_name} must be a boolean")
+
     def _journal_serialize_row(self, row: dict[str, Any]) -> dict[str, Any]:
         if not row:
             return {}
@@ -678,6 +719,15 @@ class WebAppService:
         )
         payload["tags"] = self._json_loads_or(payload.get("tags_json", "[]"), [])
         payload.pop("tags_json", None)
+        payload["executed_as_planned"] = bool(int(payload.get("executed_as_planned", 0) or 0))
+        payload["source_type"] = str(payload.get("source_type", "") or "manual")
+        payload["source_ref_id"] = str(payload.get("source_ref_id", "") or "")
+        payload["status"] = str(payload.get("status", "") or "open")
+        payload["review_due_at"] = str(payload.get("review_due_at", "") or "")
+        payload["outcome_rating"] = str(payload.get("outcome_rating", "") or "")
+        payload["outcome_note"] = str(payload.get("outcome_note", "") or "")
+        payload["deviation_reason"] = str(payload.get("deviation_reason", "") or "")
+        payload["closed_at"] = str(payload.get("closed_at", "") or "")
         return payload
 
     def _journal_ai_reflection_serialize_row(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -723,6 +773,15 @@ class WebAppService:
         related_portfolio_id: int | None = None,
         tags: Any = None,
         sentiment: str = "",
+        source_type: str = "manual",
+        source_ref_id: str = "",
+        status: str = "open",
+        review_due_at: str = "",
+        executed_as_planned: bool | int = False,
+        outcome_rating: str = "",
+        outcome_note: str = "",
+        deviation_reason: str = "",
+        closed_at: str = "",
     ) -> dict[str, Any]:
         me = self.auth_me(token)
         kind = self._journal_normalize_type(journal_type)
@@ -735,13 +794,19 @@ class WebAppService:
         code = str(stock_code or "").strip().upper()
         normalized_tags = self._journal_normalize_tags(tags)
         related_portfolio = None if related_portfolio_id in (None, "") else int(related_portfolio_id)
+        source = self._journal_normalize_source_type(source_type)
+        status_value = self._journal_normalize_status(status)
+        due_at = self._journal_parse_due_at(review_due_at)
+        closed_at_text = self._journal_parse_due_at(closed_at)
+        executed_flag = self._journal_parse_optional_bool(executed_as_planned, field_name="executed_as_planned")
 
         cur = self.store.execute(
             """
             INSERT INTO investment_journal
             (user_id, tenant_id, journal_type, title, content, stock_code, decision_type,
-             related_research_id, related_portfolio_id, tags_json, sentiment, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+             related_research_id, related_portfolio_id, tags_json, sentiment, source_type, source_ref_id,
+             status, review_due_at, executed_as_planned, outcome_rating, outcome_note, deviation_reason, closed_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
             (
                 me["user_id"],
@@ -755,6 +820,15 @@ class WebAppService:
                 related_portfolio,
                 json.dumps(normalized_tags, ensure_ascii=False),
                 str(sentiment or "").strip()[:24],
+                source,
+                str(source_ref_id or "").strip()[:120],
+                status_value,
+                due_at if due_at else None,
+                int(executed_flag),
+                str(outcome_rating or "").strip()[:24],
+                str(outcome_note or "").strip()[:2000],
+                str(deviation_reason or "").strip()[:400],
+                closed_at_text if closed_at_text else None,
             ),
         )
         row = self.store.query_one("SELECT * FROM investment_journal WHERE id = ?", (int(cur.lastrowid),))
@@ -792,7 +866,9 @@ class WebAppService:
         rows = self.store.query_all(
             f"""
             SELECT id, journal_type, title, content, stock_code, decision_type, related_research_id,
-                   related_portfolio_id, tags_json, sentiment, created_at, updated_at
+                   related_portfolio_id, tags_json, sentiment, source_type, source_ref_id, status,
+                   review_due_at, executed_as_planned, outcome_rating, outcome_note, deviation_reason,
+                   closed_at, created_at, updated_at
             FROM investment_journal
             WHERE {' AND '.join(conditions)}
             ORDER BY id DESC
@@ -861,7 +937,9 @@ class WebAppService:
         row = self.store.query_one(
             """
             SELECT id, journal_type, title, content, stock_code, decision_type, related_research_id,
-                   related_portfolio_id, tags_json, sentiment, created_at, updated_at
+                   related_portfolio_id, tags_json, sentiment, source_type, source_ref_id, status,
+                   review_due_at, executed_as_planned, outcome_rating, outcome_note, deviation_reason,
+                   closed_at, created_at, updated_at
             FROM investment_journal
             WHERE user_id = ? AND tenant_id = ? AND related_research_id = ?
             ORDER BY id DESC
@@ -870,6 +948,317 @@ class WebAppService:
             (me["user_id"], me["tenant_id"], key),
         )
         return self._journal_serialize_row(row or {})
+
+    def journal_find_by_source_ref(self, token: str, *, source_type: str, source_ref_id: str) -> dict[str, Any]:
+        """Find one journal by source tuple for idempotent transaction/deepthink linking."""
+        me = self.auth_me(token)
+        source = self._journal_normalize_source_type(source_type)
+        key = str(source_ref_id or "").strip()
+        if not key:
+            raise ValueError("source_ref_id is required")
+        row = self.store.query_one(
+            """
+            SELECT id, journal_type, title, content, stock_code, decision_type, related_research_id,
+                   related_portfolio_id, tags_json, sentiment, source_type, source_ref_id, status,
+                   review_due_at, executed_as_planned, outcome_rating, outcome_note, deviation_reason,
+                   closed_at, created_at, updated_at
+            FROM investment_journal
+            WHERE user_id = ? AND tenant_id = ? AND source_type = ? AND source_ref_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (me["user_id"], me["tenant_id"], source, key),
+        )
+        return self._journal_serialize_row(row or {})
+
+    def journal_mark_review_due(self, token: str) -> dict[str, Any]:
+        """Mark open journals as review_due once due date passes."""
+        me = self.auth_me(token)
+        cur = self.store.execute(
+            """
+            UPDATE investment_journal
+            SET status = 'review_due', updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+              AND tenant_id = ?
+              AND status = 'open'
+              AND review_due_at IS NOT NULL
+              AND review_due_at <= datetime('now')
+            """,
+            (me["user_id"], me["tenant_id"]),
+        )
+        updated = max(0, int(cur.rowcount or 0))
+        return {"status": "ok", "updated": updated}
+
+    def journal_review_queue(
+        self,
+        token: str,
+        *,
+        status: str = "",
+        stock_code: str = "",
+        limit: int = 60,
+    ) -> list[dict[str, Any]]:
+        _ = self.journal_mark_review_due(token)
+        me = self.auth_me(token)
+        safe_limit = max(1, min(200, int(limit)))
+        conditions = ["j.user_id = ?", "j.tenant_id = ?"]
+        params: list[Any] = [me["user_id"], me["tenant_id"]]
+
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status:
+            normalized_status = self._journal_normalize_status(normalized_status)
+            conditions.append("j.status = ?")
+            params.append(normalized_status)
+        else:
+            conditions.append("j.status IN ('open','review_due')")
+
+        code = str(stock_code or "").strip().upper()
+        if code:
+            conditions.append("j.stock_code = ?")
+            params.append(code)
+
+        params.append(safe_limit)
+        rows = self.store.query_all(
+            f"""
+            SELECT
+                j.id, j.journal_type, j.title, j.content, j.stock_code, j.decision_type, j.related_research_id,
+                j.related_portfolio_id, j.tags_json, j.sentiment, j.source_type, j.source_ref_id, j.status,
+                j.review_due_at, j.executed_as_planned, j.outcome_rating, j.outcome_note, j.deviation_reason,
+                j.closed_at, j.created_at, j.updated_at,
+                CASE
+                    WHEN j.status != 'closed'
+                     AND j.review_due_at IS NOT NULL
+                     AND j.review_due_at <= datetime('now')
+                    THEN 1
+                    ELSE 0
+                END AS is_overdue
+            FROM investment_journal j
+            WHERE {' AND '.join(conditions)}
+            ORDER BY is_overdue DESC, COALESCE(j.review_due_at, j.created_at) ASC, j.id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = self._journal_serialize_row(row)
+            item["is_overdue"] = bool(int(row.get("is_overdue", 0) or 0))
+            items.append(item)
+        return items
+
+    def journal_outcome_update(
+        self,
+        token: str,
+        *,
+        journal_id: int,
+        executed_as_planned: bool | int | None = None,
+        outcome_rating: str | None = None,
+        outcome_note: str | None = None,
+        deviation_reason: str | None = None,
+        close: bool | int | str | None = None,
+    ) -> dict[str, Any]:
+        row = self._journal_ensure_owned(token, journal_id)
+        updates: list[str] = []
+        params: list[Any] = []
+
+        if executed_as_planned is not None:
+            updates.append("executed_as_planned = ?")
+            params.append(int(self._journal_parse_optional_bool(executed_as_planned, field_name="executed_as_planned")))
+
+        if outcome_rating is not None:
+            rating = str(outcome_rating or "").strip().lower()
+            if rating not in {"", "good", "neutral", "bad"}:
+                raise ValueError("outcome_rating must be one of good/neutral/bad")
+            updates.append("outcome_rating = ?")
+            params.append(rating)
+
+        if outcome_note is not None:
+            updates.append("outcome_note = ?")
+            params.append(str(outcome_note or "").strip()[:2000])
+
+        if deviation_reason is not None:
+            updates.append("deviation_reason = ?")
+            params.append(str(deviation_reason or "").strip()[:400])
+
+        if close is not None:
+            should_close = self._journal_parse_optional_bool(close, field_name="close")
+            if should_close:
+                updates.append("status = 'closed'")
+                updates.append("closed_at = CURRENT_TIMESTAMP")
+            elif str(row.get("status", "")) == "closed":
+                # Explicit close=false means reopen one closed journal.
+                updates.append("status = 'open'")
+                updates.append("closed_at = NULL")
+
+        if not updates:
+            raise ValueError("no outcome fields to update")
+
+        updates.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(int(journal_id))
+        self.store.execute(
+            f"""
+            UPDATE investment_journal
+            SET {', '.join(updates)}
+            WHERE id = ?
+            """,
+            tuple(params),
+        )
+        return self.journal_get(token, journal_id=journal_id)
+
+    def journal_execution_board(self, token: str, *, window_days: int = 30) -> dict[str, Any]:
+        _ = self.journal_mark_review_due(token)
+        me = self.auth_me(token)
+        safe_window_days = max(7, min(365, int(window_days)))
+        since_expr = f"-{safe_window_days} day"
+
+        total_row = self.store.query_one(
+            """
+            SELECT COUNT(1) AS cnt
+            FROM investment_journal
+            WHERE user_id = ? AND tenant_id = ? AND created_at >= datetime('now', ?)
+            """,
+            (me["user_id"], me["tenant_id"], since_expr),
+        ) or {"cnt": 0}
+        new_logs_row = self.store.query_one(
+            """
+            SELECT COUNT(1) AS cnt
+            FROM investment_journal
+            WHERE user_id = ? AND tenant_id = ? AND created_at >= datetime('now', '-7 day')
+            """,
+            (me["user_id"], me["tenant_id"]),
+        ) or {"cnt": 0}
+        review_due_row = self.store.query_one(
+            """
+            SELECT COUNT(1) AS cnt
+            FROM investment_journal
+            WHERE user_id = ? AND tenant_id = ? AND status IN ('open','review_due')
+              AND review_due_at IS NOT NULL AND review_due_at <= datetime('now')
+            """,
+            (me["user_id"], me["tenant_id"]),
+        ) or {"cnt": 0}
+        overdue_row = self.store.query_one(
+            """
+            SELECT COUNT(1) AS cnt
+            FROM investment_journal
+            WHERE user_id = ? AND tenant_id = ? AND status != 'closed'
+              AND review_due_at IS NOT NULL AND review_due_at <= datetime('now', '-1 day')
+            """,
+            (me["user_id"], me["tenant_id"]),
+        ) or {"cnt": 0}
+        closed_row = self.store.query_one(
+            """
+            SELECT COUNT(1) AS cnt
+            FROM investment_journal
+            WHERE user_id = ? AND tenant_id = ? AND status = 'closed'
+              AND created_at >= datetime('now', ?)
+            """,
+            (me["user_id"], me["tenant_id"], since_expr),
+        ) or {"cnt": 0}
+        planned_row = self.store.query_one(
+            """
+            SELECT COUNT(1) AS cnt
+            FROM investment_journal
+            WHERE user_id = ? AND tenant_id = ? AND status = 'closed'
+              AND executed_as_planned = 1 AND created_at >= datetime('now', ?)
+            """,
+            (me["user_id"], me["tenant_id"], since_expr),
+        ) or {"cnt": 0}
+        reason_rows = self.store.query_all(
+            """
+            SELECT deviation_reason, COUNT(1) AS cnt
+            FROM investment_journal
+            WHERE user_id = ? AND tenant_id = ?
+              AND created_at >= datetime('now', ?)
+              AND deviation_reason != ''
+            GROUP BY deviation_reason
+            ORDER BY cnt DESC, deviation_reason ASC
+            LIMIT 8
+            """,
+            (me["user_id"], me["tenant_id"], since_expr),
+        )
+
+        total = int(total_row.get("cnt", 0) or 0)
+        closed = int(closed_row.get("cnt", 0) or 0)
+        planned = int(planned_row.get("cnt", 0) or 0)
+        execution_rate = float(planned) / float(closed) if closed else 0.0
+        close_rate = float(closed) / float(total) if total else 0.0
+
+        return {
+            "status": "ok",
+            "window_days": safe_window_days,
+            "new_logs_7d": int(new_logs_row.get("cnt", 0) or 0),
+            "review_due_count": int(review_due_row.get("cnt", 0) or 0),
+            "overdue_count": int(overdue_row.get("cnt", 0) or 0),
+            "closed_count_30d": closed,
+            "execution_rate": round(execution_rate, 4),
+            "close_rate": round(close_rate, 4),
+            "top_deviation_reasons": [
+                {"reason": str(row.get("deviation_reason", "")), "count": int(row.get("cnt", 0) or 0)}
+                for row in reason_rows
+            ],
+            "metric_notes": {
+                "execution_rate": "closed journals with executed_as_planned=true / closed journals",
+                "close_rate": "closed journals / total journals in window",
+                "review_due_count": "open or review_due journals whose review_due_at <= now",
+            },
+        }
+
+    def journal_create_from_transaction(
+        self,
+        token: str,
+        *,
+        portfolio_id: int,
+        transaction_id: int,
+        review_days: int = 5,
+    ) -> dict[str, Any]:
+        _ = self._portfolio_ensure_owned(token, portfolio_id)
+        tx = self.store.query_one(
+            """
+            SELECT id AS transaction_id, stock_code, transaction_type, quantity, price, fee, amount, transaction_date
+            FROM portfolio_transaction
+            WHERE portfolio_id = ? AND id = ?
+            LIMIT 1
+            """,
+            (int(portfolio_id), int(transaction_id)),
+        )
+        if not tx:
+            raise ValueError("transaction not found")
+
+        source_ref = f"{int(portfolio_id)}:{int(transaction_id)}"
+        existed = self.journal_find_by_source_ref(token, source_type="transaction", source_ref_id=source_ref)
+        if int(existed.get("journal_id", 0) or 0) > 0:
+            existed["action"] = "reused"
+            return existed
+
+        stock_code = str(tx.get("stock_code", "")).strip().upper()
+        side = str(tx.get("transaction_type", "")).strip().lower()
+        due_at = self._journal_default_due_at(review_days)
+        created = self.journal_create(
+            token,
+            journal_type="decision",
+            title=f"Transaction Review {stock_code} {side.upper()} #{int(transaction_id)}"[:200],
+            content=(
+                f"source: portfolio_transaction#{int(transaction_id)}\n"
+                f"symbol: {stock_code}\n"
+                f"side: {side}\n"
+                f"quantity: {float(tx.get('quantity', 0.0) or 0.0):.4f}\n"
+                f"price: {float(tx.get('price', 0.0) or 0.0):.4f}\n"
+                f"fee: {float(tx.get('fee', 0.0) or 0.0):.4f}\n"
+                f"cash_impact: {float(tx.get('amount', 0.0) or 0.0):.4f}\n"
+                f"transaction_time: {str(tx.get('transaction_date', ''))}\n"
+                "Fill execution deviation and improvement actions before review due date."
+            )[:8000],
+            stock_code=stock_code,
+            decision_type=("buy" if side == "buy" else "reduce" if side == "sell" else "hold"),
+            related_portfolio_id=int(portfolio_id),
+            tags=["transaction", side, stock_code],
+            sentiment="neutral",
+            source_type="transaction",
+            source_ref_id=source_ref,
+            status="open",
+            review_due_at=due_at,
+        )
+        created["action"] = "created"
+        return created
 
     def journal_ai_reflection_upsert(
         self,
@@ -961,6 +1350,15 @@ class WebAppService:
                 j.related_portfolio_id,
                 j.tags_json,
                 j.sentiment,
+                j.source_type,
+                j.source_ref_id,
+                j.status,
+                j.review_due_at,
+                j.executed_as_planned,
+                j.outcome_rating,
+                j.outcome_note,
+                j.deviation_reason,
+                j.closed_at,
                 j.created_at,
                 j.updated_at,
                 (
@@ -1853,11 +2251,24 @@ class WebAppService:
         params.append(safe_limit)
         return self.store.query_all(sql, tuple(params))
 
+    def _rag_upload_asset_unpack(self, row: dict[str, Any]) -> dict[str, Any]:
+        row["stock_codes"] = self._json_loads_or(row.get("stock_codes_json"), [])
+        row["tags"] = self._json_loads_or(row.get("tags_json"), [])
+        row["ocr_used"] = bool(int(row.get("ocr_used", 0) or 0))
+        row["vector_ready"] = bool(int(row.get("vector_ready", 0) or 0))
+        row["verification_passed"] = bool(int(row.get("verification_passed", 0) or 0))
+        row["quality_score"] = float(row.get("quality_score", 0.0) or 0.0)
+        row.pop("stock_codes_json", None)
+        row.pop("tags_json", None)
+        return row
+
     def rag_upload_asset_get_by_hash(self, file_sha256: str) -> dict[str, Any] | None:
         row = self.store.query_one(
             """
             SELECT upload_id, doc_id, filename, source, source_url, file_sha256, file_size, content_type,
-                   stock_codes_json, tags_json, parse_note, status, created_by, created_at, updated_at
+                   stock_codes_json, tags_json, parse_note, status, job_status, current_stage, error_code,
+                   error_message, parser_name, ocr_used, quality_score, vector_ready, verification_passed,
+                   created_by, created_at, updated_at
             FROM rag_upload_asset
             WHERE file_sha256 = ?
             ORDER BY updated_at DESC
@@ -1867,11 +2278,24 @@ class WebAppService:
         )
         if not row:
             return None
-        row["stock_codes"] = self._json_loads_or(row.get("stock_codes_json"), [])
-        row["tags"] = self._json_loads_or(row.get("tags_json"), [])
-        row.pop("stock_codes_json", None)
-        row.pop("tags_json", None)
-        return row
+        return self._rag_upload_asset_unpack(row)
+
+    def rag_upload_asset_get(self, token: str, *, upload_id: str) -> dict[str, Any]:
+        _ = self.require_role(token, {"admin", "ops"})
+        row = self.store.query_one(
+            """
+            SELECT upload_id, doc_id, filename, source, source_url, file_sha256, file_size, content_type,
+                   stock_codes_json, tags_json, parse_note, status, job_status, current_stage, error_code,
+                   error_message, parser_name, ocr_used, quality_score, vector_ready, verification_passed,
+                   created_by, created_at, updated_at
+            FROM rag_upload_asset
+            WHERE upload_id = ?
+            """,
+            (str(upload_id or "").strip(),),
+        )
+        if not row:
+            return {"error": "not_found", "upload_id": str(upload_id or "").strip()}
+        return self._rag_upload_asset_unpack(row)
 
     def rag_upload_asset_upsert(
         self,
@@ -1890,14 +2314,24 @@ class WebAppService:
         parse_note: str,
         status: str,
         created_by: str,
+        job_status: str = "uploaded",
+        current_stage: str = "",
+        error_code: str = "",
+        error_message: str = "",
+        parser_name: str = "",
+        ocr_used: bool = False,
+        quality_score: float = 0.0,
+        vector_ready: bool = False,
+        verification_passed: bool = False,
     ) -> dict[str, Any]:
         _ = self.require_role(token, {"admin", "ops"})
         self.store.execute(
             """
             INSERT OR REPLACE INTO rag_upload_asset
             (upload_id, doc_id, filename, source, source_url, file_sha256, file_size, content_type,
-             stock_codes_json, tags_json, parse_note, status, created_by, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM rag_upload_asset WHERE upload_id = ?), CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
+             stock_codes_json, tags_json, parse_note, status, job_status, current_stage, error_code, error_message,
+             parser_name, ocr_used, quality_score, vector_ready, verification_passed, created_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM rag_upload_asset WHERE upload_id = ?), CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
             """,
             (
                 str(upload_id),
@@ -1912,6 +2346,15 @@ class WebAppService:
                 json.dumps(tags, ensure_ascii=False),
                 str(parse_note or ""),
                 str(status or "uploaded"),
+                str(job_status or "uploaded"),
+                str(current_stage or ""),
+                str(error_code or ""),
+                str(error_message or ""),
+                str(parser_name or ""),
+                int(bool(ocr_used)),
+                float(max(0.0, min(1.0, quality_score))),
+                int(bool(vector_ready)),
+                int(bool(verification_passed)),
                 str(created_by or ""),
                 str(upload_id),
             ),
@@ -1919,7 +2362,9 @@ class WebAppService:
         row = self.store.query_one(
             """
             SELECT upload_id, doc_id, filename, source, source_url, file_sha256, file_size, content_type,
-                   stock_codes_json, tags_json, parse_note, status, created_by, created_at, updated_at
+                   stock_codes_json, tags_json, parse_note, status, job_status, current_stage, error_code,
+                   error_message, parser_name, ocr_used, quality_score, vector_ready, verification_passed,
+                   created_by, created_at, updated_at
             FROM rag_upload_asset
             WHERE upload_id = ?
             """,
@@ -1927,11 +2372,7 @@ class WebAppService:
         )
         if not row:
             return {"error": "not_found", "upload_id": upload_id}
-        row["stock_codes"] = self._json_loads_or(row.get("stock_codes_json"), [])
-        row["tags"] = self._json_loads_or(row.get("tags_json"), [])
-        row.pop("stock_codes_json", None)
-        row.pop("tags_json", None)
-        return row
+        return self._rag_upload_asset_unpack(row)
 
     def rag_upload_asset_list(
         self,
@@ -1955,7 +2396,9 @@ class WebAppService:
             params.append(source.strip().lower())
         sql = f"""
             SELECT upload_id, doc_id, filename, source, source_url, file_sha256, file_size, content_type,
-                   stock_codes_json, tags_json, parse_note, status, created_by, created_at, updated_at
+                   stock_codes_json, tags_json, parse_note, status, job_status, current_stage, error_code,
+                   error_message, parser_name, ocr_used, quality_score, vector_ready, verification_passed,
+                   created_by, created_at, updated_at
             FROM rag_upload_asset
             WHERE {' AND '.join(cond)}
             ORDER BY updated_at DESC
@@ -1964,10 +2407,7 @@ class WebAppService:
         params.extend([safe_limit, safe_offset])
         rows = self.store.query_all(sql, tuple(params))
         for row in rows:
-            row["stock_codes"] = self._json_loads_or(row.get("stock_codes_json"), [])
-            row["tags"] = self._json_loads_or(row.get("tags_json"), [])
-            row.pop("stock_codes_json", None)
-            row.pop("tags_json", None)
+            self._rag_upload_asset_unpack(row)
         return rows
 
     def rag_upload_asset_set_status(self, *, doc_id: str, status: str, parse_note: str = "") -> None:
@@ -1979,6 +2419,238 @@ class WebAppService:
             """,
             (str(status or "uploaded"), str(parse_note or ""), str(doc_id)),
         )
+
+    def rag_upload_asset_set_runtime(
+        self,
+        *,
+        upload_id: str,
+        status: str | None = None,
+        parse_note: str | None = None,
+        job_status: str | None = None,
+        current_stage: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        parser_name: str | None = None,
+        ocr_used: bool | None = None,
+        quality_score: float | None = None,
+        vector_ready: bool | None = None,
+        verification_passed: bool | None = None,
+    ) -> dict[str, Any]:
+        normalized_upload_id = str(upload_id or "").strip()
+        if not normalized_upload_id:
+            raise ValueError("upload_id is required")
+        updates: list[str] = []
+        params: list[Any] = []
+        if status is not None:
+            updates.append("status = ?")
+            params.append(str(status or "uploaded"))
+        if parse_note is not None:
+            updates.append("parse_note = ?")
+            params.append(str(parse_note or ""))
+        if job_status is not None:
+            updates.append("job_status = ?")
+            params.append(str(job_status or "uploaded"))
+        if current_stage is not None:
+            updates.append("current_stage = ?")
+            params.append(str(current_stage or ""))
+        if error_code is not None:
+            updates.append("error_code = ?")
+            params.append(str(error_code or ""))
+        if error_message is not None:
+            updates.append("error_message = ?")
+            params.append(str(error_message or ""))
+        if parser_name is not None:
+            updates.append("parser_name = ?")
+            params.append(str(parser_name or ""))
+        if ocr_used is not None:
+            updates.append("ocr_used = ?")
+            params.append(int(bool(ocr_used)))
+        if quality_score is not None:
+            updates.append("quality_score = ?")
+            params.append(float(max(0.0, min(1.0, quality_score))))
+        if vector_ready is not None:
+            updates.append("vector_ready = ?")
+            params.append(int(bool(vector_ready)))
+        if verification_passed is not None:
+            updates.append("verification_passed = ?")
+            params.append(int(bool(verification_passed)))
+        if not updates:
+            row = self.store.query_one(
+                """
+                SELECT upload_id, doc_id, filename, source, source_url, file_sha256, file_size, content_type,
+                       stock_codes_json, tags_json, parse_note, status, job_status, current_stage, error_code,
+                       error_message, parser_name, ocr_used, quality_score, vector_ready, verification_passed,
+                       created_by, created_at, updated_at
+                FROM rag_upload_asset
+                WHERE upload_id = ?
+                """,
+                (normalized_upload_id,),
+            )
+            if not row:
+                return {"error": "not_found", "upload_id": normalized_upload_id}
+            return self._rag_upload_asset_unpack(row)
+        params.append(normalized_upload_id)
+        self.store.execute(
+            f"""
+            UPDATE rag_upload_asset
+            SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP
+            WHERE upload_id = ?
+            """,
+            tuple(params),
+        )
+        row = self.store.query_one(
+            """
+            SELECT upload_id, doc_id, filename, source, source_url, file_sha256, file_size, content_type,
+                   stock_codes_json, tags_json, parse_note, status, job_status, current_stage, error_code,
+                   error_message, parser_name, ocr_used, quality_score, vector_ready, verification_passed,
+                   created_by, created_at, updated_at
+            FROM rag_upload_asset
+            WHERE upload_id = ?
+            """,
+            (normalized_upload_id,),
+        )
+        if not row:
+            return {"error": "not_found", "upload_id": normalized_upload_id}
+        return self._rag_upload_asset_unpack(row)
+
+    def rag_upload_stage_log_add(
+        self,
+        *,
+        upload_id: str,
+        doc_id: str,
+        stage: str,
+        status: str = "running",
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self.store.execute(
+            """
+            INSERT INTO rag_upload_stage_log (upload_id, doc_id, stage, status, detail_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                str(upload_id or "").strip(),
+                str(doc_id or "").strip(),
+                str(stage or "").strip()[:40],
+                str(status or "running").strip()[:24],
+                json.dumps(detail or {}, ensure_ascii=False),
+            ),
+        )
+
+    def rag_upload_stage_log_list(self, token: str, *, upload_id: str, limit: int = 120) -> list[dict[str, Any]]:
+        _ = self.require_role(token, {"admin", "ops"})
+        safe_limit = max(1, min(500, int(limit)))
+        rows = self.store.query_all(
+            """
+            SELECT id, upload_id, doc_id, stage, status, detail_json, created_at
+            FROM rag_upload_stage_log
+            WHERE upload_id = ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (str(upload_id or "").strip(), safe_limit),
+        )
+        for row in rows:
+            row["detail"] = self._json_loads_or(row.get("detail_json"), {})
+            row.pop("detail_json", None)
+        return rows
+
+    def rag_upload_verification_replace(
+        self,
+        *,
+        upload_id: str,
+        doc_id: str,
+        items: list[dict[str, Any]],
+    ) -> None:
+        normalized_upload_id = str(upload_id or "").strip()
+        self.store.execute("DELETE FROM rag_upload_verification WHERE upload_id = ?", (normalized_upload_id,))
+        for item in items:
+            top_hits = item.get("top_hits", [])
+            self.store.execute(
+                """
+                INSERT INTO rag_upload_verification
+                (upload_id, doc_id, query_text, target_hit, target_hit_rank, latency_ms, hit_count, top_hits_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_upload_id,
+                    str(doc_id or "").strip(),
+                    str(item.get("query", "") or ""),
+                    int(bool(item.get("target_hit", False))),
+                    int(item.get("target_hit_rank")) if item.get("target_hit_rank") is not None else None,
+                    int(item.get("latency_ms", 0) or 0),
+                    len(top_hits) if isinstance(top_hits, list) else 0,
+                    json.dumps(top_hits if isinstance(top_hits, list) else [], ensure_ascii=False),
+                ),
+            )
+
+    def rag_upload_verification_list(self, token: str, *, upload_id: str, limit: int = 120) -> list[dict[str, Any]]:
+        _ = self.require_role(token, {"admin", "ops"})
+        safe_limit = max(1, min(500, int(limit)))
+        rows = self.store.query_all(
+            """
+            SELECT id, upload_id, doc_id, query_text, target_hit, target_hit_rank, latency_ms, hit_count, top_hits_json, created_at
+            FROM rag_upload_verification
+            WHERE upload_id = ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (str(upload_id or "").strip(), safe_limit),
+        )
+        for row in rows:
+            row["target_hit"] = bool(int(row.get("target_hit", 0) or 0))
+            row["top_hits"] = self._json_loads_or(row.get("top_hits_json"), [])
+            row.pop("top_hits_json", None)
+        return rows
+
+    def rag_upload_asset_delete_hard(self, token: str, *, upload_id: str) -> dict[str, Any]:
+        _ = self.require_role(token, {"admin", "ops"})
+        normalized_upload_id = str(upload_id or "").strip()
+        if not normalized_upload_id:
+            raise ValueError("upload_id is required")
+        row = self.store.query_one(
+            "SELECT upload_id, doc_id FROM rag_upload_asset WHERE upload_id = ?",
+            (normalized_upload_id,),
+        )
+        if not row:
+            return {"error": "not_found", "upload_id": normalized_upload_id}
+        doc_id = str(row.get("doc_id", "") or "")
+        verification_count = int(
+            (self.store.query_one("SELECT COUNT(1) AS cnt FROM rag_upload_verification WHERE upload_id = ?", (normalized_upload_id,)) or {}).get(
+                "cnt",
+                0,
+            )
+            or 0
+        )
+        stage_log_count = int(
+            (self.store.query_one("SELECT COUNT(1) AS cnt FROM rag_upload_stage_log WHERE upload_id = ?", (normalized_upload_id,)) or {}).get(
+                "cnt",
+                0,
+            )
+            or 0
+        )
+        chunk_count = int(
+            (self.store.query_one("SELECT COUNT(1) AS cnt FROM rag_doc_chunk WHERE doc_id = ?", (doc_id,)) or {}).get(
+                "cnt",
+                0,
+            )
+            or 0
+        )
+        self.store.execute("DELETE FROM rag_upload_verification WHERE upload_id = ?", (normalized_upload_id,))
+        self.store.execute("DELETE FROM rag_upload_stage_log WHERE upload_id = ?", (normalized_upload_id,))
+        self.store.execute("DELETE FROM doc_review_log WHERE doc_id = ?", (doc_id,))
+        self.store.execute("DELETE FROM doc_pipeline_run WHERE doc_id = ?", (doc_id,))
+        self.store.execute("DELETE FROM rag_doc_chunk WHERE doc_id = ?", (doc_id,))
+        self.store.execute("DELETE FROM doc_index WHERE doc_id = ?", (doc_id,))
+        cur = self.store.execute("DELETE FROM rag_upload_asset WHERE upload_id = ?", (normalized_upload_id,))
+        return {
+            "status": "ok",
+            "upload_id": normalized_upload_id,
+            "doc_id": doc_id,
+            "upload_deleted": int(cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 1),
+            "chunk_deleted": chunk_count,
+            "stage_log_deleted": stage_log_count,
+            "verification_deleted": verification_count,
+        }
 
     def rag_ops_meta_set(self, *, key: str, value: str) -> None:
         self.store.execute(

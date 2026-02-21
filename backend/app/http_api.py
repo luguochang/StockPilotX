@@ -459,6 +459,7 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
+    # ---------------- Docs Compatibility APIs ----------------
     @app.post("/v1/docs/upload")
     def docs_upload(payload: dict):
         return svc.docs_upload(
@@ -472,6 +473,30 @@ def create_app() -> FastAPI:
     def docs_index(doc_id: str):
         return svc.docs_index(doc_id)
 
+    @app.get("/v1/docs")
+    def docs_list(authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.docs_list(token)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.get("/v1/docs/review-queue")
+    def docs_review_queue(authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.docs_review_queue(token)
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
+    @app.post("/v1/docs/{doc_id}/review/approve")
+    def docs_review_approve(doc_id: str, payload: dict, authorization: str | None = Header(default=None)):
+        token = _extract_optional_bearer_token(authorization)
+        try:
+            return svc.docs_review_action(token, doc_id, "approve", payload.get("comment", ""))
+        except Exception as ex:  # noqa: BLE001
+            _raise_auth_http_error(ex)
+
     @app.post("/v1/evals/run")
     def evals_run(payload: dict):
         return svc.evals_run(payload.get("samples"))
@@ -479,6 +504,10 @@ def create_app() -> FastAPI:
     @app.get("/v1/evals/{eval_run_id}")
     def evals_get(eval_run_id: str):
         return svc.evals_get(eval_run_id)
+
+    @app.post("/v1/sql-agent/poc/query")
+    def sql_agent_poc_query(payload: dict):
+        return svc.sql_agent_poc_query(payload)
 
     @app.post("/v1/scheduler/run")
     def scheduler_run(payload: dict):
@@ -890,89 +919,12 @@ def create_app() -> FastAPI:
         except Exception as ex:  # noqa: BLE001
             _raise_auth_http_error(ex)
 
-    # ---------------- WEB-004 Docs Center ----------------
-    @app.get("/v1/docs")
-    def docs_list(authorization: str | None = Header(default=None)):
-        token = _extract_bearer_token(authorization)
-        try:
-            return svc.docs_list(token)
-        except Exception as ex:  # noqa: BLE001
-            _raise_auth_http_error(ex)
-
-    @app.get("/v1/docs/review-queue")
-    def docs_review_queue(authorization: str | None = Header(default=None)):
-        token = _extract_bearer_token(authorization)
-        try:
-            return svc.docs_review_queue(token)
-        except Exception as ex:  # noqa: BLE001
-            _raise_auth_http_error(ex)
-
-    @app.get("/v1/docs/{doc_id}/versions")
-    def docs_versions(doc_id: str, limit: int = 20, authorization: str | None = Header(default=None)):
-        token = _extract_optional_bearer_token(authorization)
-        try:
-            return svc.docs_versions(token, doc_id, limit=limit)
-        except ValueError as ex:
-            raise HTTPException(status_code=400, detail=str(ex)) from ex
-        except Exception as ex:  # noqa: BLE001
-            _raise_auth_http_error(ex)
-
-    @app.get("/v1/docs/{doc_id}/pipeline-runs")
-    def docs_pipeline_runs(doc_id: str, limit: int = 30, authorization: str | None = Header(default=None)):
-        token = _extract_optional_bearer_token(authorization)
-        try:
-            return svc.docs_pipeline_runs(token, doc_id, limit=limit)
-        except ValueError as ex:
-            raise HTTPException(status_code=400, detail=str(ex)) from ex
-        except Exception as ex:  # noqa: BLE001
-            _raise_auth_http_error(ex)
-
-    @app.post("/v1/docs/recommend")
-    def docs_recommend(payload: dict, authorization: str | None = Header(default=None)):
-        token = _extract_optional_bearer_token(authorization)
-        try:
-            return svc.docs_recommend(token, payload)
-        except ValueError as ex:
-            raise HTTPException(status_code=400, detail=str(ex)) from ex
-        except Exception as ex:  # noqa: BLE001
-            _raise_auth_http_error(ex)
-
-    @app.get("/v1/docs/{doc_id}/quality-report")
-    def docs_quality_report(doc_id: str, authorization: str | None = Header(default=None)):
-        token = _extract_optional_bearer_token(authorization)
-        try:
-            _ = svc.auth_me(token)
-            result = svc.docs_quality_report(doc_id)
-            if "error" in result:
-                raise HTTPException(status_code=404, detail=result)
-            return result
-        except HTTPException:
-            raise
-        except Exception as ex:  # noqa: BLE001
-            _raise_auth_http_error(ex)
-
     @app.get("/v1/knowledge/graph/{entity_id}")
     def knowledge_graph_view(entity_id: str, limit: int = 20):
         try:
             return svc.knowledge_graph_view(entity_id, limit=limit)
         except ValueError as ex:
             raise HTTPException(status_code=400, detail=str(ex)) from ex
-
-    @app.post("/v1/docs/{doc_id}/review/approve")
-    def docs_review_approve(doc_id: str, payload: dict, authorization: str | None = Header(default=None)):
-        token = _extract_bearer_token(authorization)
-        try:
-            return svc.docs_review_action(token, doc_id, "approve", payload.get("comment", ""))
-        except Exception as ex:  # noqa: BLE001
-            _raise_auth_http_error(ex)
-
-    @app.post("/v1/docs/{doc_id}/review/reject")
-    def docs_review_reject(doc_id: str, payload: dict, authorization: str | None = Header(default=None)):
-        token = _extract_bearer_token(authorization)
-        try:
-            return svc.docs_review_action(token, doc_id, "reject", payload.get("comment", ""))
-        except Exception as ex:  # noqa: BLE001
-            _raise_auth_http_error(ex)
 
     # ---------------- RAG Asset Management ----------------
     @app.get("/v1/rag/source-policy")

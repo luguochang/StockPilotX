@@ -1,0 +1,52 @@
+:root {
+  /* 色彩系统 */
+  --color-primary: #2563eb;
+  --color-text-primary: #0f172a;
+  --color-text-secondary: #64748b;
+  --color-text-tertiary: #94a3b8;
+  --color-bg-primary: #ffffff;
+  --color-bg-secondary: #f8fafc;
+  --color-border: rgba(15, 23, 42, 0.08);
+
+  /* 排版系统 */
+  --font-size-hero: 96px;
+  --font-size-h1: 48px;
+  --font-size-h2: 32px;
+  --font-size-h3: 24px;
+  --font-size-body: 16px;
+  --font-size-small: 14px;
+
+  /* 间距系统 */
+  --spacing-xs: 8px;
+  --spacing-sm: 16px;
+  --spacing-md: 32px;
+  --spacing-lg: 48px;
+  --spacing-xl: 80px;
+
+  /* 圆角系统 */
+  --radius-none: 0;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+
+  /* 阴影系统 */
+  --shadow-sm: 0 2px 8px rgba(15, 23, 42, 0.04);
+  --shadow-md: 0 8px 24px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 20px 40px rgba(15, 23, 42, 0.12);
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+  :root {
+    --font-size-hero: 48px;
+    --font-size-h1: 32px;
+    --spacing-lg: 32px;
+    --spacing-xl: 48px;
+  }
+}
+
+@media (min-width: 769px) and (max-width: 1024px) {
+  :root {
+    --font-size-hero: 72px;
+    --font-size-h1: 40px;
+  }
+}

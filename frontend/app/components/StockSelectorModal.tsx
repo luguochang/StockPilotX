@@ -64,6 +64,8 @@ type FilterBucket = {
   market_tier: string[];
   listing_board: string[];
   industry_l1: string[];
+  industry_l2?: string[];
+  industry_l3?: string[];
 };
 
 type CascaderNode = {
@@ -87,6 +89,11 @@ function boardOfTier(tier: string): string {
   return "";
 }
 
+function tierBelongsToExchange(tier: string, exchange: string): boolean {
+  const inferred = exchangeOfTier(tier);
+  return inferred ? inferred === exchange : true;
+}
+
 function uniqueStrings(values: string[]): string[] {
   return Array.from(new Set(values.filter(Boolean)));
 }
@@ -103,6 +110,7 @@ export default function StockSelectorModal({
   const [open, setOpen] = useState(false);
   const [keyword, setKeyword] = useState("");
   const [draft, setDraft] = useState<string[]>([]);
+  const [knownNameMap, setKnownNameMap] = useState<Record<string, string>>({});
   const [recentCodes, setRecentCodes] = useState<string[]>([]);
   const [remoteItems, setRemoteItems] = useState<RemoteStockItem[]>([]);
   const [remoteLoading, setRemoteLoading] = useState(false);
@@ -156,6 +164,26 @@ export default function StockSelectorModal({
 
   const options = useMemo(() => mergeCatalog(STOCK_CATALOG, recentCodes), [recentCodes]);
 
+  useEffect(() => {
+    // Keep a local code->name cache so selected values can still show names after filters/search change.
+    setKnownNameMap((prev) => {
+      const next = { ...prev };
+      for (const item of STOCK_CATALOG) {
+        const code = normalizeCode(item.code);
+        if (code && item.name) next[code] = item.name;
+      }
+      for (const item of options) {
+        const code = normalizeCode(item.code);
+        if (code && item.name) next[code] = item.name;
+      }
+      for (const item of remoteItems) {
+        const code = normalizeCode(item.stock_code);
+        if (code && item.stock_name) next[code] = item.stock_name;
+      }
+      return next;
+    });
+  }, [options, remoteItems]);
+
   const filtered = useMemo(() => {
     if (useRemote) {
       return remoteItems.map((x) => ({
@@ -175,7 +203,7 @@ export default function StockSelectorModal({
     return exchanges
       .filter(Boolean)
       .map((ex) => {
-        const tiers = filters.market_tier.filter((t) => exchangeOfTier(t) === ex);
+        const tiers = filters.market_tier.filter((t) => tierBelongsToExchange(t, ex));
         return {
           value: ex,
           label: ex,
@@ -229,7 +257,9 @@ export default function StockSelectorModal({
           exchange: data.exchange ?? [],
           market_tier: data.market_tier ?? [],
           listing_board: data.listing_board ?? [],
-          industry_l1: data.industry_l1 ?? []
+          industry_l1: data.industry_l1 ?? [],
+          industry_l2: data.industry_l2 ?? [],
+          industry_l3: data.industry_l3 ?? []
         });
         setFiltersLoaded(true);
       } catch {
@@ -320,6 +350,15 @@ export default function StockSelectorModal({
 
   function handleConfirm() {
     const picked = multiple ? draft : draft.slice(0, 1);
+    setKnownNameMap((prev) => {
+      const next = { ...prev };
+      for (const item of filtered) {
+        const code = normalizeCode(item.code);
+        if (!picked.includes(code)) continue;
+        if (item.name) next[code] = item.name;
+      }
+      return next;
+    });
     persistHistory(picked);
     if (selectedIndustry) {
       const nextRecent = uniqueStrings([selectedIndustry, ...recentIndustryFilters]).slice(0, 8);
@@ -334,7 +373,13 @@ export default function StockSelectorModal({
     setOpen(false);
   }
 
-  const displayText = current.join(", ");
+  function renderCodeWithName(code: string): string {
+    const normalized = normalizeCode(code);
+    const name = knownNameMap[normalized];
+    return name ? `${normalized} ${name}` : normalized;
+  }
+
+  const displayText = current.map((code) => renderCodeWithName(code)).join("；");
 
   return (
     <>
@@ -345,7 +390,7 @@ export default function StockSelectorModal({
       {current.length > 0 ? (
         <Space wrap style={{ marginTop: 8 }}>
           {current.map((code) => (
-            <Tag key={code} color="blue">{code}</Tag>
+            <Tag key={code} color="blue">{renderCodeWithName(code)}</Tag>
           ))}
         </Space>
       ) : null}
@@ -383,6 +428,7 @@ export default function StockSelectorModal({
               allowClear
               showSearch
               optionFilterProp="label"
+              filterOption={(input, option) => String(option?.label ?? "").toLowerCase().includes(input.toLowerCase())}
               style={{ width: 220 }}
               options={industryOptions}
             />
@@ -400,7 +446,15 @@ export default function StockSelectorModal({
               return (
                 <List.Item
                   onClick={() => toggleCode(item.code, !checked)}
-                  style={{ cursor: "pointer" }}
+                  style={{
+                    cursor: "pointer",
+                    margin: "4px 6px",
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: checked ? "1px solid rgba(22,119,255,0.55)" : "1px solid transparent",
+                    background: checked ? "rgba(22,119,255,0.10)" : "transparent",
+                    boxShadow: checked ? "inset 0 0 0 1px rgba(22,119,255,0.12)" : "none"
+                  }}
                   actions={[
                     multiple ? (
                       <Checkbox

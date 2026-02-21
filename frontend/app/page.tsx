@@ -1,142 +1,144 @@
-﻿"use client";
+"use client";
 
 import Link from "next/link";
 import { motion } from "framer-motion";
-import { Button, Card, Col, Row, Space, Tag, Typography } from "antd";
+import {
+  BulbOutlined,
+  LineChartOutlined,
+  EditOutlined,
+  FileTextOutlined,
+  DatabaseOutlined,
+  SettingOutlined,
+  EyeOutlined
+} from "@ant-design/icons";
+import { Tag, Typography } from "antd";
+import styles from "./styles/minimalist.module.css";
+import "./styles/tokens.css";
 
-const { Title, Paragraph, Text } = Typography;
+const { Title, Paragraph } = Typography;
 
-// 首页只做导航与模块边界说明，避免把业务分析逻辑塞在同一页面导致认知负担。
+const HERO_VIDEO_URL = process.env.NEXT_PUBLIC_HERO_VIDEO_URL ?? "/assets/media/hero-stock-analysis.mp4";
+
+const bannerItems = [
+  "实时市场数据",
+  "公告事件时间线",
+  "多Agent研判",
+  "证据可追溯引用",
+  "策略预测评测"
+];
+
 const featureCards = [
   {
     title: "DeepThink 高级分析",
     desc: "多 Agent 协作、按轮推进、流式输出与冲突复核，适合复杂问题和深度研判。",
     href: "/deep-think",
-    tag: "核心入口",
+    icon: <BulbOutlined />,
   },
   {
     title: "预测研究台",
     desc: "先看结论与质量门禁，再按需展开预测明细、分层聚合和解释层结果。",
     href: "/predict",
-    tag: "量化视角",
+    icon: <LineChartOutlined />,
   },
   {
     title: "投资日志工作台",
     desc: "记录决策、补充复盘、生成 AI 复盘并查看聚合洞察，形成研究闭环。",
     href: "/journal",
-    tag: "决策复盘",
+    icon: <EditOutlined />,
   },
   {
     title: "报告中心",
     desc: "生成、检索和回放报告版本，支持业务交付与归档复盘。",
     href: "/reports",
-    tag: "研究资产",
-  },
-  {
-    title: "文档知识中心",
-    desc: "上传、索引和复核文档，管理可进入在线检索链路的语料来源。",
-    href: "/docs-center",
-    tag: "知识管理",
+    icon: <FileTextOutlined />,
   },
   {
     title: "RAG 运营台",
     desc: "管理来源策略、文档 chunk、共享问答语料和检索追踪，支撑知识治理。",
     href: "/rag-center",
-    tag: "语料治理",
+    icon: <DatabaseOutlined />,
   },
   {
     title: "运维与评测",
     desc: "查看调度状态、告警和评测结果，对比 Prompt 版本并跟踪质量波动。",
     href: "/ops/evals",
-    tag: "系统治理",
+    icon: <SettingOutlined />,
   },
   {
     title: "关注池与监控",
     desc: "维护关注标的并快速进入日常观察流程，提升重复分析效率。",
     href: "/watchlist",
-    tag: "日常操作",
+    icon: <EyeOutlined />,
   },
 ];
 
 export default function LandingPage() {
   return (
-    <main className="container shell-fade-in">
+    <main>
+      {/* Hero Video Section */}
       <motion.section
-        initial={{ opacity: 0, y: 12 }}
+        initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.45 }}
-        className="landing-hero"
+        transition={{ duration: 0.5 }}
+        className="hero-video-section"
       >
-        <div className="landing-hero-mask" />
-        <div className="landing-hero-content">
-          <Tag color="processing">StockPilotX Agent Platform</Tag>
-          <Title level={1} style={{ margin: 0, color: "#f8fafc" }}>
-            A股多 Agent 研究系统
+        <video className="hero-video-media" autoPlay muted loop playsInline preload="metadata">
+          <source src={HERO_VIDEO_URL} type="video/mp4" />
+        </video>
+        <div className="hero-video-mask" />
+        <div className="hero-video-content">
+          <Title level={1} style={{ margin: 0, color: "#ffffff", fontSize: "72px", fontWeight: 700, letterSpacing: "-0.02em" }}>
+            StockPilotX
           </Title>
-          <Paragraph style={{ margin: 0, color: "rgba(241,245,249,0.9)", maxWidth: 760 }}>
-            首页聚焦模块导航与能力总览。深度分析、预测、报告、知识治理和运维能力分路由承载，避免单页信息过载。
+          <Paragraph style={{ margin: 0, color: "rgba(255,255,255,0.86)", maxWidth: 640, fontSize: "18px", marginTop: "16px" }}>
+            A股多 Agent 研究系统 · 极简主义设计
           </Paragraph>
-          <Space>
-            <Link href="/deep-think">
-              <Button type="primary" size="large">
-                进入 DeepThink
-              </Button>
-            </Link>
-            <Link href="/rag-center">
-              <Button size="large">进入 RAG 运营台</Button>
-            </Link>
-          </Space>
         </div>
       </motion.section>
 
+      {/* Scrolling Banner */}
       <motion.section
-        initial={{ opacity: 0, y: 18 }}
+        initial={{ opacity: 0, y: 14 }}
         whileInView={{ opacity: 1, y: 0 }}
-        viewport={{ once: true, amount: 0.2 }}
+        viewport={{ once: true, amount: 0.3 }}
         transition={{ duration: 0.45 }}
+        className="banner-marquee"
       >
-        <Card className="premium-card" style={{ marginBottom: 10 }}>
-          <Space direction="vertical" size={4}>
-            <Text style={{ color: "#2563eb", fontWeight: 600 }}>系统入口导航</Text>
-            <Title level={3} style={{ margin: 0 }}>
-              按业务场景拆分功能，减少切换成本
-            </Title>
-            <Paragraph style={{ margin: 0, color: "#475569" }}>
-              分析链路集中在 `DeepThink` 页面；首页只提供清晰入口与模块职责说明，便于新用户快速建立正确使用路径。
-            </Paragraph>
-          </Space>
-        </Card>
+        <div className="banner-track">
+          {[...bannerItems, ...bannerItems].map((item, idx) => (
+            <span key={`${item}-${idx}`} className="banner-chip">
+              {item}
+            </span>
+          ))}
+        </div>
       </motion.section>
 
-      <motion.section
-        initial={{ opacity: 0, y: 18 }}
-        whileInView={{ opacity: 1, y: 0 }}
-        viewport={{ once: true, amount: 0.2 }}
-        transition={{ duration: 0.45 }}
-      >
-        <Row gutter={[14, 14]}>
-          {featureCards.map((item) => (
-            <Col xs={24} md={12} xl={8} key={item.href}>
-              <Card className="premium-card landing-card">
-                <Space direction="vertical" style={{ width: "100%" }} size={10}>
-                  <Tag color="blue" style={{ width: "fit-content" }}>
-                    {item.tag}
-                  </Tag>
-                  <Title level={4} style={{ margin: 0 }}>
-                    {item.title}
-                  </Title>
-                  <Paragraph style={{ margin: 0, color: "#475569", minHeight: 48 }}>
-                    {item.desc}
-                  </Paragraph>
-                  <Link href={item.href}>
-                    <Button type="primary">进入模块</Button>
-                  </Link>
-                </Space>
-              </Card>
-            </Col>
-          ))}
-        </Row>
-      </motion.section>
+      {/* Feature Grid */}
+      <section className={styles.featureGrid}>
+        {featureCards.map((card, index) => (
+          <motion.div
+            key={index}
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true, amount: 0.2 }}
+            transition={{ duration: 0.4, delay: index * 0.05 }}
+          >
+            <Link href={card.href} style={{ textDecoration: "none" }}>
+              <div className={styles.featureCard}>
+                <div style={{ fontSize: "32px", color: "var(--color-primary)", marginBottom: "16px" }}>
+                  {card.icon}
+                </div>
+                <h3 className={styles.featureTitle}>{card.title}</h3>
+                <p className={styles.featureDesc}>{card.desc}</p>
+                <span className={styles.featureButton}>进入 →</span>
+              </div>
+            </Link>
+          </motion.div>
+        ))}
+      </section>
+
+      {/* Footer Spacing */}
+      <div style={{ height: "80px" }} />
     </main>
   );
 }

@@ -93,7 +93,11 @@ class ServiceTestCase(unittest.TestCase):
         self.assertGreaterEqual(int(result.get("count", 0)), 1)
         items = result.get("items", [])
         self.assertTrue(isinstance(items, list))
-        self.assertIn("doc-rec-1", [str(x.get("doc_id", "")) for x in items])
+        # Shared local corpus may include many preloaded docs; assert stock-targeted hits exist.
+        self.assertTrue(
+            any("SH600000" in [str(s).upper() for s in list(x.get("stock_codes", []))] for x in items),
+            msg=f"unexpected recommend items: {[str(x.get('doc_id', '')) for x in items]}",
+        )
 
     def test_report_generate_and_get(self) -> None:
         generated = self.svc.report_generate(
@@ -548,6 +552,23 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(str(verdict.get("status", "")), "failed")
         self.assertIn("parser unavailable", str(verdict.get("message", "")).lower())
 
+    def test_rag_upload_invalid_pdf_not_mislabeled_as_parser_unavailable(self) -> None:
+        # Minimal malformed PDF probe: parse failure should not be treated as missing parser dependency.
+        broken_pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n"
+        encoded = base64.b64encode(broken_pdf).decode("ascii")
+        with self.assertRaises(ValueError) as ctx:
+            self.svc.rag_upload_from_payload(
+                "",
+                {
+                    "filename": "invalid-structure.pdf",
+                    "content_type": "application/pdf",
+                    "content_base64": encoded,
+                    "source": "user_upload",
+                    "force_reupload": True,
+                },
+            )
+        self.assertNotIn("parser unavailable", str(ctx.exception).lower())
+
     def test_rag_retrieval_preview_api_wrapper(self) -> None:
         _ = self.svc.docs_upload("rag-preview-doc", "preview.txt", "SH600000 营收增长且现金流改善" * 140, "user_upload")
         _ = self.svc.docs_index("rag-preview-doc")
@@ -581,6 +602,29 @@ class ServiceTestCase(unittest.TestCase):
             ]
         )
         self.assertTrue(run["pass_gate"])
+
+    def test_sql_agent_poc_query(self) -> None:
+        self.svc.web.query_history_add(
+            "",
+            question="sql poc seed",
+            stock_codes=["SH600000"],
+            trace_id="sql-poc-trace-1",
+            intent="fact",
+            cache_hit=False,
+            latency_ms=12,
+            summary="seed row",
+        )
+        ok = self.svc.sql_agent_poc_query(
+            {
+                "sql": "SELECT question, trace_id, intent FROM query_history LIMIT 5",
+                "max_rows": 5,
+            }
+        )
+        self.assertTrue(bool(ok.get("ok", False)))
+        self.assertTrue(isinstance(ok.get("rows", []), list))
+        bad = self.svc.sql_agent_poc_query({"sql": "DELETE FROM query_history"})
+        self.assertFalse(bool(bad.get("ok", True)))
+        self.assertEqual(str(bad.get("error", "")), "sql_not_allowed")
 
     def test_prediction_run_and_eval(self) -> None:
         run = self.svc.predict_run({"stock_codes": ["SH600000", "SZ000001"], "horizons": ["5d", "20d"]})

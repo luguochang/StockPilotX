@@ -178,6 +178,15 @@ class WebStore:
                 related_portfolio_id INTEGER,
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 sentiment TEXT NOT NULL DEFAULT '',
+                source_type TEXT NOT NULL DEFAULT 'manual',
+                source_ref_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                review_due_at DATETIME,
+                executed_as_planned INTEGER NOT NULL DEFAULT 0,
+                outcome_rating TEXT NOT NULL DEFAULT '',
+                outcome_note TEXT NOT NULL DEFAULT '',
+                deviation_reason TEXT NOT NULL DEFAULT '',
+                closed_at DATETIME,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
@@ -422,9 +431,41 @@ class WebStore:
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 parse_note TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'uploaded',
+                job_status TEXT NOT NULL DEFAULT 'uploaded',
+                current_stage TEXT NOT NULL DEFAULT '',
+                error_code TEXT NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                parser_name TEXT NOT NULL DEFAULT '',
+                ocr_used INTEGER NOT NULL DEFAULT 0,
+                quality_score REAL NOT NULL DEFAULT 0.0,
+                vector_ready INTEGER NOT NULL DEFAULT 0,
+                verification_passed INTEGER NOT NULL DEFAULT 0,
                 created_by TEXT NOT NULL DEFAULT '',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS rag_upload_stage_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                upload_id TEXT NOT NULL,
+                doc_id TEXT NOT NULL DEFAULT '',
+                stage TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS rag_upload_verification (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                upload_id TEXT NOT NULL,
+                doc_id TEXT NOT NULL DEFAULT '',
+                query_text TEXT NOT NULL DEFAULT '',
+                target_hit INTEGER NOT NULL DEFAULT 0,
+                target_hit_rank INTEGER,
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                hit_count INTEGER NOT NULL DEFAULT 0,
+                top_hits_json TEXT NOT NULL DEFAULT '[]',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS rag_ops_meta (
@@ -588,6 +629,8 @@ class WebStore:
             CREATE INDEX IF NOT EXISTS idx_rag_upload_asset_created_at ON rag_upload_asset(created_at);
             CREATE INDEX IF NOT EXISTS idx_rag_upload_asset_doc_status ON rag_upload_asset(doc_id, status, updated_at);
             CREATE INDEX IF NOT EXISTS idx_rag_upload_asset_sha ON rag_upload_asset(file_sha256, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_rag_upload_stage_log_upload ON rag_upload_stage_log(upload_id, id);
+            CREATE INDEX IF NOT EXISTS idx_rag_upload_verification_upload ON rag_upload_verification(upload_id, id);
             CREATE INDEX IF NOT EXISTS idx_deep_think_round_session ON deep_think_round(session_id, round_no);
             CREATE INDEX IF NOT EXISTS idx_deep_think_opinion_round ON deep_think_opinion(round_id);
             CREATE INDEX IF NOT EXISTS idx_deep_think_event_session ON deep_think_event(session_id, round_no, event_seq);
@@ -607,6 +650,15 @@ class WebStore:
             self._ensure_column("stock_universe", "industry_l2", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("stock_universe", "industry_l3", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("stock_universe", "is_active", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column("investment_journal", "source_type", "TEXT NOT NULL DEFAULT 'manual'")
+            self._ensure_column("investment_journal", "source_ref_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("investment_journal", "status", "TEXT NOT NULL DEFAULT 'open'")
+            self._ensure_column("investment_journal", "review_due_at", "DATETIME")
+            self._ensure_column("investment_journal", "executed_as_planned", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column("investment_journal", "outcome_rating", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("investment_journal", "outcome_note", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("investment_journal", "deviation_reason", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("investment_journal", "closed_at", "DATETIME")
             self._ensure_column("report_index", "run_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("report_index", "pool_snapshot_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("report_index", "template_id", "TEXT NOT NULL DEFAULT ''")
@@ -618,6 +670,34 @@ class WebStore:
             self._ensure_column("deep_think_round", "budget_usage", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column("deep_think_export_task", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("deep_think_export_task", "max_attempts", "INTEGER NOT NULL DEFAULT 2")
+            self._ensure_column("rag_upload_asset", "job_status", "TEXT NOT NULL DEFAULT 'uploaded'")
+            self._ensure_column("rag_upload_asset", "current_stage", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("rag_upload_asset", "error_code", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("rag_upload_asset", "error_message", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("rag_upload_asset", "parser_name", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("rag_upload_asset", "ocr_used", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column("rag_upload_asset", "quality_score", "REAL NOT NULL DEFAULT 0.0")
+            self._ensure_column("rag_upload_asset", "vector_ready", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column("rag_upload_asset", "verification_passed", "INTEGER NOT NULL DEFAULT 0")
+            # These indexes depend on new columns that may be added by _ensure_column on legacy DBs.
+            self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_investment_journal_status_due
+                ON investment_journal(user_id, tenant_id, status, review_due_at)
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_investment_journal_source_ref
+                ON investment_journal(source_type, source_ref_id)
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_rag_upload_asset_job_status
+                ON rag_upload_asset(job_status, updated_at)
+                """
+            )
             self.conn.commit()
 
     def _table_exists(self, table: str) -> bool:

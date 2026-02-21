@@ -6,6 +6,7 @@ import ReactECharts from "echarts-for-react";
 import { Alert, Button, Card, Col, Input, InputNumber, List, Popover, Progress, Row, Segmented, Select, Space, Statistic, Table, Tag, Timeline, Typography } from "antd";
 import MediaCarousel from "../components/MediaCarousel";
 import StockSelectorModal from "../components/StockSelectorModal";
+import { SafeContainer } from "../components/SafeContainer";
 import { validatePromptQuality } from "../lib/analysis/guardrails";
 import { composeStructuredQuestion } from "../lib/analysis/template-compose";
 import { ANALYSIS_TEMPLATES, type AnalysisTemplateId, type HorizonOption, type PositionStateOption, type RiskProfileOption } from "../lib/analysis/template-config";
@@ -405,6 +406,43 @@ function CountUp({ value, suffix = "" }: { value: number; suffix?: string }) {
   return <>{display.toFixed(2)}{suffix}</>;
 }
 
+// Some runtimes emit delta chunks, while others emit cumulative content snapshots.
+// Merge both formats safely to avoid duplicated full-text blocks in the report panel.
+function mergeStreamAnswer(prev: string, incoming: string): string {
+  const base = String(prev ?? "");
+  const next = String(incoming ?? "");
+  if (!next) return base;
+  if (!base) return next;
+  if (next === base) return base;
+  if (next.startsWith(base)) return next;
+  if (base.endsWith(next)) return base;
+  const overlapMax = Math.min(base.length, next.length);
+  for (let k = overlapMax; k >= 1; k -= 1) {
+    if (base.slice(-k) === next.slice(0, k)) {
+      return `${base}${next.slice(k)}`;
+    }
+  }
+  return `${base}${next}`;
+}
+
+// Defensive normalization: collapse exact repeated copies (2x/3x) caused by upstream replay.
+function collapseRepeatedAnswer(raw: string): string {
+  const text = String(raw ?? "");
+  const trimmed = text.trim();
+  if (!trimmed) return text;
+
+  if (trimmed.length % 2 === 0) {
+    const half = trimmed.length / 2;
+    if (trimmed.slice(0, half) === trimmed.slice(half)) return trimmed.slice(0, half);
+  }
+  if (trimmed.length % 3 === 0) {
+    const third = trimmed.length / 3;
+    const a = trimmed.slice(0, third);
+    if (a === trimmed.slice(third, third * 2) && a === trimmed.slice(third * 2)) return a;
+  }
+  return text;
+}
+
 export default function DeepThinkPage() {
   const [workspace, setWorkspace] = useState<DeepThinkWorkspace>("business");
   useEffect(() => {
@@ -788,7 +826,7 @@ export default function DeepThinkPage() {
           if (!delta) return;
           setResult((prev) => ({
             trace_id: prev?.trace_id ?? "",
-            answer: `${prev?.answer ?? ""}${delta}`,
+            answer: mergeStreamAnswer(String(prev?.answer ?? ""), delta),
             citations: prev?.citations ?? []
           }));
           return;
@@ -831,6 +869,16 @@ export default function DeepThinkPage() {
         }
         if (eventName === "analysis_brief") {
           setAnalysisBrief(payload as AnalysisBrief);
+          return;
+        }
+        if (eventName === "done") {
+          const answer = String(payload?.answer ?? "");
+          if (!answer) return;
+          setResult((prev) => ({
+            trace_id: String(payload?.trace_id ?? prev?.trace_id ?? ""),
+            answer: collapseRepeatedAnswer(mergeStreamAnswer(String(prev?.answer ?? ""), answer)),
+            citations: prev?.citations ?? [],
+          }));
           return;
         }
         if (eventName === "knowledge_persisted") {
@@ -1549,6 +1597,7 @@ export default function DeepThinkPage() {
     }
     return Array.from(dedup.values()).slice(0, 6);
   }, [result]);
+  const normalizedReportAnswer = useMemo(() => collapseRepeatedAnswer(String(result?.answer ?? "")), [result?.answer]);
   const intelEvidenceRows = useMemo(
     () =>
       (intelCard?.evidence ?? []).map((row, idx) => ({
@@ -1872,8 +1921,8 @@ export default function DeepThinkPage() {
     priority: task.priority,
     priority_label: getPriorityLabel(String(task.priority ?? ""))
   }));
-  const deepOpinionRows = (latestDeepRound?.opinions ?? []).map((opinion) => ({
-    key: `${opinion.agent_id}-${opinion.created_at}-${opinion.signal}`,
+  const deepOpinionRows = (latestDeepRound?.opinions ?? []).map((opinion, idx) => ({
+    key: `${latestDeepRound?.round_id ?? "round"}-${opinion.agent_id}-${opinion.created_at}-${opinion.signal}-${idx}`,
     agent_id: opinion.agent_id,
     agent_meta: getAgentMeta(String(opinion.agent_id)),
     signal: opinion.signal,
@@ -1928,8 +1977,8 @@ export default function DeepThinkPage() {
         if (needComplianceVeto && opinion.agent_id === "compliance_agent") return true;
         return false;
       })
-      .map((opinion) => ({
-        key: `${latestDeepRound.round_id}-conflict-${opinion.agent_id}`,
+      .map((opinion, idx) => ({
+        key: `${latestDeepRound.round_id}-conflict-${opinion.agent_id}-${idx}`,
         agent_id: opinion.agent_id,
         agent_meta: getAgentMeta(String(opinion.agent_id)),
         signal: opinion.signal,
@@ -1966,60 +2015,6 @@ export default function DeepThinkPage() {
       {!isConsoleWorkspace ? (
         <>
       <motion.section
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-        className="hero-video-section"
-      >
-        <video className="hero-video-media" autoPlay muted loop playsInline preload="metadata">
-          <source src={HERO_VIDEO_URL} type="video/mp4" />
-        </video>
-        <div className="hero-video-mask" />
-        <div className="hero-video-content">
-          <Tag color="processing">Live Research Experience</Tag>
-          <Title level={1} style={{ margin: 0, color: "#ffffff" }}>
-            DeepThink 多Agent深度研判台
-          </Title>
-          <Paragraph style={{ margin: 0, color: "rgba(255,255,255,0.86)", maxWidth: 640 }}>
-            这里聚焦深度分析执行链路：多角色协商、证据追溯、流式过程可见与结果可回放。
-          </Paragraph>
-          <Space>
-            <Button type="primary" size="large" onClick={scrollToAnalysisPanel}>
-              进入分析面板
-            </Button>
-            <Button size="large" ghost>
-              查看能力链路
-            </Button>
-          </Space>
-        </div>
-      </motion.section>
-
-      <motion.section
-        initial={{ opacity: 0, y: 14 }}
-        whileInView={{ opacity: 1, y: 0 }}
-        viewport={{ once: true, amount: 0.3 }}
-        transition={{ duration: 0.45 }}
-        className="banner-marquee"
-      >
-        <div className="banner-track">
-          {[...bannerItems, ...bannerItems].map((item, idx) => (
-            <span key={`${item}-${idx}`} className="banner-chip">
-              {item}
-            </span>
-          ))}
-        </div>
-      </motion.section>
-
-      <motion.section
-        initial={{ opacity: 0, y: 18 }}
-        whileInView={{ opacity: 1, y: 0 }}
-        viewport={{ once: true, amount: 0.25 }}
-        transition={{ duration: 0.45 }}
-      >
-        <MediaCarousel items={storySlides} />
-      </motion.section>
-
-      <motion.section
         initial={{ opacity: 0, y: 14 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4 }}
@@ -2028,9 +2023,9 @@ export default function DeepThinkPage() {
         <Card className="premium-card" style={{ background: "linear-gradient(132deg, rgba(255,255,255,0.98), rgba(246,249,252,0.95))" }}>
           <Space direction="vertical" size={8} style={{ width: "100%" }}>
             <Tag color="processing" style={{ width: "fit-content" }}>Agent-Native Research Workspace</Tag>
-            <Title level={2} style={{ margin: 0, color: "#0f172a" }}>A股智能研判工作台</Title>
+            <Title level={2} style={{ margin: 0, color: "#0f172a" }}>DeepThink 多Agent深度研判台</Title>
             <Paragraph style={{ margin: 0, color: "#475569", maxWidth: 760 }}>
-              实时行情、历史趋势、事件时间线和可追溯证据在同一视图联动，避免“只给结论没有依据”的伪分析。
+              实时行情、历史趋势、事件时间线和可追溯证据在同一视图联动，避免"只给结论没有依据"的伪分析。
             </Paragraph>
           </Space>
         </Card>
@@ -2068,8 +2063,7 @@ export default function DeepThinkPage() {
         viewport={{ once: true, amount: 0.2 }}
         transition={{ duration: 0.5 }}
       >
-        <Row gutter={[14, 14]}>
-          <Col xs={24} xl={14}>
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
             <div ref={analysisPanelRef}>
               <Card className="premium-card" style={{ borderColor: "rgba(15,23,42,0.12)" }}>
               <Space direction="vertical" style={{ width: "100%" }}>
@@ -2168,7 +2162,7 @@ export default function DeepThinkPage() {
             {error ? <Alert style={{ marginTop: 12 }} message={error} type="error" showIcon /> : null}
 
             {result ? (
-              <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>分析主报告（可验证）</span>} style={{ marginTop: 12 }}>
+              <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>分析主报告（可验证）</span>}>
                 <Space style={{ marginBottom: 8 }}>
                   <Tag color={streamSource === "external_llm_stream" ? "green" : streamSource === "local_fallback_stream" ? "gold" : "default"}>
                     {streamSource === "external_llm_stream"
@@ -2184,13 +2178,14 @@ export default function DeepThinkPage() {
                   <Tag color="cyan">Provider：{activeProvider || "unknown"}</Tag>
                   <Tag>API：{activeApiStyle || "unknown"}</Tag>
                 </Space>
-                <pre style={{ whiteSpace: "pre-wrap", color: "#0f172a", margin: 0, maxHeight: 420, overflowY: "auto" }}>{result.answer}</pre>
+                <SafeContainer maxHeight={600}>
+                  <pre style={{ whiteSpace: "pre-wrap", color: "#0f172a", margin: 0 }}>{normalizedReportAnswer}</pre>
+                </SafeContainer>
                 <Text style={{ color: "#64748b" }}>trace_id: {result.trace_id}</Text>
               </Card>
             ) : null}
-          </Col>
 
-          <Col xs={24} xl={10} style={{ alignSelf: "flex-start", position: "sticky", top: 88 }}>
+          <Space direction="vertical" size={0} style={{ width: "100%" }}>
             <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>实时快照</span>}>
               <Row gutter={10}>
                 <Col span={12}>
@@ -2272,19 +2267,21 @@ export default function DeepThinkPage() {
 
             {result?.citations?.length ? (
               <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>证据引用</span>} style={{ marginTop: 12 }}>
-                <List
-                  size="small"
-                  dataSource={result.citations}
-                  renderItem={(x) => (
-                    <List.Item>
-                      <Space direction="vertical" size={1}>
-                        <Text style={{ color: "#0f172a" }}>{x.source_id}</Text>
-                        <a href={x.source_url} target="_blank" rel="noreferrer" style={{ color: "#2563eb" }}>{x.source_url}</a>
-                        <Text style={{ color: "#64748b" }}>{x.excerpt}</Text>
-                      </Space>
-                    </List.Item>
-                  )}
-                />
+                <SafeContainer maxHeight={400}>
+                  <List
+                    size="small"
+                    dataSource={result.citations}
+                    renderItem={(x) => (
+                      <List.Item>
+                        <Space direction="vertical" size={1}>
+                          <Text style={{ color: "#0f172a" }}>{x.source_id}</Text>
+                          <a href={x.source_url} target="_blank" rel="noreferrer" style={{ color: "#2563eb" }}>{x.source_url}</a>
+                          <Text style={{ color: "#64748b" }}>{x.excerpt}</Text>
+                        </Space>
+                      </List.Item>
+                    )}
+                  />
+                </SafeContainer>
               </Card>
             ) : null}
 
@@ -2301,25 +2298,27 @@ export default function DeepThinkPage() {
                     ) : null}
                   </Space>
                   {sharedKnowledgeHits.length ? (
-                    <List
-                      size="small"
-                      dataSource={sharedKnowledgeHits}
-                      renderItem={(item) => {
-                        const sourceId = String(item.source_id ?? "");
-                        const hitType = sourceId === "qa_memory_summary" ? "历史问答摘要" : "文档语料";
-                        return (
-                          <List.Item>
-                            <Space direction="vertical" size={1}>
-                              <Space wrap>
-                                <Tag color={hitType === "历史问答摘要" ? "purple" : "cyan"}>{hitType}</Tag>
-                                <Text style={{ color: "#0f172a" }}>{sourceId}</Text>
+                    <SafeContainer maxHeight={400}>
+                      <List
+                        size="small"
+                        dataSource={sharedKnowledgeHits}
+                        renderItem={(item) => {
+                          const sourceId = String(item.source_id ?? "");
+                          const hitType = sourceId === "qa_memory_summary" ? "历史问答摘要" : "文档语料";
+                          return (
+                            <List.Item>
+                              <Space direction="vertical" size={1}>
+                                <Space wrap>
+                                  <Tag color={hitType === "历史问答摘要" ? "purple" : "cyan"}>{hitType}</Tag>
+                                  <Text style={{ color: "#0f172a" }}>{sourceId}</Text>
+                                </Space>
+                                <Text style={{ color: "#64748b" }}>{String(item.excerpt ?? "").slice(0, 120)}</Text>
                               </Space>
-                              <Text style={{ color: "#64748b" }}>{String(item.excerpt ?? "").slice(0, 120)}</Text>
-                            </Space>
-                          </List.Item>
-                        );
-                      }}
-                    />
+                            </List.Item>
+                          );
+                        }}
+                      />
+                    </SafeContainer>
                   ) : (
                     <Text style={{ color: "#64748b" }}>
                       本轮回答暂未命中共享语料，仅基于实时拉取数据与当前上下文生成。可通过上传资料或历史问答沉淀提升复用率。
@@ -2557,38 +2556,42 @@ export default function DeepThinkPage() {
                     </Card>
 
                     <Card size="small" title={<span style={{ color: "#0f172a" }}>证据链路（粗排+精排归因）</span>}>
-                      <Table
-                        rowKey="key"
-                        pagination={false}
-                        dataSource={intelEvidenceRows}
-                        scroll={{ x: 960 }}
-                        columns={[
-                          { title: "来源", dataIndex: "source_id", key: "source_id" },
-                          { title: "轨道", dataIndex: "retrieval_track", key: "retrieval_track" },
-                          {
-                            title: "可信度",
-                            dataIndex: "reliability_score",
-                            key: "reliability_score",
-                            render: (v: number) => Number(v ?? 0).toFixed(2),
-                          },
-                          {
-                            title: "摘要",
-                            dataIndex: "summary",
-                            key: "summary",
-                            render: (v: string) => <Text style={{ color: "#334155" }}>{String(v ?? "").slice(0, 90)}</Text>,
-                          },
-                          {
-                            title: "链接",
-                            dataIndex: "source_url",
-                            key: "source_url",
-                            render: (v: string) => (
-                              <a href={v} target="_blank" rel="noreferrer" style={{ color: "#2563eb" }}>
-                                查看来源
-                              </a>
-                            ),
-                          },
-                        ]}
-                      />
+                      <SafeContainer maxHeight={500}>
+                        <Table
+                          rowKey="key"
+                          pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: ['10', '20', '50'] }}
+                          dataSource={intelEvidenceRows}
+                          scroll={{ x: 960 }}
+                          columns={[
+                            { title: "来源", dataIndex: "source_id", key: "source_id", width: 120 },
+                            { title: "轨道", dataIndex: "retrieval_track", key: "retrieval_track", width: 100 },
+                            {
+                              title: "可信度",
+                              dataIndex: "reliability_score",
+                              key: "reliability_score",
+                              width: 90,
+                              render: (v: number) => Number(v ?? 0).toFixed(2),
+                            },
+                            {
+                              title: "摘要",
+                              dataIndex: "summary",
+                              key: "summary",
+                              render: (v: string) => <Text style={{ color: "#334155" }}>{String(v ?? "").slice(0, 90)}</Text>,
+                            },
+                            {
+                              title: "链接",
+                              dataIndex: "source_url",
+                              key: "source_url",
+                              width: 100,
+                              render: (v: string) => (
+                                <a href={v} target="_blank" rel="noreferrer" style={{ color: "#2563eb" }}>
+                                  查看来源
+                                </a>
+                              ),
+                            },
+                          ]}
+                        />
+                      </SafeContainer>
                     </Card>
 
                     <Card size="small" title={<span style={{ color: "#0f172a" }}>数据新鲜度</span>}>
@@ -2664,8 +2667,8 @@ export default function DeepThinkPage() {
                 )}
               </Space>
             </Card>
-          </Col>
-        </Row>
+          </Space>
+        </Space>
       </motion.section>
         </>
       ) : null}
@@ -3222,35 +3225,37 @@ export default function DeepThinkPage() {
                   <Text style={{ color: "#64748b" }}>
                     作用：展示本轮各 Agent 的任务分工与优先级，判断当前轮次在解决什么问题。
                   </Text>
-                  <Table
-                    size="small"
-                    pagination={false}
-                    locale={{ emptyText: "无任务图数据" }}
-                    dataSource={deepTaskRows}
-                    columns={[
-                      { title: "任务ID", dataIndex: "task_id", key: "task_id", width: 110 },
-                      {
-                        title: "Agent",
-                        dataIndex: "agent_meta",
-                        key: "agent_meta",
-                        width: 170,
-                        render: (_: unknown, row: any) => (
-                          <Space direction="vertical" size={0}>
-                            <Text style={{ color: "#0f172a" }}>{row.agent_meta?.name ?? row.agent}</Text>
-                            <Text style={{ color: "#64748b" }}>{row.agent_meta?.role ?? row.agent}</Text>
-                          </Space>
-                        )
-                      },
-                      { title: "任务说明", dataIndex: "title", key: "title" },
-                      {
-                        title: "优先级",
-                        dataIndex: "priority",
-                        key: "priority",
-                        width: 100,
-                        render: (v: string) => <Tag color={v === "high" ? "red" : v === "medium" ? "gold" : "blue"}>{getPriorityLabel(v)}</Tag>
-                      }
-                    ]}
-                  />
+                  <SafeContainer maxHeight={400}>
+                    <Table
+                      size="small"
+                      pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: ['10', '20'] }}
+                      locale={{ emptyText: "无任务图数据" }}
+                      dataSource={deepTaskRows}
+                      columns={[
+                        { title: "任务ID", dataIndex: "task_id", key: "task_id", width: 110 },
+                        {
+                          title: "Agent",
+                          dataIndex: "agent_meta",
+                          key: "agent_meta",
+                          width: 170,
+                          render: (_: unknown, row: any) => (
+                            <Space direction="vertical" size={0}>
+                              <Text style={{ color: "#0f172a" }}>{row.agent_meta?.name ?? row.agent}</Text>
+                              <Text style={{ color: "#64748b" }}>{row.agent_meta?.role ?? row.agent}</Text>
+                            </Space>
+                          )
+                        },
+                        { title: "任务说明", dataIndex: "title", key: "title" },
+                        {
+                          title: "优先级",
+                          dataIndex: "priority",
+                          key: "priority",
+                          width: 100,
+                          render: (v: string) => <Tag color={v === "high" ? "red" : v === "medium" ? "gold" : "blue"}>{getPriorityLabel(v)}</Tag>
+                        }
+                      ]}
+                    />
+                  </SafeContainer>
                 </Card>
               </>
             )}
@@ -3261,41 +3266,43 @@ export default function DeepThinkPage() {
             {effectiveConsoleMode === "analysis" ? (
               <>
                 <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>关键 Agent 观点（业务版）</span>}>
-                  <Table
-                    size="small"
-                    pagination={false}
-                    locale={{ emptyText: "暂无观点数据" }}
-                    dataSource={deepOpinionRows}
-                    columns={[
-                      {
-                        title: "角色",
-                        dataIndex: "agent_meta",
-                        key: "agent_meta",
-                        width: 186,
-                        render: (_: unknown, row: any) => (
-                          <Space direction="vertical" size={0}>
-                            <Text style={{ color: "#0f172a" }}>{row.agent_meta?.name ?? row.agent_id}</Text>
-                            <Text style={{ color: "#64748b" }}>{row.agent_meta?.role ?? row.agent_id}</Text>
-                          </Space>
-                        )
-                      },
-                      {
-                        title: "观点",
-                        dataIndex: "signal",
-                        key: "signal",
-                        width: 84,
-                        render: (v: string) => <Tag color={v === "buy" ? "green" : v === "reduce" ? "red" : "blue"}>{getSignalLabel(v)}</Tag>
-                      },
-                      {
-                        title: "置信度",
-                        dataIndex: "confidence",
-                        key: "confidence",
-                        width: 88,
-                        render: (v: number) => v.toFixed(3)
-                      },
-                      { title: "关键理由", dataIndex: "reason", key: "reason" }
-                    ]}
-                  />
+                  <SafeContainer maxHeight={500}>
+                    <Table
+                      size="small"
+                      pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: ['10', '20', '50'] }}
+                      locale={{ emptyText: "暂无观点数据" }}
+                      dataSource={deepOpinionRows}
+                      columns={[
+                        {
+                          title: "角色",
+                          dataIndex: "agent_meta",
+                          key: "agent_meta",
+                          width: 186,
+                          render: (_: unknown, row: any) => (
+                            <Space direction="vertical" size={0}>
+                              <Text style={{ color: "#0f172a" }}>{row.agent_meta?.name ?? row.agent_id}</Text>
+                              <Text style={{ color: "#64748b" }}>{row.agent_meta?.role ?? row.agent_id}</Text>
+                            </Space>
+                          )
+                        },
+                        {
+                          title: "观点",
+                          dataIndex: "signal",
+                          key: "signal",
+                          width: 84,
+                          render: (v: string) => <Tag color={v === "buy" ? "green" : v === "reduce" ? "red" : "blue"}>{getSignalLabel(v)}</Tag>
+                        },
+                        {
+                          title: "置信度",
+                          dataIndex: "confidence",
+                          key: "confidence",
+                          width: 88,
+                          render: (v: number) => v.toFixed(3)
+                        },
+                        { title: "关键理由", dataIndex: "reason", key: "reason" }
+                      ]}
+                    />
+                  </SafeContainer>
                 </Card>
                 <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>冲突与行动提示</span>} style={{ marginTop: 12 }}>
                   <Space direction="vertical" size={8} style={{ width: "100%" }}>
@@ -3387,49 +3394,52 @@ export default function DeepThinkPage() {
                   <Text style={{ color: "#64748b" }}>
                     作用：查看各角色对同一标的的动作建议与置信度，快速定位谁在拉高/拉低共识。
                   </Text>
-                  <Table
-                    size="small"
-                    pagination={false}
-                    locale={{ emptyText: "暂无观点数据" }}
-                    dataSource={deepOpinionRows}
-                    columns={[
-                      {
-                        title: "Agent",
-                        dataIndex: "agent_meta",
-                        key: "agent_meta",
-                        width: 168,
-                        render: (_: unknown, row: any) => (
-                          <Space direction="vertical" size={0}>
-                            <Text style={{ color: "#0f172a" }}>{row.agent_meta?.name ?? row.agent_id}</Text>
-                            <Text style={{ color: "#64748b" }}>{row.agent_id}</Text>
-                          </Space>
-                        )
-                      },
-                      {
-                        title: "Signal",
-                        dataIndex: "signal",
-                        key: "signal",
-                        width: 92,
-                        render: (v: string) => <Tag color={v === "buy" ? "green" : v === "reduce" ? "red" : "blue"}>{v}</Tag>
-                      },
-                      {
-                        title: "Confidence",
-                        dataIndex: "confidence",
-                        key: "confidence",
-                        width: 104,
-                        render: (v: number) => v.toFixed(3)
-                      }
-                    ]}
-                  />
+                  <SafeContainer maxHeight={400}>
+                    <Table
+                      size="small"
+                      pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: ['10', '20'] }}
+                      locale={{ emptyText: "暂无观点数据" }}
+                      dataSource={deepOpinionRows}
+                      columns={[
+                        {
+                          title: "Agent",
+                          dataIndex: "agent_meta",
+                          key: "agent_meta",
+                          width: 168,
+                          render: (_: unknown, row: any) => (
+                            <Space direction="vertical" size={0}>
+                              <Text style={{ color: "#0f172a" }}>{row.agent_meta?.name ?? row.agent_id}</Text>
+                              <Text style={{ color: "#64748b" }}>{row.agent_id}</Text>
+                            </Space>
+                          )
+                        },
+                        {
+                          title: "Signal",
+                          dataIndex: "signal",
+                          key: "signal",
+                          width: 92,
+                          render: (v: string) => <Tag color={v === "buy" ? "green" : v === "reduce" ? "red" : "blue"}>{v}</Tag>
+                        },
+                        {
+                          title: "Confidence",
+                          dataIndex: "confidence",
+                          key: "confidence",
+                          width: 104,
+                          render: (v: number) => v.toFixed(3)
+                        }
+                      ]}
+                    />
+                  </SafeContainer>
                 </Card>
 
                 <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>跨轮次观点差分</span>} style={{ marginTop: 12 }}>
-                  <Table
-                    size="small"
-                    pagination={false}
-                    locale={{ emptyText: "至少执行两轮后可查看差分" }}
-                    dataSource={deepOpinionDiffRows}
-                    columns={[
+                  <SafeContainer maxHeight={400}>
+                    <Table
+                      size="small"
+                      pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: ['10', '20'] }}
+                      locale={{ emptyText: "至少执行两轮后可查看差分" }}
+                      dataSource={deepOpinionDiffRows}
+                      columns={[
                       {
                         title: "Agent",
                         dataIndex: "agent_meta",
@@ -3465,15 +3475,17 @@ export default function DeepThinkPage() {
                       }
                     ]}
                   />
+                  </SafeContainer>
                 </Card>
 
                 <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>冲突源下钻（证据视角）</span>} style={{ marginTop: 12 }}>
-                  <Table
-                    size="small"
-                    pagination={false}
-                    locale={{ emptyText: "暂无冲突观点可下钻" }}
-                    dataSource={deepConflictDrillRows}
-                    columns={[
+                  <SafeContainer maxHeight={400}>
+                    <Table
+                      size="small"
+                      pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: ['10', '20'] }}
+                      locale={{ emptyText: "暂无冲突观点可下钻" }}
+                      dataSource={deepConflictDrillRows}
+                      columns={[
                       {
                         title: "Agent",
                         dataIndex: "agent_meta",
@@ -3498,30 +3510,33 @@ export default function DeepThinkPage() {
                       { title: "Evidence IDs", dataIndex: "evidence_ids", key: "evidence_ids" }
                     ]}
                   />
+                  </SafeContainer>
                 </Card>
 
                 <Card className="premium-card" title={<span style={{ color: "#0f172a" }}>SSE 回放事件</span>} style={{ marginTop: 12 }}>
                   <Text style={{ color: "#64748b" }}>
                     当前筛选：round={deepArchiveRoundId ? deepArchiveRoundId : "all"} | event={deepArchiveEventName || "all"} | limit={deepArchiveLimit} | cursor={deepArchiveCursor} | from={deepArchiveCreatedFrom || "-"} | to={deepArchiveCreatedTo || "-"}
                   </Text>
-                  <List
-                    size="small"
-                    locale={{ emptyText: "暂无流事件记录" }}
-                    dataSource={deepReplayRows}
-                    renderItem={(item) => (
-                      <List.Item>
-                        <Space direction="vertical" size={1}>
-                          <Space>
-                            <Tag color="processing">{item.event}</Tag>
-                            <Text style={{ color: "#64748b" }}>{item.emitted_at}</Text>
+                  <SafeContainer maxHeight={400}>
+                    <List
+                      size="small"
+                      locale={{ emptyText: "暂无流事件记录" }}
+                      dataSource={deepReplayRows}
+                      renderItem={(item) => (
+                        <List.Item>
+                          <Space direction="vertical" size={1}>
+                            <Space>
+                              <Tag color="processing">{item.event}</Tag>
+                              <Text style={{ color: "#64748b" }}>{item.emitted_at}</Text>
+                            </Space>
+                            <Text style={{ color: "#475569" }}>
+                              {JSON.stringify(item.data).slice(0, 180)}
+                            </Text>
                           </Space>
-                          <Text style={{ color: "#475569" }}>
-                            {JSON.stringify(item.data).slice(0, 180)}
-                          </Text>
-                        </Space>
-                      </List.Item>
-                    )}
-                  />
+                        </List.Item>
+                      )}
+                    />
+                  </SafeContainer>
                 </Card>
               </>
             )}
@@ -3675,4 +3690,3 @@ export default function DeepThinkPage() {
     </main>
   );
 }
-

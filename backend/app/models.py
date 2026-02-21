@@ -118,3 +118,33 @@ class PredictRunResponse(BaseModel):
     as_of_date: str
     horizons: list[str]
     results: list[PredictItem]
+
+
+class PredictExplainRequest(BaseModel):
+    """预测解释请求 DTO（对应 `/v1/predict/explain`）。"""
+
+    run_id: str = Field(min_length=1)
+    stock_code: str = ""
+    horizon: str = "20d"
+
+
+class PredictExplainResponse(BaseModel):
+    """预测解释响应 DTO。"""
+
+    run_id: str
+    trace_id: str
+    stock_code: str
+    horizon: str
+    signal: str
+    risk_tier: str
+    expected_excess_return: float
+    up_probability: float
+    summary: str
+    drivers: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    actions: list[str] = Field(default_factory=list)
+    llm_used: bool = False
+    provider: str = ""
+    model: str = ""
+    degraded_reason: str = ""
+    generated_at: str
